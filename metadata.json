@@ -1,0 +1,6 @@
+{
+  "name": "TradeSync MT5 - Automated Copy Trading Platform",
+  "description": "Professional MetaTrader 5 trade copying SaaS with multi-tier parent-child synchronization, custom risk controls, Supabase persistence, and FastAPI engine bridge.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
