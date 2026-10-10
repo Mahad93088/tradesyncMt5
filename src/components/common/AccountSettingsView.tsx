@@ -13,12 +13,21 @@ import {
   RefreshCw,
   Terminal,
   Sliders,
-  Smartphone
+  Smartphone,
+  Cloud,
+  Database,
+  ArrowRight
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabaseDataService, MigrationResult } from '../../services/supabaseDataService';
 
 export const AccountSettingsView: React.FC = () => {
-  const { currentUser, mentorProfiles, updateCurrentUserProfile } = useApp();
+  const { currentUser, mentorProfiles, updateCurrentUserProfile, setIsAuthModalOpen } = useApp();
+  const { isCloudMode, isConfigured, isAuthenticated, user: authUser } = useAuth();
+
+  const [migrating, setMigrating] = useState(false);
+  const [migrationResult, setMigrationResult] = useState<MigrationResult | null>(null);
 
   const isMentor = currentUser.role === 'mentor';
   const isTrader = currentUser.role === 'trader';
@@ -95,6 +104,14 @@ export const AccountSettingsView: React.FC = () => {
     setApiToken(rand);
   };
 
+  const handleMigrateLocal = async () => {
+    if (!currentUser.id) return;
+    setMigrating(true);
+    const res = await supabaseDataService.migrateLocalDataToCloud(currentUser.id);
+    setMigrating(false);
+    setMigrationResult(res);
+  };
+
   return (
     <div className="space-y-6 max-w-4xl">
       {/* Top Header */}
@@ -108,6 +125,100 @@ export const AccountSettingsView: React.FC = () => {
         <p className="text-xs text-slate-400 mt-0.5">
           Manage your personal profile, secure credentials, notification settings, and local MT5 bridge tokens.
         </p>
+      </div>
+
+      {/* Supabase Cloud Persistence & Role Security Card */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Cloud className="h-4 w-4 text-sky-400" />
+            <h3 className="text-sm font-semibold text-slate-100">Database Persistence & Role Security</h3>
+          </div>
+          <span
+            className={`rounded border text-[10px] px-2 py-0.5 font-mono uppercase font-semibold ${
+              isCloudMode
+                ? 'border-emerald-800 bg-emerald-950 text-emerald-400'
+                : 'border-amber-800 bg-amber-950 text-amber-400'
+            }`}
+          >
+            {isCloudMode ? 'PostgreSQL Cloud Mode' : 'Local Demo Mode'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+            <span className="text-slate-500 block text-[11px]">Database Engine:</span>
+            <span className="text-slate-200 font-semibold mt-0.5 block">
+              {isCloudMode ? 'Supabase PostgreSQL' : 'Browser LocalStorage'}
+            </span>
+            <span className="text-[10px] text-slate-400 mt-1 block">
+              {isCloudMode ? 'Real-time multi-terminal persistence' : 'Volatile in-browser state'}
+            </span>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+            <span className="text-slate-500 block text-[11px]">Enforced Security:</span>
+            <span className="text-emerald-400 font-semibold mt-0.5 block flex items-center gap-1">
+              <Shield className="h-3.5 w-3.5" /> Row-Level Security (RLS)
+            </span>
+            <span className="text-[10px] text-slate-400 mt-1 block">
+              Traders & Mentors isolated via SQL policies
+            </span>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+            <span className="text-slate-500 block text-[11px]">Privilege Governance:</span>
+            <span className="text-sky-300 font-semibold font-mono uppercase mt-0.5 block">
+              {currentUser.role} Role
+            </span>
+            <span className="text-[10px] text-slate-400 mt-1 block">
+              Admin promotions restricted to server API
+            </span>
+          </div>
+        </div>
+
+        {/* Local-to-Cloud Migration Feature */}
+        <div className="rounded-lg border border-sky-900/40 bg-sky-950/20 p-3.5 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <span className="font-semibold text-sky-200 flex items-center gap-1.5">
+              <Database className="h-3.5 w-3.5 text-sky-400" />
+              Migrate Local Demo Portfolio to Cloud
+            </span>
+            <p className="text-slate-400 text-[11px] leading-relaxed">
+              Copy accounts and trade records from browser storage directly into Supabase tables under your authenticated user ID.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white transition-colors"
+            >
+              Auth Settings
+            </button>
+            <button
+              onClick={handleMigrateLocal}
+              disabled={migrating || !isCloudMode}
+              className="rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 px-3 py-1.5 text-xs font-semibold text-white transition-colors flex items-center gap-1.5"
+            >
+              {migrating ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
+              <span>{migrating ? 'Migrating...' : 'Sync to Cloud'}</span>
+            </button>
+          </div>
+        </div>
+
+        {migrationResult && (
+          <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs font-mono space-y-1">
+            <div className="text-emerald-400">✓ Accounts synced: {migrationResult.accountsMigrated}</div>
+            <div className="text-emerald-400">✓ Trades synced: {migrationResult.tradesMigrated}</div>
+            {migrationResult.errors.length > 0 && (
+              <div className="text-amber-400 pt-1">
+                {migrationResult.errors.map((e, idx) => (
+                  <div key={idx}>Notice: {e}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Profile Details Section */}

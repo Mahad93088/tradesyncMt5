@@ -237,3 +237,12 @@ export interface MentorEditPayload {
   monthlyFee: number;
   maxFollowers: number;
 }
+
+export interface TraderEditPayload {
+  fullName: string;
+  email: string;
+  username?: string;
+  phone?: string;
+  mentorId?: string;
+  status?: AccountStatus;
+}

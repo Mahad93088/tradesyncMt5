@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for Phase 1: Supabase Backend Integration & Role-Based Access Control (RBAC) hardening. Specifies secure signups (public signup strictly defaults to Trader role, preventing self-assigned Admin), server-side admin promotion, database-enforced Row-Level Security (RLS) for Admins, Mentors, and Traders, MT5 credentials encryption/masking, dual-mode fallback with demo simulator retention, and clear phase boundaries.",
+  "updatedAt":  "2026-10-10T12:20:20.732858951Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

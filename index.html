@@ -3,6 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        try {
+          var originalFetch = window.fetch;
+          var _currentFetch = originalFetch ? originalFetch.bind(window) : undefined;
+          Object.defineProperty(window, 'fetch', {
+            configurable: true,
+            enumerable: true,
+            get: function() {
+              return _currentFetch;
+            },
+            set: function(val) {
+              _currentFetch = val;
+            }
+          });
+        } catch (e) {}
+
+        window.addEventListener('error', function(event) {
+          if (event.filename && (event.filename.indexOf('chrome-extension://') !== -1 || event.filename.indexOf('moz-extension://') !== -1)) {
+            event.preventDefault();
+          }
+        });
+      })();
+    </script>
     <title>TradeSync MT5 - Automated Copy Trading Platform</title>
     <meta name="description" content="Professional MetaTrader 5 trade copying SaaS with multi-tier parent-child synchronization, custom risk controls, Supabase persistence, and FastAPI engine bridge." />
     <meta property="og:title" content="TradeSync MT5 - Automated Copy Trading Platform" />

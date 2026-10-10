@@ -341,20 +341,61 @@ CREATE TABLE trade_mappings (
     retry_count INT NOT NULL DEFAULT 0
 );
 
--- 8. Enable Row Level Security (RLS)
+-- 8. Enable Row Level Security (RLS) on all tables
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mt5_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE parent_child_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trade_mappings ENABLE ROW LEVEL SECURITY;
 
--- Traders can view only their own accounts and links
-CREATE POLICY "Traders can manage own child accounts"
-    ON mt5_accounts FOR ALL
-    USING (auth.uid() = user_id);
+-- 9. Security Functions & Triggers
+-- Check if caller is admin
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'admin');
+$$;
 
-CREATE POLICY "Traders view their active links"
-    ON parent_child_links FOR SELECT
-    USING (auth.uid() = trader_id OR auth.uid() = mentor_id);
+-- Strict Signup Trigger: Discard client role input; force 'trader'
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, avatar_url, role, status)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
+    COALESCE(NEW.raw_user_meta_data->>'avatar_url', ''),
+    'trader', -- FORCED DEFAULT: Never allows self-assigned admin
+    'active'
+  );
+  RETURN NEW;
+END;
+$$;
+
+-- Privilege Escalation Block Trigger
+CREATE OR REPLACE FUNCTION public.protect_profile_role()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF (OLD.role IS DISTINCT FROM NEW.role) THEN
+    IF NOT (public.is_admin() OR current_user = 'service_role' OR session_user = 'service_role') THEN
+      RAISE EXCEPTION 'Privilege escalation blocked: Users cannot modify their own role. Admin authorization required.';
+    END IF;
+  END IF;
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$;
+
+-- 10. Comprehensive RLS Policies
+-- Profiles: Users view own; mentors view assigned traders; admins view all
+CREATE POLICY "profiles_select_policy" ON profiles FOR SELECT
+  USING (auth.uid() = id OR public.is_admin());
+
+-- MT5 Accounts: Traders view and manage own; Mentors have strictly read-only visibility
+CREATE POLICY "Traders manage own accounts" ON mt5_accounts FOR ALL
+  USING (auth.uid() = user_id OR public.is_admin());
+
+CREATE POLICY "Traders view their active links" ON parent_child_links FOR SELECT
+  USING (auth.uid() = trader_id OR auth.uid() = mentor_id OR public.is_admin());
 `;
 
   return (

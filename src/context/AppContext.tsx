@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { supabaseDataService } from '../services/supabaseDataService';
 import {
   User,
   UserRole,
@@ -16,7 +18,8 @@ import {
   PlatformNotification,
   LotSettings,
   OrderType,
-  MentorEditPayload
+  MentorEditPayload,
+  TraderEditPayload
 } from '../types';
 import {
   INITIAL_USERS,
@@ -50,6 +53,8 @@ interface AppContextType {
   notifications: PlatformNotification[];
   isArchitectureModalOpen: boolean;
   setIsArchitectureModalOpen: (open: boolean) => void;
+  isAuthModalOpen: boolean;
+  setIsAuthModalOpen: (open: boolean) => void;
 
   // Role Switching
   switchRole: (role: UserRole, specificUserId?: string) => void;
@@ -63,6 +68,12 @@ interface AppContextType {
     planId?: string
   ) => User;
   editMentorProfile: (mentorUserId: string, payload: MentorEditPayload) => void;
+  createTrader: (
+    user: { fullName: string; email: string; username?: string; phone?: string; status?: AccountStatus },
+    mentorId?: string,
+    planId?: string
+  ) => User;
+  editTrader: (traderUserId: string, payload: TraderEditPayload) => void;
 
   // MT5 Actions
   connectMT5Account: (accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>) => void;
@@ -83,8 +94,14 @@ interface AppContextType {
   cancelSubscription: (subscriptionId: string) => void;
 
   // Trade Copy Engine Simulation
-  simulateParentOrder: (symbol: string, type: OrderType, lots: number) => void;
-  simulateParentClose: (ticket: number) => void;
+  simulateParentOrder: (
+    symbol: string,
+    type: OrderType,
+    lots: number
+  ) => { success: boolean; message: string; ticket?: number; childCount?: number };
+  simulateParentClose: (
+    ticket: number
+  ) => { success: boolean; message: string; closedTicket?: number; childCount?: number };
   simulateErrorEvent: (scenario: 'slippage' | 'margin' | 'disconnect') => void;
   clearSyncLogs: () => void;
   resetDemoData: () => void;
@@ -163,7 +180,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : INITIAL_NOTIFICATIONS;
   });
 
+  const { user: authUser, isCloudMode, isConfigured } = useAuth();
   const [isArchitectureModalOpen, setIsArchitectureModalOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Synchronize currentUser with authenticated Supabase user in Cloud Mode
+  useEffect(() => {
+    if (isCloudMode && authUser) {
+      setCurrentUser(authUser);
+    }
+  }, [isCloudMode, authUser]);
 
   // Sync to local storage on changes
   useEffect(() => {
@@ -198,8 +224,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('tradesync_subscriptions', JSON.stringify(subscriptions));
   }, [subscriptions]);
 
+  useEffect(() => {
+    localStorage.setItem('tradesync_trade_mappings', JSON.stringify(tradeMappings));
+  }, [tradeMappings]);
+
+  useEffect(() => {
+    localStorage.setItem('tradesync_health', JSON.stringify(systemHealth));
+  }, [systemHealth]);
+
+  useEffect(() => {
+    localStorage.setItem('tradesync_notifications', JSON.stringify(notifications));
+  }, [notifications]);
+
   // Switch role helper
   const switchRole = (role: UserRole, specificUserId?: string) => {
+    if (isCloudMode && authUser.role !== 'admin') {
+      const notif: PlatformNotification = {
+        id: `notif_${Date.now()}`,
+        title: 'Role Switching Restricted in Cloud Mode',
+        message: 'Your authenticated Supabase role is strictly governed by PostgreSQL Row-Level Security. Self-assigned admin or unauthorized role alteration is blocked.',
+        type: 'warning',
+        timestamp: new Date().toISOString(),
+        read: false,
+        targetRole: authUser.role
+      };
+      setNotifications((prev) => [notif, ...prev]);
+      return;
+    }
     if (specificUserId) {
       const target = users.find((u) => u.id === specificUserId);
       if (target) {
@@ -426,6 +477,253 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
+  const createTrader = (
+    user: {
+      fullName: string;
+      email: string;
+      username?: string;
+      phone?: string;
+      status?: AccountStatus;
+    },
+    mentorId?: string,
+    planId?: string
+  ): User => {
+    const newUserId = `user_trader_${Date.now()}`;
+    const cleanUsername = (user.username || user.fullName.toLowerCase().replace(/[^a-z0-9]/g, '_') || `trader_${Math.floor(Math.random() * 1000)}`).replace(/^@/, '');
+    const initialStatus: AccountStatus = user.status || 'active';
+
+    const newUser: User = {
+      id: newUserId,
+      email: user.email.trim(),
+      fullName: user.fullName.trim(),
+      username: cleanUsername,
+      role: 'trader',
+      status: initialStatus,
+      createdAt: new Date().toISOString(),
+      phone: user.phone || '+1 (555) 000-0000',
+      avatarUrl: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`
+    };
+
+    // Auto-provision demo MT5 child account for immediate terminal readiness
+    const newMT5Account: MT5Account = {
+      id: `mt5_acc_child_${Date.now()}`,
+      userId: newUserId,
+      accountRole: 'child',
+      accountNumber: `${Math.floor(20000000 + Math.random() * 80000000)}`,
+      broker: 'MetaQuotes-Demo',
+      server: 'MetaQuotes-Demo-Server',
+      accountType: 'demo',
+      balance: 10000,
+      equity: 10000,
+      margin: 0,
+      freeMargin: 10000,
+      currency: 'USD',
+      leverage: 100,
+      connectionStatus: initialStatus === 'suspended' ? 'disconnected' : 'connected',
+      pingMs: 22,
+      lastHeartbeat: new Date().toISOString(),
+      isInvestorPassword: false,
+      autoTradingEnabled: initialStatus !== 'suspended',
+      lastStatusUpdate: 'Just now'
+    };
+
+    setUsers((prev) => [newUser, ...prev]);
+    setMt5Accounts((prev) => [newMT5Account, ...prev]);
+
+    // If a mentor was selected, establish the follower copy link
+    if (mentorId) {
+      const mentorUser = users.find((u) => u.id === mentorId);
+      const mentorProfile = mentorProfiles.find((p) => p.userId === mentorId);
+      const parentAcc = mt5Accounts.find((a) => a.userId === mentorId && a.accountRole === 'parent');
+
+      const newLink: ParentChildLink = {
+        id: `link_${Date.now()}`,
+        mentorId: mentorId,
+        traderId: newUserId,
+        mentorName: mentorUser?.fullName || mentorProfile?.displayName || 'Assigned Mentor',
+        traderName: newUser.fullName,
+        parentAccountId: parentAcc?.id || 'mt5_parent_default',
+        childAccountId: newMT5Account.id,
+        status: initialStatus === 'suspended' ? 'paused' : 'active',
+        lotSettings: {
+          mode: 'parent_lot',
+          customType: 'fixed',
+          fixedLot: 0.1,
+          multiplier: 1.0,
+          riskPercent: 1.0,
+          maxLotCap: 5.0,
+          minLotClamp: 0.01,
+          maxDrawdownProtectionPercent: 15,
+          copyPendingOrders: true,
+          syncSlTp: true,
+          slippageMaxPips: 3
+        },
+        linkedAt: new Date().toISOString(),
+        totalTradesCopied: 0,
+        totalProfitUSD: 0,
+        lastSyncAt: new Date().toISOString()
+      };
+
+      setParentChildLinks((prev) => [newLink, ...prev]);
+
+      // Update mentor profile followers count
+      if (mentorProfile) {
+        setMentorProfiles((prev) =>
+          prev.map((m) => (m.userId === mentorId ? { ...m, totalFollowers: m.totalFollowers + 1 } : m))
+        );
+      }
+    }
+
+    // Add sync log
+    const log: SyncLog = {
+      id: `log_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'TRADER_ACCOUNT_PROVISIONED',
+      level: 'info',
+      details: `Super Admin provisioned trader follower: ${newUser.fullName} (@${cleanUsername}) with ${initialStatus} status${mentorId ? ` linked to mentor ${mentorId}` : ''}.`
+    };
+    setSyncLogs((prev) => [log, ...prev]);
+
+    // Add audit log
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: 'TRADER_PROVISIONED',
+      targetResource: 'Trader Account',
+      targetId: newUserId,
+      result: 'success',
+      details: `Provisioned trader follower account for ${newUser.fullName} (@${cleanUsername})${mentorId ? ` with assigned mentor` : ''} (${initialStatus}).`
+    });
+
+    // In-app notification
+    const newNotification: PlatformNotification = {
+      id: `notif_${Date.now()}`,
+      title: 'Trader Account Provisioned',
+      message: `${newUser.fullName} (@${cleanUsername}) was registered as a follower trader.`,
+      type: 'info',
+      timestamp: new Date().toISOString(),
+      read: false,
+      targetRole: 'admin'
+    };
+    setNotifications((prev) => [newNotification, ...prev]);
+
+    return newUser;
+  };
+
+  const editTrader = (traderUserId: string, payload: TraderEditPayload) => {
+    setUsers((prev) =>
+      prev.map((u) => {
+        if (u.id === traderUserId) {
+          return {
+            ...u,
+            fullName: payload.fullName,
+            email: payload.email,
+            username: payload.username ? payload.username.replace(/^@/, '') : u.username,
+            phone: payload.phone !== undefined ? payload.phone : u.phone,
+            status: payload.status !== undefined ? payload.status : u.status
+          };
+        }
+        return u;
+      })
+    );
+
+    // If mentor assignment changed
+    if (payload.mentorId !== undefined) {
+      const existingLinkIndex = parentChildLinks.findIndex((l) => l.traderId === traderUserId);
+      if (payload.mentorId === '') {
+        // Unlink trader
+        if (existingLinkIndex >= 0) {
+          const removedLink = parentChildLinks[existingLinkIndex];
+          setParentChildLinks((prev) => prev.filter((l) => l.traderId !== traderUserId));
+          setMentorProfiles((prev) =>
+            prev.map((m) =>
+              m.userId === removedLink.mentorId ? { ...m, totalFollowers: Math.max(0, m.totalFollowers - 1) } : m
+            )
+          );
+        }
+      } else {
+        const mentorUser = users.find((u) => u.id === payload.mentorId);
+        const mentorProfile = mentorProfiles.find((p) => p.userId === payload.mentorId);
+        const parentAcc = mt5Accounts.find((a) => a.userId === payload.mentorId && a.accountRole === 'parent');
+        const childAcc = mt5Accounts.find((a) => a.userId === traderUserId && a.accountRole === 'child');
+
+        if (existingLinkIndex >= 0) {
+          // Reassign existing link
+          const oldMentorId = parentChildLinks[existingLinkIndex].mentorId;
+          setParentChildLinks((prev) =>
+            prev.map((l) => {
+              if (l.traderId === traderUserId) {
+                return {
+                  ...l,
+                  mentorId: payload.mentorId!,
+                  mentorName: mentorUser?.fullName || mentorProfile?.displayName || 'Assigned Mentor',
+                  parentAccountId: parentAcc?.id || l.parentAccountId
+                };
+              }
+              return l;
+            })
+          );
+          if (oldMentorId !== payload.mentorId) {
+            setMentorProfiles((prev) =>
+              prev.map((m) => {
+                if (m.userId === oldMentorId) return { ...m, totalFollowers: Math.max(0, m.totalFollowers - 1) };
+                if (m.userId === payload.mentorId) return { ...m, totalFollowers: m.totalFollowers + 1 };
+                return m;
+              })
+            );
+          }
+        } else {
+          // Create new link
+          const newLink: ParentChildLink = {
+            id: `link_${Date.now()}`,
+            mentorId: payload.mentorId,
+            traderId: traderUserId,
+            mentorName: mentorUser?.fullName || mentorProfile?.displayName || 'Assigned Mentor',
+            traderName: payload.fullName,
+            parentAccountId: parentAcc?.id || 'mt5_parent_default',
+            childAccountId: childAcc?.id || 'mt5_child_default',
+            status: payload.status === 'suspended' ? 'paused' : 'active',
+            lotSettings: {
+              mode: 'parent_lot',
+              customType: 'fixed',
+              fixedLot: 0.1,
+              multiplier: 1.0,
+              riskPercent: 1.0,
+              maxLotCap: 5.0,
+              minLotClamp: 0.01,
+              maxDrawdownProtectionPercent: 15,
+              copyPendingOrders: true,
+              syncSlTp: true,
+              slippageMaxPips: 3
+            },
+            linkedAt: new Date().toISOString(),
+            totalTradesCopied: 0,
+            totalProfitUSD: 0,
+            lastSyncAt: new Date().toISOString()
+          };
+          setParentChildLinks((prev) => [newLink, ...prev]);
+          if (mentorProfile) {
+            setMentorProfiles((prev) =>
+              prev.map((m) => (m.userId === payload.mentorId ? { ...m, totalFollowers: m.totalFollowers + 1 } : m))
+            );
+          }
+        }
+      }
+    }
+
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: 'TRADER_ACCOUNT_UPDATED',
+      targetResource: 'Trader Account',
+      targetId: traderUserId,
+      result: 'success',
+      details: `Updated trader follower account for ${payload.fullName}.`
+    });
+  };
+
   // MT5 Actions
   const connectMT5Account = (accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>) => {
     const newAccount: MT5Account = {
@@ -437,6 +735,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setMt5Accounts((prev) => [newAccount, ...prev]);
+
+    // Asynchronously persist to Supabase PostgreSQL if in Cloud Mode
+    if (isCloudMode && currentUser?.id) {
+      supabaseDataService.addAccount({
+        user_id: currentUser.id,
+        account_number: newAccount.accountNumber,
+        broker_server: newAccount.server,
+        broker_name: newAccount.broker,
+        account_role: newAccount.accountRole,
+        account_type: newAccount.accountType,
+        balance: newAccount.balance,
+        equity: newAccount.equity,
+        margin: newAccount.margin,
+        free_margin: newAccount.freeMargin,
+        currency: newAccount.currency,
+        leverage: newAccount.leverage,
+        connection_status: newAccount.connectionStatus,
+        ping_ms: newAccount.pingMs,
+        is_investor_password: newAccount.isInvestorPassword,
+        auto_trading_enabled: newAccount.autoTradingEnabled
+      }).then(({ error }) => {
+        if (error) {
+          console.warn('Supabase persistence notice:', error);
+        }
+      });
+    }
 
     const log: SyncLog = {
       id: `log_${Date.now()}`,
@@ -771,21 +1095,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Trade Copy Engine Simulation
-  const simulateParentOrder = (symbol: string, type: OrderType, lots: number) => {
-    const parentTicket = Math.floor(92840000 + Math.random() * 9999);
-    const parentAccount = mt5Accounts.find(
-      (a) => a.accountRole === 'parent' && a.userId === currentUser.id
-    ) || mt5Accounts.find((a) => a.accountRole === 'parent' && a.connectionStatus === 'connected');
+  const simulateParentOrder = (
+    symbol: string,
+    type: OrderType,
+    lots: number
+  ): { success: boolean; message: string; ticket?: number; childCount?: number } => {
+    // Determine active parent MT5 account
+    let parentAccount = mt5Accounts.find(
+      (a) => a.accountRole === 'parent' && a.userId === currentUser.id && a.connectionStatus === 'connected'
+    );
 
-    if (!parentAccount) {
-      alert('No connected Parent MT5 account available to initiate trade!');
-      return;
+    // If current user is a mentor but their terminal is offline
+    if (!parentAccount && currentUser.role === 'mentor') {
+      const offlineMentorAcc = mt5Accounts.find(
+        (a) => a.accountRole === 'parent' && a.userId === currentUser.id
+      );
+      if (offlineMentorAcc) {
+        return {
+          success: false,
+          message: `Your Parent terminal #${offlineMentorAcc.accountNumber} is offline. Reconnect the terminal in the Mentor console to dispatch signals.`
+        };
+      }
     }
 
-    // Determine mock prices
-    let currentPrice = symbol === 'XAUUSD' ? 2645.5 : symbol === 'EURUSD' ? 1.0845 : 39450.0;
-    let sl = type.startsWith('BUY') ? currentPrice * 0.995 : currentPrice * 1.005;
-    let tp = type.startsWith('BUY') ? currentPrice * 1.015 : currentPrice * 0.985;
+    // Fall back to first connected parent terminal
+    if (!parentAccount) {
+      parentAccount = mt5Accounts.find(
+        (a) => a.accountRole === 'parent' && a.connectionStatus === 'connected'
+      );
+    }
+
+    // Fall back to any parent account
+    if (!parentAccount) {
+      parentAccount = mt5Accounts.find((a) => a.accountRole === 'parent');
+    }
+
+    if (!parentAccount) {
+      return {
+        success: false,
+        message: 'No Parent MT5 account found in the system. Please configure a Parent terminal first.'
+      };
+    }
+
+    const parentTicket = Math.floor(92840000 + Math.random() * 9999);
+
+    // Determine mock prices with realistic tick jitter
+    let basePrice = symbol === 'XAUUSD' ? 2646.50 : symbol === 'EURUSD' ? 1.08450 : 39450.00;
+    const jitter = (Math.random() - 0.5) * (symbol === 'XAUUSD' ? 1.5 : symbol === 'EURUSD' ? 0.0004 : 12.0);
+    const currentPrice = Number((basePrice + jitter).toFixed(symbol === 'EURUSD' ? 5 : 2));
+    const sl = Number((type.startsWith('BUY') ? currentPrice * 0.995 : currentPrice * 1.005).toFixed(symbol === 'EURUSD' ? 5 : 2));
+    const tp = Number((type.startsWith('BUY') ? currentPrice * 1.015 : currentPrice * 0.985).toFixed(symbol === 'EURUSD' ? 5 : 2));
 
     const parentTrade: Trade = {
       id: `trade_p_${Date.now()}`,
@@ -805,16 +1164,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       comment: 'Parent Live Order'
     };
 
-    // Find all active links for this parent account
-    const activeLinks = parentChildLinks.filter(
+    // Find all active links for this parent account or mentor
+    let activeLinks = parentChildLinks.filter(
       (l) => l.parentAccountId === parentAccount.id && l.status === 'active'
     );
+
+    if (activeLinks.length === 0) {
+      activeLinks = parentChildLinks.filter(
+        (l) => l.mentorId === parentAccount.userId && l.status === 'active'
+      );
+    }
+
+    if (activeLinks.length === 0) {
+      activeLinks = parentChildLinks.filter((l) => l.status === 'active');
+    }
 
     const newMappings: TradeMapping[] = [];
     const newChildTrades: Trade[] = [];
     const newLogs: SyncLog[] = [];
 
-    // Log parent detection
+    // Log parent detection in sync logs
     newLogs.push({
       id: `log_p_${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -823,6 +1192,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details: `FastAPI Bridge detected Parent Ticket #${parentTicket}: ${type} ${lots.toFixed(2)} ${symbol} @ ${currentPrice}`,
       ticket: parentTicket
     });
+
+    let totalLatency = 0;
 
     activeLinks.forEach((link) => {
       const childAccount = mt5Accounts.find((a) => a.id === link.childAccountId);
@@ -870,7 +1241,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } else if (settings.customType === 'multiplier') {
           childLots = Number((lots * settings.multiplier).toFixed(2));
         } else if (settings.customType === 'risk_percent') {
-          // approx 1% of $10,000 = $100 risk => ~0.2 lots on standard FX
           childLots = Number(((childAccount.equity * (settings.riskPercent / 100)) / 500).toFixed(2));
         }
       }
@@ -884,6 +1254,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       const latency = Math.floor(18 + Math.random() * 28); // 18ms - 46ms
+      totalLatency += latency;
       const childTicket = Math.floor(41000000 + Math.random() * 99999);
 
       const childTrade: Trade = {
@@ -941,26 +1312,88 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTradeMappings((prev) => [...newMappings, ...prev]);
     setSyncLogs((prev) => [...newLogs, ...prev]);
 
+    // Update parentChildLinks trade counters
+    if (newChildTrades.length > 0) {
+      setParentChildLinks((prev) =>
+        prev.map((l) => {
+          if (activeLinks.some((al) => al.id === l.id)) {
+            return {
+              ...l,
+              totalTradesCopied: l.totalTradesCopied + 1,
+              lastSyncAt: new Date().toISOString()
+            };
+          }
+          return l;
+        })
+      );
+    }
+
+    // Platform notification
+    const newNotif: PlatformNotification = {
+      id: `notif_${Date.now()}`,
+      targetRole: 'all',
+      title: `Simulated ${type} Signal (${symbol})`,
+      message: `Parent #${parentTicket} ${type} ${lots.toFixed(2)} lots ${symbol} mirrored to ${newChildTrades.length} follower child accounts.`,
+      type: 'success',
+      timestamp: new Date().toISOString(),
+      read: false
+    };
+    setNotifications((prev) => [newNotif, ...prev]);
+
+    // Audit log
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: 'SIMULATED_TRADE_DISPATCHED',
+      targetResource: 'MT5Trade',
+      targetId: String(parentTicket),
+      result: 'success',
+      details: `FastAPI simulated signal: ${type} ${lots.toFixed(2)} ${symbol} @ ${currentPrice} on Parent #${parentTicket}. Mirrored to ${newChildTrades.length} child terminals.`
+    });
+
     // Update system health
+    const avgLat = newChildTrades.length > 0 ? Math.round(totalLatency / newChildTrades.length) : 24;
     setSystemHealth((prev) => ({
       ...prev,
       lastSyncTimestamp: new Date().toISOString(),
+      averageCopyLatencyMs: Math.round((prev.averageCopyLatencyMs + avgLat) / 2),
       queueDepth: 0,
       uptimeSeconds: prev.uptimeSeconds + 5
     }));
+
+    return {
+      success: true,
+      message: `Dispatched ${type} ${lots.toFixed(2)} ${symbol} (Parent #${parentTicket}) — mirrored to ${newChildTrades.length} follower account(s).`,
+      ticket: parentTicket,
+      childCount: newChildTrades.length
+    };
   };
 
-  const simulateParentClose = (ticket: number) => {
+  const simulateParentClose = (
+    ticket: number
+  ): { success: boolean; message: string; closedTicket?: number; childCount?: number } => {
     // Find parent trade
-    const parentTrade = trades.find((t) => t.ticket === ticket);
-    if (!parentTrade) return;
+    const parentTrade = trades.find((t) => t.ticket === ticket && t.status === 'OPEN');
+    if (!parentTrade) {
+      return {
+        success: false,
+        message: `Active trade #${ticket} not found or already closed.`
+      };
+    }
 
-    // Find all child mappings
+    // Find all child mappings and child trades
     const relatedMappings = tradeMappings.filter((m) => m.parentTradeTicket === ticket);
-
-    const childTickets = relatedMappings
+    const mappedChildTickets = relatedMappings
       .filter((m) => m.childTradeTicket > 0)
       .map((m) => m.childTradeTicket);
+
+    const childTradesToClose = trades.filter(
+      (t) =>
+        t.status === 'OPEN' &&
+        (mappedChildTickets.includes(t.ticket) || t.comment === `TS-COPY:#${ticket}`)
+    );
+    const childTickets = childTradesToClose.map((t) => t.ticket);
 
     const closeProfit = Math.floor(80 + Math.random() * 350);
 
@@ -971,7 +1404,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...t,
             status: 'CLOSED',
             profit: closeProfit,
-            closeTime: new Date().toISOString()
+            closeTime: new Date().toISOString(),
+            closePrice: t.currentPrice
           };
         }
         if (childTickets.includes(t.ticket)) {
@@ -979,10 +1413,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...t,
             status: 'CLOSED',
             profit: Number((closeProfit * (t.lots / (parentTrade.lots || 1))).toFixed(2)),
-            closeTime: new Date().toISOString()
+            closeTime: new Date().toISOString(),
+            closePrice: t.currentPrice
           };
         }
         return t;
+      })
+    );
+
+    // Update mappings
+    setTradeMappings((prev) =>
+      prev.map((m) => {
+        if (m.parentTradeTicket === ticket) {
+          return {
+            ...m,
+            status: 'CLOSED' as any
+          };
+        }
+        return m;
+      })
+    );
+
+    // Update parentChildLinks profit
+    setParentChildLinks((prev) =>
+      prev.map((l) => {
+        const ct = childTradesToClose.find((c) => c.accountId === l.childAccountId);
+        if (ct) {
+          const addedProfit = Number((closeProfit * (ct.lots / (parentTrade.lots || 1))).toFixed(2));
+          return {
+            ...l,
+            totalProfitUSD: Number((l.totalProfitUSD + addedProfit).toFixed(2)),
+            lastSyncAt: new Date().toISOString()
+          };
+        }
+        return l;
       })
     );
 
@@ -990,11 +1454,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `log_close_${Date.now()}`,
       timestamp: new Date().toISOString(),
       eventType: 'POSITION_CLOSED_SYNC',
-      level: 'info',
-      details: `Parent ticket #${ticket} closed in profit (+$${closeProfit}). Successfully closed ${childTickets.length} mapped child positions across followers.`,
+      level: 'success',
+      details: `Parent ticket #${ticket} closed in profit (+$${closeProfit.toFixed(2)}). Successfully closed ${childTickets.length} mapped follower positions.`,
       ticket
     };
     setSyncLogs((prev) => [log, ...prev]);
+
+    // Audit log
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: 'SIMULATED_TRADE_CLOSED',
+      targetResource: 'MT5Trade',
+      targetId: String(ticket),
+      result: 'success',
+      details: `Closed parent trade #${ticket} (${parentTrade.symbol}) with +$${closeProfit.toFixed(2)} profit. Synchronized close across ${childTickets.length} follower child accounts.`
+    });
+
+    // Notification
+    const closeNotif: PlatformNotification = {
+      id: `notif_${Date.now()}`,
+      targetRole: 'all',
+      title: `Position #${ticket} Closed`,
+      message: `Closed parent trade #${ticket} (${parentTrade.symbol}) with +$${closeProfit.toFixed(2)} profit across ${childTickets.length} follower(s).`,
+      type: 'info',
+      timestamp: new Date().toISOString(),
+      read: false
+    };
+    setNotifications((prev) => [closeNotif, ...prev]);
+
+    return {
+      success: true,
+      message: `Parent trade #${ticket} and ${childTickets.length} follower position(s) closed successfully in profit (+$${closeProfit.toFixed(2)}).`,
+      closedTicket: ticket,
+      childCount: childTickets.length
+    };
   };
 
   const simulateErrorEvent = (scenario: 'slippage' | 'margin' | 'disconnect') => {
@@ -1125,11 +1620,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         notifications,
         isArchitectureModalOpen,
         setIsArchitectureModalOpen,
+        isAuthModalOpen,
+        setIsAuthModalOpen,
         switchRole,
         updateCurrentUserProfile,
         toggleUserStatus,
         createMentor,
         editMentorProfile,
+        createTrader,
+        editTrader,
         connectMT5Account,
         disconnectMT5Account,
         reconnectMT5Account,

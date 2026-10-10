@@ -25,11 +25,13 @@ import { StatusBadge } from '../common/StatusBadge';
 interface AdminDashboardProps {
   onNavigateTab: (tab: string) => void;
   onOpenCreateMentor: () => void;
+  onOpenAddTrader?: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onNavigateTab,
-  onOpenCreateMentor
+  onOpenCreateMentor,
+  onOpenAddTrader
 }) => {
   const {
     users,
@@ -37,6 +39,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     mt5Accounts,
     subscriptions,
     parentChildLinks,
+    trades,
     tradeMappings,
     syncLogs,
     auditLogs,
@@ -70,6 +73,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const totalExecuted = tradeMappings.filter((m) => m.status === 'EXECUTED').length;
   const failedTrades = tradeMappings.filter((m) => m.status !== 'EXECUTED').length;
+  const openSignals = trades.filter((t) => t.status === 'OPEN').length;
 
   const handleBroadcast = (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,6 +117,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <Plus className="h-3.5 w-3.5" />
             <span>Provision Mentor</span>
           </button>
+          {onOpenAddTrader && (
+            <button
+              onClick={onOpenAddTrader}
+              className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Add Trader</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -169,8 +182,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       </div>
 
-      {/* User and Subscription Status Breakdown */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+      {/* User, Subscription, Connection, and Signal Status Breakdown */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
             User Accounts Status
@@ -213,6 +226,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div>Conn: <strong className="text-emerald-400">{connectedMT5}</strong></div>
             <div>Off: <strong className="text-slate-400">{disconnectedMT5}</strong></div>
             <div>Err: <strong className="text-rose-400">{errorMT5}</strong></div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+            Copy Signals & Latency
+          </span>
+          <div className="flex items-baseline gap-2 pt-1">
+            <span className="font-mono text-2xl font-bold text-slate-100">{trades.length}</span>
+            <span className="text-xs text-slate-400">Total Deals</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
+            <div>Open Signals: <strong className="text-emerald-400">{openSignals}</strong></div>
+            <div>Executed: <strong className="text-sky-400">{totalExecuted}</strong></div>
+            <div>Failed: <strong className="text-rose-400">{failedTrades}</strong></div>
+            <div>Latency: <strong className="text-slate-200">{systemHealth.averageCopyLatencyMs}ms</strong></div>
           </div>
         </div>
       </div>

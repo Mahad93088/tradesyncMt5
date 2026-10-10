@@ -41,7 +41,8 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     parentChildLinks,
     trades,
     tradeMappings,
-    syncLogs
+    syncLogs,
+    simulateParentClose
   } = useApp();
 
   const [copiedCode, setCopiedCode] = useState(false);
@@ -254,11 +255,21 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                           </div>
                         </div>
 
-                        <div className="text-right font-mono text-xs">
-                          <div className={t.profit >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                            {t.profit >= 0 ? '+' : ''}${t.profit.toFixed(2)}
+                        <div className="flex items-center gap-3">
+                          <div className="text-right font-mono text-xs">
+                            <div className={t.profit >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                              {t.profit >= 0 ? '+' : ''}${t.profit.toFixed(2)}
+                            </div>
+                            <span className="text-[10px] text-slate-500">Ticket #{t.ticket}</span>
                           </div>
-                          <span className="text-[10px] text-slate-500">Ticket #{t.ticket}</span>
+                          <button
+                            type="button"
+                            onClick={() => simulateParentClose(t.ticket)}
+                            className="rounded border border-amber-800/80 bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 px-2 py-1 text-[10px] font-semibold transition-colors shadow-sm"
+                            title="Close position and mirror close to linked subscribers"
+                          >
+                            Close
+                          </button>
                         </div>
                       </div>
                     ))}

@@ -1,15 +1,18 @@
 import React, { useState } from 'react';
+import { AuthProvider } from './contexts/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { Navbar } from './components/common/Navbar';
 import { Sidebar } from './components/common/Sidebar';
 import { SimulationToolbar } from './components/common/SimulationToolbar';
 import { ArchitectureModal } from './components/common/ArchitectureModal';
+import { AuthModal } from './components/common/AuthModal';
 
 // Admin Views
 import { AdminDashboard } from './components/admin/AdminDashboard';
 import { MentorsManagement } from './components/admin/MentorsManagement';
 import { ProvisionMentorModal } from './components/admin/ProvisionMentorModal';
 import { TradersManagement } from './components/admin/TradersManagement';
+import { AddTraderModal } from './components/admin/AddTraderModal';
 import { SubscriptionPlansView } from './components/admin/SubscriptionPlansView';
 import { AccountRelationshipsView } from './components/admin/AccountRelationshipsView';
 import { ConnectionsView } from './components/admin/ConnectionsView';
@@ -38,12 +41,20 @@ import { AccountSettingsView } from './components/common/AccountSettingsView';
 import { NotificationsView } from './components/common/NotificationsView';
 
 const AppContent: React.FC = () => {
-  const { currentUser, isArchitectureModalOpen, setIsArchitectureModalOpen, parentChildLinks } = useApp();
+  const {
+    currentUser,
+    isArchitectureModalOpen,
+    setIsArchitectureModalOpen,
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+    parentChildLinks
+  } = useApp();
 
   const [currentTab, setCurrentTab] = useState<string>('overview');
 
   // Modal states
   const [isCreateMentorOpen, setIsCreateMentorOpen] = useState(false);
+  const [isAddTraderOpen, setIsAddTraderOpen] = useState(false);
   const [isConnectParentOpen, setIsConnectParentOpen] = useState(false);
   const [isConnectChildOpen, setIsConnectChildOpen] = useState(false);
   const [isInviteTraderOpen, setIsInviteTraderOpen] = useState(false);
@@ -78,6 +89,7 @@ const AppContent: React.FC = () => {
                   <AdminDashboard
                     onNavigateTab={(tab) => setCurrentTab(tab)}
                     onOpenCreateMentor={() => setIsCreateMentorOpen(true)}
+                    onOpenAddTrader={() => setIsAddTraderOpen(true)}
                   />
                 )}
                 {currentTab === 'mentors' && (
@@ -86,7 +98,12 @@ const AppContent: React.FC = () => {
                     setIsCreateOpen={setIsCreateMentorOpen}
                   />
                 )}
-                {currentTab === 'traders' && <TradersManagement />}
+                {currentTab === 'traders' && (
+                  <TradersManagement
+                    isAddOpen={isAddTraderOpen}
+                    setIsAddOpen={setIsAddTraderOpen}
+                  />
+                )}
                 {currentTab === 'plans' && <SubscriptionPlansView />}
                 {currentTab === 'relationships' && <AccountRelationshipsView />}
                 {currentTab === 'connections' && <ConnectionsView />}
@@ -179,9 +196,22 @@ const AppContent: React.FC = () => {
         }}
       />
 
+      <AddTraderModal
+        isOpen={isAddTraderOpen}
+        onClose={() => setIsAddTraderOpen(false)}
+        onSuccess={() => {
+          setCurrentTab('traders');
+        }}
+      />
+
       <ArchitectureModal
         isOpen={isArchitectureModalOpen}
         onClose={() => setIsArchitectureModalOpen(false)}
+      />
+
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
       />
 
       <ConnectParentAccountModal
@@ -212,8 +242,10 @@ const AppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <AppContent />
-    </AppProvider>
+    <AuthProvider>
+      <AppProvider>
+        <AppContent />
+      </AppProvider>
+    </AuthProvider>
   );
 }

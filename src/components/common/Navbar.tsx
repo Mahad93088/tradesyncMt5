@@ -11,9 +11,14 @@ import {
   Shield,
   RefreshCw,
   Terminal,
-  ShieldAlert
+  ShieldAlert,
+  Cloud,
+  Database,
+  LogOut,
+  LogIn
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { UserRole } from '../../types';
 
 export const Navbar: React.FC = () => {
@@ -25,8 +30,19 @@ export const Navbar: React.FC = () => {
     switchRole,
     markNotificationRead,
     setIsArchitectureModalOpen,
+    isAuthModalOpen,
+    setIsAuthModalOpen,
     resetDemoData
   } = useApp();
+
+  const {
+    session,
+    isAuthenticated,
+    isCloudMode,
+    isConfigured,
+    signOut,
+    switchToDemoMode
+  } = useAuth();
 
   const [timeStr, setTimeStr] = useState<string>('');
   const [showRoleMenu, setShowRoleMenu] = useState(false);
@@ -63,12 +79,34 @@ export const Navbar: React.FC = () => {
             </div>
           </div>
 
-          {/* Testnet / Simulation Warning Banner Badge */}
-          <div className="hidden lg:flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-900/90 px-2.5 py-1 text-xs text-slate-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-            <span className="text-slate-400">Environment:</span>
-            <span className="font-medium text-slate-200">Demo / Simulation Mode</span>
-          </div>
+          {/* Cloud vs Demo Status Badge */}
+          {isCloudMode ? (
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="hidden lg:flex items-center gap-1.5 rounded-md border border-emerald-800/80 bg-emerald-950/60 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-900/60 transition-colors"
+              title="Connected to Supabase PostgreSQL Database with Row-Level Security"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <Cloud className="h-3 w-3 text-emerald-400" />
+              <span className="font-semibold text-emerald-200">Supabase Cloud</span>
+              <span className="text-[10px] text-emerald-400/80 font-mono">({currentUser.role.toUpperCase()} RLS)</span>
+            </button>
+          ) : (
+            <div className="hidden lg:flex items-center gap-2">
+              <div className="flex items-center gap-1.5 rounded-md border border-amber-800/60 bg-amber-950/40 px-2.5 py-1 text-xs text-amber-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                <span className="text-amber-400/80">Mode:</span>
+                <span className="font-medium text-amber-200">Local Demo</span>
+              </div>
+              <button
+                onClick={() => setIsAuthModalOpen(true)}
+                className="flex items-center gap-1.5 rounded-md border border-sky-800 bg-sky-950/80 hover:bg-sky-900 px-2 py-0.5 text-xs font-semibold text-sky-300 transition-colors"
+              >
+                <Cloud className="h-3 w-3 text-sky-400" />
+                <span>Connect Cloud</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Right Actions */}
@@ -78,8 +116,22 @@ export const Navbar: React.FC = () => {
             <Server className="h-3.5 w-3.5 text-slate-400" />
             <span className="text-slate-300">{timeStr}</span>
             <span className="text-slate-700">|</span>
-            <span>{systemHealth.activeTerminalsCount} Terminals (Demo)</span>
+            <span>{systemHealth.activeTerminalsCount} Terminals ({isCloudMode ? 'PostgreSQL' : 'Demo'})</span>
           </div>
+
+          {/* Cloud Auth / Account Modal Trigger */}
+          <button
+            onClick={() => setIsAuthModalOpen(true)}
+            className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+              isCloudMode
+                ? 'border-emerald-800/80 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50'
+                : 'border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-850 hover:text-white'
+            }`}
+            title="Supabase Cloud Connection & Role Security"
+          >
+            <Cloud className="h-3.5 w-3.5 text-sky-400" />
+            <span className="hidden sm:inline">{isAuthenticated ? 'Cloud Account' : 'Cloud Auth'}</span>
+          </button>
 
           {/* Backend Spec Modal Trigger */}
           <button
@@ -112,7 +164,9 @@ export const Navbar: React.FC = () => {
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                     System Alerts ({notifications.length})
                   </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Demo Stream</span>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {isCloudMode ? 'Live Audit Stream' : 'Demo Stream'}
+                  </span>
                 </div>
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
                   {notifications.map((notif) => (
@@ -150,7 +204,7 @@ export const Navbar: React.FC = () => {
             )}
           </div>
 
-          {/* Quick Role Switcher */}
+          {/* Quick Role Switcher / User Profile Menu */}
           <div className="relative">
             <button
               onClick={() => setShowRoleMenu(!showRoleMenu)}
@@ -178,44 +232,94 @@ export const Navbar: React.FC = () => {
 
             {showRoleMenu && (
               <div className="absolute right-0 mt-2 w-72 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-2xl z-50">
-                <div className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Switch Role / User Account
-                </div>
-                <div className="space-y-1">
-                  {users.map((u) => (
-                    <button
-                      key={u.id}
-                      onClick={() => {
-                        switchRole(u.role, u.id);
-                        setShowRoleMenu(false);
-                      }}
-                      className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
-                        currentUser.id === u.id
-                          ? 'bg-slate-800 border border-slate-700 text-sky-300'
-                          : 'hover:bg-slate-850 text-slate-300'
-                      }`}
-                    >
-                      <div className="h-6 w-6 rounded-full overflow-hidden bg-slate-800 shrink-0 border border-slate-700 flex items-center justify-center font-bold text-[10px] text-slate-300">
-                        {u.avatarUrl ? (
-                          <img src={u.avatarUrl} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          u.fullName[0]
-                        )}
-                      </div>
-                      <div className="flex-1 truncate">
-                        <div className="font-medium text-slate-100 truncate">{u.fullName}</div>
-                        <div className="text-[10px] text-slate-400 capitalize">
-                          {u.role === 'admin' ? 'Super Admin' : u.role} • {u.status}
-                        </div>
-                      </div>
-                      {currentUser.id === u.id && (
-                        <CheckCircle2 className="h-4 w-4 text-sky-400 shrink-0" />
-                      )}
-                    </button>
-                  ))}
+                <div className="px-2 py-1.5 flex items-center justify-between border-b border-slate-800 mb-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    {isCloudMode ? 'Active Cloud Account' : 'Switch Persona (Demo)'}
+                  </span>
+                  <span className={`text-[9px] font-mono font-semibold px-1.5 py-0.2 rounded border ${
+                    isCloudMode
+                      ? 'border-emerald-800 bg-emerald-950 text-emerald-400'
+                      : 'border-amber-800 bg-amber-950 text-amber-400'
+                  }`}>
+                    {isCloudMode ? 'Cloud Mode' : 'Demo Mode'}
+                  </span>
                 </div>
 
-                <div className="mt-2 pt-2 border-t border-slate-800 px-1">
+                {/* Cloud Mode Identity Summary */}
+                {isCloudMode && (
+                  <div className="p-2 mb-1.5 rounded-lg bg-slate-950 border border-slate-800/80 text-xs">
+                    <p className="text-[11px] text-slate-400 truncate">Email: {currentUser.email}</p>
+                    <p className="text-[11px] text-slate-300 font-semibold mt-0.5">
+                      Role: <span className="text-sky-300 uppercase font-mono">{currentUser.role}</span>
+                    </p>
+                    <p className="text-[10px] text-emerald-400 mt-1 flex items-center gap-1 font-mono">
+                      <CheckCircle2 className="h-3 w-3" /> Database RLS Protected
+                    </p>
+                  </div>
+                )}
+
+                {/* Demo personas (or admin testing personas) */}
+                {(!isCloudMode || currentUser.role === 'admin') && (
+                  <div className="space-y-1">
+                    {users.map((u) => (
+                      <button
+                        key={u.id}
+                        onClick={() => {
+                          switchRole(u.role, u.id);
+                          setShowRoleMenu(false);
+                        }}
+                        className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
+                          currentUser.id === u.id
+                            ? 'bg-slate-800 border border-slate-700 text-sky-300'
+                            : 'hover:bg-slate-850 text-slate-300'
+                        }`}
+                      >
+                        <div className="h-6 w-6 rounded-full overflow-hidden bg-slate-800 shrink-0 border border-slate-700 flex items-center justify-center font-bold text-[10px] text-slate-300">
+                          {u.avatarUrl ? (
+                            <img src={u.avatarUrl} alt="" className="h-full w-full object-cover" />
+                          ) : (
+                            u.fullName[0]
+                          )}
+                        </div>
+                        <div className="flex-1 truncate">
+                          <div className="font-medium text-slate-100 truncate">{u.fullName}</div>
+                          <div className="text-[10px] text-slate-400 capitalize">
+                            {u.role === 'admin' ? 'Super Admin' : u.role} • {u.status}
+                          </div>
+                        </div>
+                        {currentUser.id === u.id && (
+                          <CheckCircle2 className="h-4 w-4 text-sky-400 shrink-0" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-2 pt-2 border-t border-slate-800 space-y-1 px-1">
+                  {isAuthenticated ? (
+                    <button
+                      onClick={async () => {
+                        await signOut();
+                        setShowRoleMenu(false);
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-rose-900/60 bg-rose-950/30 hover:bg-rose-900/40 px-2 py-1.5 text-[11px] text-rose-300 transition-colors"
+                    >
+                      <LogOut className="h-3 w-3" />
+                      Sign Out of Cloud
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setIsAuthModalOpen(true);
+                        setShowRoleMenu(false);
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                    >
+                      <LogIn className="h-3 w-3" />
+                      Sign In / Connect Cloud
+                    </button>
+                  )}
+
                   <button
                     onClick={() => {
                       resetDemoData();
