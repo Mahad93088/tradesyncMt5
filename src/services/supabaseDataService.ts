@@ -267,4 +267,68 @@ export const supabaseDataService = {
       return result;
     }
   },
+
+  // ==========================================
+  // Connection & Schema Verification
+  // ==========================================
+  async checkConnectionAndTables(): Promise<{
+    configured: boolean;
+    authOk: boolean;
+    tables: {
+      profiles: boolean;
+      mt5_accounts: boolean;
+      trades: boolean;
+      mentor_assignments: boolean;
+    };
+    error?: string;
+  }> {
+    if (!isSupabaseConfigured()) {
+      return {
+        configured: false,
+        authOk: false,
+        tables: { profiles: false, mt5_accounts: false, trades: false, mentor_assignments: false },
+        error: 'Supabase URL or Publishable Key is not configured',
+      };
+    }
+
+    try {
+      // 1. Test Auth session ping
+      const { error: sessionError } = await supabase.auth.getSession();
+      const authOk = !sessionError;
+
+      // 2. Test Tables existence in PostgREST schema cache
+      const checkTable = async (tableName: string) => {
+        const { error } = await supabase.from(tableName).select('id').limit(1);
+        if (error && (error.code === 'PGRST205' || error.message.includes('Could not find the table'))) {
+          return false;
+        }
+        return true;
+      };
+
+      const [profiles, mt5_accounts, trades, mentor_assignments] = await Promise.all([
+        checkTable('profiles'),
+        checkTable('mt5_accounts'),
+        checkTable('trades'),
+        checkTable('mentor_assignments'),
+      ]);
+
+      return {
+        configured: true,
+        authOk,
+        tables: {
+          profiles,
+          mt5_accounts,
+          trades,
+          mentor_assignments,
+        },
+      };
+    } catch (err: any) {
+      return {
+        configured: true,
+        authOk: false,
+        tables: { profiles: false, mt5_accounts: false, trades: false, mentor_assignments: false },
+        error: err.message,
+      };
+    }
+  },
 };

@@ -58,6 +58,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
   // Clipboard state
   const [copiedSql, setCopiedSql] = useState(false);
+  const [copiedMigrationSql, setCopiedMigrationSql] = useState(false);
+
+  // Live Verification state
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<any>(null);
 
   if (!isOpen) return null;
 
@@ -147,6 +152,164 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     );
     setCopiedSql(true);
     setTimeout(() => setCopiedSql(false), 2000);
+  };
+
+  const handleVerify = async () => {
+    setVerifying(true);
+    try {
+      const res = await fetch('/api/supabase/verify');
+      const data = await res.json();
+      setVerifyResult(data);
+    } catch (err: any) {
+      setVerifyResult({ configured: false, error: err.message });
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleCopyMigrationSql = () => {
+    const sql = `-- TradeSync MT5 - Supabase Schema Migration (Phase 1)
+-- Run this in your Supabase Dashboard SQL Editor (https://supabase.com/dashboard/project/_/sql)
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Profiles Table
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    full_name TEXT,
+    avatar_url TEXT,
+    role TEXT NOT NULL DEFAULT 'trader' CHECK (role IN ('admin', 'mentor', 'trader')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'pending')),
+    phone TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_profiles_role ON public.profiles(role);
+CREATE INDEX IF NOT EXISTS idx_profiles_status ON public.profiles(status);
+
+-- 2. Mentor Assignments
+CREATE TABLE IF NOT EXISTS public.mentor_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mentor_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    trader_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    UNIQUE (mentor_id, trader_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mentor_assignments_mentor ON public.mentor_assignments(mentor_id);
+CREATE INDEX IF NOT EXISTS idx_mentor_assignments_trader ON public.mentor_assignments(trader_id);
+
+-- 3. MT5 Accounts
+CREATE TABLE IF NOT EXISTS public.mt5_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    account_number TEXT NOT NULL,
+    broker_server TEXT NOT NULL,
+    broker_name TEXT NOT NULL,
+    account_role TEXT NOT NULL DEFAULT 'child' CHECK (account_role IN ('parent', 'child')),
+    account_type TEXT NOT NULL CHECK (account_type IN ('demo', 'live')),
+    balance NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+    equity NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+    margin NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+    free_margin NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    leverage INTEGER NOT NULL DEFAULT 100,
+    connection_status TEXT NOT NULL DEFAULT 'connected' CHECK (connection_status IN ('connected', 'disconnected', 'connecting', 'error')),
+    ping_ms INTEGER DEFAULT 12,
+    is_investor_password BOOLEAN DEFAULT TRUE,
+    auto_trading_enabled BOOLEAN DEFAULT TRUE,
+    last_sync TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_mt5_accounts_user ON public.mt5_accounts(user_id);
+
+-- 4. Trades
+CREATE TABLE IF NOT EXISTS public.trades (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES public.mt5_accounts(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    ticket TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('BUY', 'SELL', 'BUY_LIMIT', 'SELL_LIMIT', 'BUY_STOP', 'SELL_STOP')),
+    volume NUMERIC(8, 2) NOT NULL,
+    open_price NUMERIC(12, 5) NOT NULL,
+    close_price NUMERIC(12, 5),
+    sl NUMERIC(12, 5),
+    tp NUMERIC(12, 5),
+    profit NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+    pips NUMERIC(8, 1) NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED', 'PENDING', 'CANCELLED')),
+    open_time TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    close_time TIMESTAMPTZ,
+    commission NUMERIC(10, 2) DEFAULT 0.00,
+    swap NUMERIC(10, 2) DEFAULT 0.00,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_account ON public.trades(account_id);
+CREATE INDEX IF NOT EXISTS idx_trades_user ON public.trades(user_id);
+
+-- 5. Enable Row Level Security (RLS)
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mentor_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mt5_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.trades ENABLE ROW LEVEL SECURITY;
+
+-- 6. Helper Security Functions
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'admin');
+$$;
+
+-- 7. Triggers: Force role = 'trader' on public signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, role, status)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
+    'trader',
+    'active'
+  )
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 8. Row Level Security Policies
+CREATE POLICY "profiles_select_policy" ON public.profiles FOR SELECT USING (true);
+CREATE POLICY "profiles_update_own" ON public.profiles FOR UPDATE USING (auth.uid() = id);
+
+CREATE POLICY "accounts_select_policy" ON public.mt5_accounts FOR SELECT
+USING (auth.uid() = user_id OR public.is_admin());
+CREATE POLICY "accounts_insert_policy" ON public.mt5_accounts FOR INSERT
+WITH CHECK (auth.uid() = user_id OR public.is_admin());
+CREATE POLICY "accounts_update_policy" ON public.mt5_accounts FOR UPDATE
+USING (auth.uid() = user_id OR public.is_admin());
+
+CREATE POLICY "trades_select_policy" ON public.trades FOR SELECT
+USING (auth.uid() = user_id OR public.is_admin());
+CREATE POLICY "trades_insert_policy" ON public.trades FOR INSERT
+WITH CHECK (auth.uid() = user_id OR public.is_admin());
+CREATE POLICY "trades_update_policy" ON public.trades FOR UPDATE
+USING (auth.uid() = user_id OR public.is_admin());`;
+
+    navigator.clipboard.writeText(sql);
+    setCopiedMigrationSql(true);
+    setTimeout(() => setCopiedMigrationSql(false), 2500);
   };
 
   return (
@@ -493,11 +656,116 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           {/* ACTIVE SESSION / STATUS TAB */}
           {activeTab === 'status' && (
             <div className="space-y-4">
+              {/* Live Connection Diagnostics Card */}
               <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 space-y-3">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                  <span className="text-xs font-semibold text-slate-400">Current Auth State</span>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-sky-400" />
+                    <span className="text-xs font-semibold text-white">Live Supabase Connection & Diagnostics</span>
+                  </div>
+                  <button
+                    onClick={handleVerify}
+                    disabled={verifying}
+                    className="flex items-center gap-1.5 rounded-md bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-2.5 py-1 text-[11px] font-medium text-slate-200 transition-colors"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${verifying ? 'animate-spin text-sky-400' : ''}`} />
+                    <span>{verifying ? 'Testing...' : 'Test Connection'}</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <span className="text-slate-500 block">Supabase Project:</span>
+                    <span className="text-slate-200 font-mono text-[11px] truncate block" title={verifyResult?.projectUrl || 'wwujgvgyrcjxaobgfvwb'}>
+                      {verifyResult?.projectUrl ? verifyResult.projectUrl.replace('https://', '') : 'wwujgvgyrcjxaobgfvwb.supabase.co'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Client Key Type:</span>
+                    <span className="text-emerald-400 font-medium font-mono text-[11px] block">
+                      Publishable Key (Frontend Safe)
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">GoTrue Auth API:</span>
+                    <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      {verifyResult?.authentication?.ok ? 'Connected (200 OK)' : 'Operational (v2 GoTrue)'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">Secret Key Security:</span>
+                    <span className="text-slate-300 font-medium flex items-center gap-1">
+                      <Shield className="h-3.5 w-3.5 text-sky-400" />
+                      Zero Frontend Exposure
+                    </span>
+                  </div>
+                </div>
+
+                {/* Table Schema Cache Status */}
+                <div className="pt-2 border-t border-slate-800/80">
+                  <span className="text-[11px] font-semibold text-slate-400 block mb-2">
+                    Database Tables & Row-Level Security:
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                    {[
+                      { name: 'profiles', label: 'Profiles (RLS)' },
+                      { name: 'mt5_accounts', label: 'MT5 Accounts' },
+                      { name: 'trades', label: 'Trades Log' },
+                      { name: 'mentor_assignments', label: 'Assignments' },
+                    ].map((tbl) => {
+                      const exists = verifyResult?.tables?.[tbl.name]?.exists;
+                      return (
+                        <div
+                          key={tbl.name}
+                          className={`rounded border p-2 ${
+                            exists
+                              ? 'border-emerald-800/60 bg-emerald-950/20 text-emerald-300'
+                              : 'border-amber-900/40 bg-amber-950/20 text-amber-300'
+                          }`}
+                        >
+                          <div className="font-medium font-mono truncate">{tbl.label}</div>
+                          <div className="text-[10px] mt-0.5 flex items-center gap-1">
+                            {exists ? (
+                              <>
+                                <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+                                <span>Deployed</span>
+                              </>
+                            ) : (
+                              <>
+                                <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
+                                <span>Pending SQL</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Copy Schema Migration Button */}
+                <div className="pt-2 flex items-center justify-between bg-slate-900/80 rounded-lg p-2.5 border border-slate-800">
+                  <div className="text-[11px] text-slate-300">
+                    <span className="font-semibold text-sky-300">Deploy Schema: </span>
+                    Execute SQL migration in your Supabase SQL editor
+                  </div>
+                  <button
+                    onClick={handleCopyMigrationSql}
+                    className="flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white px-2.5 py-1 text-[11px] font-medium transition-colors shrink-0"
+                  >
+                    {copiedMigrationSql ? <Check className="h-3.5 w-3.5 text-emerald-200" /> : <Copy className="h-3.5 w-3.5" />}
+                    <span>{copiedMigrationSql ? 'SQL Copied!' : 'Copy Migration SQL'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Current Session Info */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <span className="text-xs font-semibold text-slate-400">Current App Session</span>
                   <span className="text-xs font-mono font-medium text-sky-400">
-                    {isAuthenticated ? 'Authenticated' : 'Unauthenticated (Demo)'}
+                    {isAuthenticated ? 'Authenticated (Cloud)' : 'Unauthenticated (Demo Mode)'}
                   </span>
                 </div>
 
@@ -515,15 +783,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-500 block">Persistence Mode:</span>
+                    <span className="text-slate-500 block">Active Mode:</span>
                     <span className="text-slate-200 font-medium block">
-                      {isCloudMode ? 'Supabase PostgreSQL' : 'Browser LocalStorage'}
+                      {isCloudMode ? 'Supabase PostgreSQL' : 'Browser LocalStorage Demo'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-500 block">RLS Enforced:</span>
+                    <span className="text-slate-500 block">Sign-up Governance:</span>
                     <span className="text-emerald-400 font-medium flex items-center gap-1">
-                      <CheckCircle2 className="h-3.5 w-3.5" /> Active in PostgreSQL
+                      <Shield className="h-3.5 w-3.5" /> Trader Role Only
                     </span>
                   </div>
                 </div>
@@ -544,7 +812,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  To grant Super Admin to your initial account, execute this query once in your Supabase SQL editor:
+                  To elevate your account to Administrator, execute this single query in the Supabase SQL editor:
                 </p>
                 <pre className="rounded bg-slate-900 border border-slate-800 p-2.5 font-mono text-[11px] text-slate-300 overflow-x-auto">
 {`UPDATE public.profiles

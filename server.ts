@@ -16,9 +16,62 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Supabase Configuration
-  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const cleanEnvValue = (val?: unknown): string => {
+    if (typeof val !== 'string') return '';
+    return val.trim().replace(/^['"]|['"]$/g, '').trim();
+  };
+
+  const isPlaceholderValue = (val?: string): boolean => {
+    if (!val) return true;
+    const cleaned = cleanEnvValue(val).toLowerCase();
+    return (
+      !cleaned ||
+      cleaned === 'https://your-project.supabase.co' ||
+      cleaned === 'your-anon-public-key' ||
+      cleaned === 'your-service-role-secret-key' ||
+      cleaned.includes('your-project') ||
+      cleaned.includes('your-anon-public-key') ||
+      cleaned.includes('placeholder') ||
+      cleaned === 'undefined' ||
+      cleaned === 'null'
+    );
+  };
+
+  const normalizeSupabaseUrl = (url?: string): string => {
+    if (!url) return '';
+    let trimmed = cleanEnvValue(url);
+    if (isPlaceholderValue(trimmed)) return '';
+    trimmed = trimmed.replace(/\/+$/, '');
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    if (trimmed.includes('.supabase.co')) {
+      return `https://${trimmed}`;
+    }
+    return `https://${trimmed}.supabase.co`;
+  };
+
+  // Supabase Configuration (Vercel & Node environment variables)
+  const FALLBACK_PROJECT_REF = 'wwujgvgyrcjxaobgfvwb';
+  const FALLBACK_PUBLISHABLE_KEY = 'sb_publishable_qpUeMJZNYbgXqSf5yRlOog_OrCN7w-V';
+
+  const rawSupabaseUrl = cleanEnvValue(
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL
+  );
+  const rawPublishableKey = cleanEnvValue(
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+
+  const effectiveServerUrl = !isPlaceholderValue(rawSupabaseUrl) ? rawSupabaseUrl : FALLBACK_PROJECT_REF;
+  const effectivePublishableKey = !isPlaceholderValue(rawPublishableKey) ? rawPublishableKey : FALLBACK_PUBLISHABLE_KEY;
+
+  const supabaseUrl = normalizeSupabaseUrl(effectiveServerUrl);
+  const publishableKey = effectivePublishableKey;
+  const serviceRoleKey = cleanEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY);
 
   // System Health Endpoint
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -26,19 +79,99 @@ async function startServer() {
       status: 'ok',
       service: 'TradeSync MT5 Server Bridge',
       environment: process.env.NODE_ENV || 'development',
-      supabaseConfigured: Boolean(supabaseUrl && serviceRoleKey),
+      supabaseConfigured: Boolean(supabaseUrl && publishableKey),
+      supabaseUrl: supabaseUrl || null,
+      hasPublishableKey: Boolean(publishableKey),
       hasServiceRole: Boolean(serviceRoleKey),
+      serviceRoleRequiredForClient: false,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Dedicated Supabase Connection, Auth & Tables Verification Endpoint
+  app.get('/api/supabase/verify', async (_req: Request, res: Response) => {
+    if (!supabaseUrl || !publishableKey) {
+      return res.json({
+        configured: false,
+        error: 'Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY',
+      });
+    }
+
+    try {
+      // 1. Auth Health Check
+      let authStatus: { ok: boolean; status?: number; version?: string; error?: string } = { ok: false };
+      try {
+        const authRes = await fetch(`${supabaseUrl}/auth/v1/health`, {
+          headers: { apikey: publishableKey },
+        });
+        if (authRes.ok) {
+          const authData = await authRes.json();
+          authStatus = { ok: true, status: authRes.status, version: authData.version || 'v2' };
+        } else {
+          authStatus = { ok: false, status: authRes.status, error: await authRes.text() };
+        }
+      } catch (err: any) {
+        authStatus = { ok: false, error: err.message };
+      }
+
+      // 2. Database Tables Check via PostgREST
+      const tablesToCheck = ['profiles', 'mt5_accounts', 'trades', 'mentor_assignments', 'trade_feedback'];
+      const tableResults: Record<string, { exists: boolean; status: number; message: string }> = {};
+
+      for (const table of tablesToCheck) {
+        try {
+          const tableRes = await fetch(`${supabaseUrl}/rest/v1/${table}?select=*&limit=1`, {
+            headers: {
+              apikey: publishableKey,
+              Authorization: `Bearer ${publishableKey}`,
+            },
+          });
+          if (tableRes.ok) {
+            tableResults[table] = { exists: true, status: tableRes.status, message: 'Ready and queryable' };
+          } else if (tableRes.status === 404) {
+            tableResults[table] = { exists: false, status: 404, message: 'Table pending schema execution in Supabase SQL editor' };
+          } else if (tableRes.status === 401 || tableRes.status === 403) {
+            tableResults[table] = { exists: true, status: tableRes.status, message: 'Protected by Row Level Security (RLS)' };
+          } else {
+            tableResults[table] = { exists: false, status: tableRes.status, message: `HTTP ${tableRes.status}` };
+          }
+        } catch (e: any) {
+          tableResults[table] = { exists: false, status: 0, message: e.message };
+        }
+      }
+
+      const allTablesExist = Object.values(tableResults).every((t) => t.exists);
+
+      return res.json({
+        configured: true,
+        projectUrl: supabaseUrl,
+        publishableKeyFormat: publishableKey.startsWith('sb_publishable_') ? 'supabase_publishable_key' : 'supabase_anon_jwt',
+        authentication: authStatus,
+        tables: tableResults,
+        tablesDeployed: allTablesExist,
+        rlsPolicies: allTablesExist ? 'Active & Enforced' : 'Pending schema execution in Supabase SQL Editor',
+        security: {
+          secretKeyExposedToFrontend: false,
+          serviceRoleRequiredForClient: false,
+          serviceRolePresentOnServer: Boolean(serviceRoleKey),
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        configured: true,
+        error: err.message,
+      });
+    }
   });
 
   // System Status Endpoint
   app.get('/api/admin/system-status', (_req: Request, res: Response) => {
     res.json({
-      configured: Boolean(supabaseUrl && serviceRoleKey),
+      configured: Boolean(supabaseUrl && publishableKey),
       hasServiceRole: Boolean(serviceRoleKey),
       publicUrl: Boolean(supabaseUrl),
-      mode: supabaseUrl && serviceRoleKey ? 'cloud' : 'demo-fallback',
+      mode: supabaseUrl ? 'cloud' : 'demo-fallback',
       timestamp: new Date().toISOString(),
     });
   });

@@ -1,11 +1,15 @@
 -- ==============================================================================
--- TradeSync MT5 - Supabase PostgreSQL Schema & Security Policies (Phase 1)
+-- TradeSync MT5 - Hardened Production Supabase PostgreSQL Migration
 --
--- Security Enforcement:
--- 1. Public signups are strictly constrained to the 'trader' role via trigger.
--- 2. Admin accounts can NEVER be created through public registration.
--- 3. Row-Level Security (RLS) policies strictly enforce Mentor and Trader access.
--- 4. Self-promotion and unauthorized role alteration are blocked at database level.
+-- Security & Integrity Audited:
+-- 1. Anti-Self-Assignment: Users cannot assign themselves as mentors.
+-- 2. Anti-Tamper Trigger: Assignment ownership (mentor_id, trader_id) cannot be modified.
+-- 3. Mentor Verification: Only verified active users with role = 'mentor' can be mentors.
+-- 4. Profile Privacy: Non-recursive RLS policy protecting private profile data.
+-- 5. Anti-Privilege Escalation: Users cannot modify their own 'role' column.
+-- 6. Anti-Hijacking UPDATE: WITH CHECK prevents reassigning account or trade ownership.
+-- 7. Existing Table Resilient: Safe IF NOT EXISTS + ADD COLUMN IF NOT EXISTS.
+-- 8. Existing User Backfill: Pre-existing auth.users automatically initialized as 'trader'.
 -- ==============================================================================
 
 -- Enable UUID extension
@@ -26,12 +30,21 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- Index for fast lookups by role and status
+-- Backward-compatibility column assertions
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'trader';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+
+-- Idempotent Indexes for profiles
 CREATE INDEX IF NOT EXISTS idx_profiles_role ON public.profiles(role);
 CREATE INDEX IF NOT EXISTS idx_profiles_status ON public.profiles(status);
 
 -- ------------------------------------------------------------------------------
--- 2. Mentor Assignments & Parent-Child Relationships
+-- 2. Mentor Assignments Table
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.mentor_assignments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -42,6 +55,11 @@ CREATE TABLE IF NOT EXISTS public.mentor_assignments (
     UNIQUE (mentor_id, trader_id)
 );
 
+-- Backward-compatibility column assertions
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+-- Idempotent Indexes for mentor assignments
 CREATE INDEX IF NOT EXISTS idx_mentor_assignments_mentor ON public.mentor_assignments(mentor_id);
 CREATE INDEX IF NOT EXISTS idx_mentor_assignments_trader ON public.mentor_assignments(trader_id);
 
@@ -71,6 +89,7 @@ CREATE TABLE IF NOT EXISTS public.mt5_accounts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Idempotent Indexes for MT5 accounts
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_user ON public.mt5_accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_number ON public.mt5_accounts(account_number);
 
@@ -100,13 +119,14 @@ CREATE TABLE IF NOT EXISTS public.trades (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Idempotent Indexes for trades
 CREATE INDEX IF NOT EXISTS idx_trades_user ON public.trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_trades_account ON public.trades(account_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON public.trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ticket ON public.trades(ticket);
 
 -- ------------------------------------------------------------------------------
--- 5. Trade Feedback Table (Mentor Reviews for Traders)
+-- 5. Trade Feedback Table (Mentor Reviews for Trades)
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.trade_feedback (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -117,68 +137,102 @@ CREATE TABLE IF NOT EXISTS public.trade_feedback (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Idempotent Indexes for trade feedback
 CREATE INDEX IF NOT EXISTS idx_trade_feedback_trade ON public.trade_feedback(trade_id);
 CREATE INDEX IF NOT EXISTS idx_trade_feedback_author ON public.trade_feedback(author_id);
 
 -- ------------------------------------------------------------------------------
--- 6. Helper Security Functions (SECURITY DEFINER)
+-- 6. Helper Security Functions (SECURITY DEFINER, Non-Recursive)
 -- ------------------------------------------------------------------------------
 
--- Check if current user is an admin
+-- Check if current authenticated user is an administrator
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, auth
 AS $$
-  SELECT EXISTS (
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  RETURN EXISTS (
     SELECT 1 FROM public.profiles
     WHERE id = auth.uid() AND role = 'admin'
   );
+END;
 $$;
 
--- Check if current user is a mentor
+-- Check if current authenticated user is a verified active mentor
 CREATE OR REPLACE FUNCTION public.is_mentor()
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, auth
 AS $$
-  SELECT EXISTS (
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  RETURN EXISTS (
     SELECT 1 FROM public.profiles
-    WHERE id = auth.uid() AND role = 'mentor'
+    WHERE id = auth.uid() AND role = 'mentor' AND status = 'active'
   );
+END;
 $$;
 
--- Check if current user is the assigned mentor of a specific trader
+-- Check if current authenticated user is the assigned active mentor of a specific trader
 CREATE OR REPLACE FUNCTION public.is_mentor_of(target_trader_id UUID)
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, auth
 AS $$
-  SELECT EXISTS (
+BEGIN
+  IF auth.uid() IS NULL OR target_trader_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  RETURN EXISTS (
     SELECT 1 FROM public.mentor_assignments
     WHERE mentor_id = auth.uid()
       AND trader_id = target_trader_id
       AND status = 'active'
   );
+END;
+$$;
+
+-- Check if a specific user is the active assigned mentor of the current authenticated trader
+CREATE OR REPLACE FUNCTION public.is_my_mentor(target_mentor_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+BEGIN
+  IF auth.uid() IS NULL OR target_mentor_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  RETURN EXISTS (
+    SELECT 1 FROM public.mentor_assignments
+    WHERE trader_id = auth.uid()
+      AND mentor_id = target_mentor_id
+      AND status = 'active'
+  );
+END;
 $$;
 
 -- ------------------------------------------------------------------------------
 -- 7. Public Signup Security: Strict Forced 'trader' Default Trigger
 -- ------------------------------------------------------------------------------
--- CRITICAL SECURITY REQUIREMENT:
--- Public registration must NEVER allow users to assign themselves 'admin' or 'mentor'.
--- Any role passed in client raw_user_meta_data is explicitly ignored.
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, auth
 AS $$
 BEGIN
   INSERT INTO public.profiles (
@@ -191,17 +245,17 @@ BEGIN
   )
   VALUES (
     NEW.id,
-    NEW.email,
-    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
+    COALESCE(NEW.email, ''),
+    COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(COALESCE(NEW.email, ''), '@', 1), 'Trader'),
     COALESCE(NEW.raw_user_meta_data->>'avatar_url', ''),
     'trader', -- ENFORCED: Public registrations always default strictly to 'trader'
     'active'
-  );
+  )
+  ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
 $$;
 
--- Drop trigger if exists and recreate
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
@@ -209,20 +263,46 @@ CREATE TRIGGER on_auth_user_created
   EXECUTE FUNCTION public.handle_new_user();
 
 -- ------------------------------------------------------------------------------
--- 8. Privilege Escalation Guard Trigger
+-- 8. Existing User Backfill (Safe Idempotency)
 -- ------------------------------------------------------------------------------
--- Users must NEVER be able to update their own 'role' column.
--- Only an active admin or the backend service_role can modify user roles.
+INSERT INTO public.profiles (id, email, full_name, role, status)
+SELECT 
+    id, 
+    COALESCE(email, ''), 
+    COALESCE(raw_user_meta_data->>'full_name', split_part(COALESCE(email, ''), '@', 1), 'Trader'),
+    'trader',
+    'active'
+FROM auth.users
+ON CONFLICT (id) DO NOTHING;
+
+-- ------------------------------------------------------------------------------
+-- 9. Profile Privilege Escalation Guard Trigger
+-- ------------------------------------------------------------------------------
+-- Users can NEVER update their own 'role' column via client requests.
+-- Only verified admin, service_role, or postgres (SQL Editor) can modify roles.
 CREATE OR REPLACE FUNCTION public.protect_profile_role()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, auth
 AS $$
+DECLARE
+  jwt_role TEXT;
 BEGIN
   IF (OLD.role IS DISTINCT FROM NEW.role) THEN
-    -- Check if caller is admin or service_role
-    IF NOT (public.is_admin() OR current_user = 'service_role' OR session_user = 'service_role') THEN
+    BEGIN
+      jwt_role := COALESCE(current_setting('request.jwt.claim.role', true), '');
+    EXCEPTION WHEN OTHERS THEN
+      jwt_role := '';
+    END IF;
+
+    IF NOT (
+      public.is_admin()
+      OR current_user = 'postgres'
+      OR current_user = 'service_role'
+      OR session_user = 'service_role'
+      OR jwt_role = 'service_role'
+    ) THEN
       RAISE EXCEPTION 'Privilege escalation blocked: Users cannot modify their own role. Admin authorization required.';
     END IF;
   END IF;
@@ -239,35 +319,103 @@ CREATE TRIGGER trg_protect_profile_role
   EXECUTE FUNCTION public.protect_profile_role();
 
 -- ------------------------------------------------------------------------------
--- 9. Row-Level Security (RLS) Policies
+-- 10. Mentor Assignment Validation & Ownership Guard Trigger
 -- ------------------------------------------------------------------------------
+-- Enforces:
+-- 1. Users cannot assign themselves as their own mentor (mentor_id != trader_id).
+-- 2. Designated mentor MUST be a verified active mentor (role = 'mentor', status = 'active').
+-- 3. Ownership (mentor_id, trader_id) cannot be changed after creation (tamper prevention).
+CREATE OR REPLACE FUNCTION public.validate_mentor_assignment()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+  jwt_role TEXT;
+BEGIN
+  -- Prevent self-assignment
+  IF NEW.mentor_id = NEW.trader_id THEN
+    RAISE EXCEPTION 'Security error: A user cannot assign themselves as their own mentor.';
+  END IF;
 
--- Enable RLS on all tables
+  -- Ensure the designated mentor is an active mentor
+  IF NOT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = NEW.mentor_id AND role = 'mentor' AND status = 'active'
+  ) THEN
+    RAISE EXCEPTION 'Security error: Target mentor_id is not a verified active mentor.';
+  END IF;
+
+  -- On UPDATE, prevent transferring assignment ownership
+  IF TG_OP = 'UPDATE' THEN
+    IF (OLD.mentor_id IS DISTINCT FROM NEW.mentor_id OR OLD.trader_id IS DISTINCT FROM NEW.trader_id) THEN
+      BEGIN
+        jwt_role := COALESCE(current_setting('request.jwt.claim.role', true), '');
+      EXCEPTION WHEN OTHERS THEN
+        jwt_role := '';
+      END IF;
+
+      IF NOT (
+        public.is_admin()
+        OR current_user = 'postgres'
+        OR current_user = 'service_role'
+        OR jwt_role = 'service_role'
+      ) THEN
+        RAISE EXCEPTION 'Security error: Assignment ownership (mentor_id / trader_id) cannot be transferred.';
+      END IF;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_mentor_assignment ON public.mentor_assignments;
+CREATE TRIGGER trg_validate_mentor_assignment
+  BEFORE INSERT OR UPDATE ON public.mentor_assignments
+  FOR EACH ROW
+  EXECUTE FUNCTION public.validate_mentor_assignment();
+
+-- ------------------------------------------------------------------------------
+-- 11. Enable Row-Level Security (RLS) on All Tables
+-- ------------------------------------------------------------------------------
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.mentor_assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.mt5_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trade_feedback ENABLE ROW LEVEL SECURITY;
 
+-- ------------------------------------------------------------------------------
+-- 12. Row-Level Security Policies (Hardened & Idempotent)
+-- ------------------------------------------------------------------------------
+
 -- ---- PROFILES POLICIES ----
--- SELECT: Users see their own profile, Mentors see assigned traders, Admins see all
+DROP POLICY IF EXISTS "profiles_select_policy" ON public.profiles;
+-- SELECT: Users see themselves, active mentors are visible for directory, mentors see assigned traders, admins see all
 CREATE POLICY "profiles_select_policy"
   ON public.profiles FOR SELECT
   USING (
     auth.uid() = id
+    OR (role = 'mentor' AND status = 'active')
     OR public.is_admin()
     OR public.is_mentor_of(id)
   );
 
--- UPDATE: Users can update their own non-role fields; Admins can update any
+DROP POLICY IF EXISTS "profiles_update_policy" ON public.profiles;
+-- UPDATE: Users update own profile (trigger blocks role tampering); Admins update any
 CREATE POLICY "profiles_update_policy"
   ON public.profiles FOR UPDATE
   USING (
     auth.uid() = id
     OR public.is_admin()
+  )
+  WITH CHECK (
+    auth.uid() = id
+    OR public.is_admin()
   );
 
--- INSERT: Insert is handled by handle_new_user() trigger or Admin
+DROP POLICY IF EXISTS "profiles_insert_policy" ON public.profiles;
 CREATE POLICY "profiles_insert_policy"
   ON public.profiles FOR INSERT
   WITH CHECK (
@@ -275,13 +423,13 @@ CREATE POLICY "profiles_insert_policy"
     OR public.is_admin()
   );
 
--- DELETE: Admins only
+DROP POLICY IF EXISTS "profiles_delete_policy" ON public.profiles;
 CREATE POLICY "profiles_delete_policy"
   ON public.profiles FOR DELETE
   USING (public.is_admin());
 
 -- ---- MENTOR_ASSIGNMENTS POLICIES ----
--- SELECT: Mentors see their assigned traders, Traders see their mentor, Admins see all
+DROP POLICY IF EXISTS "mentor_assignments_select_policy" ON public.mentor_assignments;
 CREATE POLICY "mentor_assignments_select_policy"
   ON public.mentor_assignments FOR SELECT
   USING (
@@ -290,14 +438,51 @@ CREATE POLICY "mentor_assignments_select_policy"
     OR public.is_admin()
   );
 
--- INSERT / UPDATE / DELETE: Restricted strictly to Admins (or service role)
-CREATE POLICY "mentor_assignments_admin_all"
-  ON public.mentor_assignments FOR ALL
-  USING (public.is_admin())
-  WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "mentor_assignments_insert_policy" ON public.mentor_assignments;
+-- Traders can only subscribe themselves (trader_id = auth.uid()).
+-- Mentors cannot create assignments making other users follow them unless Admin.
+-- Users cannot assign themselves as mentors (enforced by trigger + policy).
+CREATE POLICY "mentor_assignments_insert_policy"
+  ON public.mentor_assignments FOR INSERT
+  WITH CHECK (
+    (
+      trader_id = auth.uid()
+      AND mentor_id != auth.uid()
+      AND EXISTS (
+        SELECT 1 FROM public.profiles
+        WHERE id = mentor_id AND role = 'mentor' AND status = 'active'
+      )
+    )
+    OR public.is_admin()
+  );
+
+DROP POLICY IF EXISTS "mentor_assignments_update_policy" ON public.mentor_assignments;
+-- Only assigned mentor, subscribed trader, or admin can update status.
+-- Ownership tampering (mentor_id / trader_id change) is rejected by WITH CHECK and trigger.
+CREATE POLICY "mentor_assignments_update_policy"
+  ON public.mentor_assignments FOR UPDATE
+  USING (
+    mentor_id = auth.uid()
+    OR trader_id = auth.uid()
+    OR public.is_admin()
+  )
+  WITH CHECK (
+    mentor_id = auth.uid()
+    OR trader_id = auth.uid()
+    OR public.is_admin()
+  );
+
+DROP POLICY IF EXISTS "mentor_assignments_delete_policy" ON public.mentor_assignments;
+CREATE POLICY "mentor_assignments_delete_policy"
+  ON public.mentor_assignments FOR DELETE
+  USING (
+    mentor_id = auth.uid()
+    OR trader_id = auth.uid()
+    OR public.is_admin()
+  );
 
 -- ---- MT5_ACCOUNTS POLICIES ----
--- SELECT: Traders see own accounts, Mentors see assigned traders' accounts, Admins see all
+DROP POLICY IF EXISTS "mt5_accounts_select_policy" ON public.mt5_accounts;
 CREATE POLICY "mt5_accounts_select_policy"
   ON public.mt5_accounts FOR SELECT
   USING (
@@ -306,7 +491,7 @@ CREATE POLICY "mt5_accounts_select_policy"
     OR public.is_mentor_of(user_id)
   );
 
--- INSERT: Traders manage own accounts, Admins can provision
+DROP POLICY IF EXISTS "mt5_accounts_insert_policy" ON public.mt5_accounts;
 CREATE POLICY "mt5_accounts_insert_policy"
   ON public.mt5_accounts FOR INSERT
   WITH CHECK (
@@ -314,15 +499,20 @@ CREATE POLICY "mt5_accounts_insert_policy"
     OR public.is_admin()
   );
 
--- UPDATE: Traders update own accounts; Mentors have NO update rights; Admins can update
+DROP POLICY IF EXISTS "mt5_accounts_update_policy" ON public.mt5_accounts;
+-- WITH CHECK ensures user_id cannot be altered to reassign account ownership
 CREATE POLICY "mt5_accounts_update_policy"
   ON public.mt5_accounts FOR UPDATE
   USING (
     user_id = auth.uid()
     OR public.is_admin()
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    OR public.is_admin()
   );
 
--- DELETE: Traders delete own accounts, Admins can delete
+DROP POLICY IF EXISTS "mt5_accounts_delete_policy" ON public.mt5_accounts;
 CREATE POLICY "mt5_accounts_delete_policy"
   ON public.mt5_accounts FOR DELETE
   USING (
@@ -331,7 +521,7 @@ CREATE POLICY "mt5_accounts_delete_policy"
   );
 
 -- ---- TRADES POLICIES ----
--- SELECT: Traders see own trades, Mentors see assigned traders' trades, Admins see all
+DROP POLICY IF EXISTS "trades_select_policy" ON public.trades;
 CREATE POLICY "trades_select_policy"
   ON public.trades FOR SELECT
   USING (
@@ -340,7 +530,7 @@ CREATE POLICY "trades_select_policy"
     OR public.is_mentor_of(user_id)
   );
 
--- INSERT: Owning trader can insert trades; Admins can insert; Mentors cannot insert
+DROP POLICY IF EXISTS "trades_insert_policy" ON public.trades;
 CREATE POLICY "trades_insert_policy"
   ON public.trades FOR INSERT
   WITH CHECK (
@@ -348,15 +538,20 @@ CREATE POLICY "trades_insert_policy"
     OR public.is_admin()
   );
 
--- UPDATE: Owning trader can update; Mentors have READ-ONLY access (cannot execute/modify); Admins can update
+DROP POLICY IF EXISTS "trades_update_policy" ON public.trades;
+-- WITH CHECK ensures user_id cannot be altered to reassign trade ownership
 CREATE POLICY "trades_update_policy"
   ON public.trades FOR UPDATE
   USING (
     user_id = auth.uid()
     OR public.is_admin()
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    OR public.is_admin()
   );
 
--- DELETE: Owning trader or Admin
+DROP POLICY IF EXISTS "trades_delete_policy" ON public.trades;
 CREATE POLICY "trades_delete_policy"
   ON public.trades FOR DELETE
   USING (
@@ -365,7 +560,7 @@ CREATE POLICY "trades_delete_policy"
   );
 
 -- ---- TRADE_FEEDBACK POLICIES ----
--- SELECT: Visible to trade owner, feedback author, and Admins
+DROP POLICY IF EXISTS "trade_feedback_select_policy" ON public.trade_feedback;
 CREATE POLICY "trade_feedback_select_policy"
   ON public.trade_feedback FOR SELECT
   USING (
@@ -377,7 +572,7 @@ CREATE POLICY "trade_feedback_select_policy"
     )
   );
 
--- INSERT: Mentors can post feedback on trades belonging to their assigned traders; Admins can post
+DROP POLICY IF EXISTS "trade_feedback_insert_policy" ON public.trade_feedback;
 CREATE POLICY "trade_feedback_insert_policy"
   ON public.trade_feedback FOR INSERT
   WITH CHECK (
@@ -391,20 +586,23 @@ CREATE POLICY "trade_feedback_insert_policy"
     )
   );
 
--- UPDATE / DELETE: Feedback author or Admin
+DROP POLICY IF EXISTS "trade_feedback_modify_policy" ON public.trade_feedback;
 CREATE POLICY "trade_feedback_modify_policy"
   ON public.trade_feedback FOR UPDATE
-  USING (author_id = auth.uid() OR public.is_admin());
+  USING (author_id = auth.uid() OR public.is_admin())
+  WITH CHECK (author_id = auth.uid() OR public.is_admin());
 
+DROP POLICY IF EXISTS "trade_feedback_delete_policy" ON public.trade_feedback;
 CREATE POLICY "trade_feedback_delete_policy"
   ON public.trade_feedback FOR DELETE
   USING (author_id = auth.uid() OR public.is_admin());
 
 -- ==============================================================================
--- 10. Bootstrap First Super Admin (Manual Execution in Supabase SQL Editor)
+-- 13. Secure Initial Super Admin Promotion
 --
--- After creating your primary user via Supabase Auth UI or app sign up:
+-- Execute in the Supabase Dashboard SQL editor after registering your primary account:
+--
 -- UPDATE public.profiles
 -- SET role = 'admin'
--- WHERE email = 'admin@yourcompany.com';
+-- WHERE email = 'your-admin@email.com';
 -- ==============================================================================

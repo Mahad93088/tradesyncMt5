@@ -95,16 +95,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let isMounted = true;
 
     // Initial session retrieval
-    supabase.auth.getSession().then(async ({ data: { session: initialSession } }) => {
+    supabase.auth.getSession().then(async ({ data: { session: initialSession }, error }) => {
       if (!isMounted) return;
+      if (error) {
+        console.warn('Supabase getSession notice:', error.message);
+      }
       setSession(initialSession);
       setSupabaseUser(initialSession?.user ?? null);
 
       if (initialSession?.user) {
+        setIsCloudMode(true);
+        localStorage.setItem('tradesync_mode', 'cloud');
         const userProfile = await fetchProfile(initialSession.user.id);
-        if (isMounted) {
+        if (isMounted && userProfile) {
           setProfile(userProfile);
-          setIsCloudMode(true);
         }
       }
       if (isMounted) setIsLoading(false);
@@ -112,19 +116,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+    } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (!isMounted) return;
       setSession(newSession);
       setSupabaseUser(newSession?.user ?? null);
 
       if (newSession?.user) {
+        setIsCloudMode(true);
+        localStorage.setItem('tradesync_mode', 'cloud');
         const userProfile = await fetchProfile(newSession.user.id);
-        if (isMounted) {
+        if (isMounted && userProfile) {
           setProfile(userProfile);
-          setIsCloudMode(true);
         }
-      } else {
-        if (isMounted) setProfile(null);
+      } else if (event === 'SIGNED_OUT') {
+        setProfile(null);
+        setIsCloudMode(false);
+        localStorage.setItem('tradesync_mode', 'demo');
       }
     });
 
@@ -147,12 +154,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // and only pass full_name. Furthermore, the database trigger on auth.users strictly
       // forces role = 'trader'.
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: email.trim(),
         password,
         options: {
           data: {
             full_name: fullName.trim(),
-            // Zero self-assigned admin: No role metadata is passed to auth.signUp
           },
         },
       });
@@ -163,10 +169,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (data.user) {
-        // Poll for profile creation trigger
+        setSupabaseUser(data.user);
+        if (data.session) {
+          setSession(data.session);
+          setIsCloudMode(true);
+          localStorage.setItem('tradesync_mode', 'cloud');
+        }
+
+        // Fetch / poll for profile creation
         setTimeout(async () => {
           const p = await fetchProfile(data.user!.id);
-          if (p) setProfile(p);
+          if (p) {
+            setProfile(p);
+            setIsCloudMode(true);
+          }
         }, 1000);
       }
 
@@ -187,7 +203,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
-        email,
+        email: email.trim(),
         password,
       });
 
@@ -197,10 +213,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (data.user) {
-        const userProfile = await fetchProfile(data.user.id);
-        setProfile(userProfile);
+        setSupabaseUser(data.user);
+        if (data.session) {
+          setSession(data.session);
+        }
         setIsCloudMode(true);
         localStorage.setItem('tradesync_mode', 'cloud');
+
+        const userProfile = await fetchProfile(data.user.id);
+        if (userProfile) {
+          setProfile(userProfile);
+        }
       }
 
       return { success: true };
@@ -286,17 +309,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Synthesize active User entity for the application
-  const activeUser: User = isCloudMode && profile
+  const isUserAuthenticated = Boolean(session?.user || supabaseUser);
+
+  // Synthesize active User entity for the application:
+  // When logged in via Supabase, always use the real Supabase user identity.
+  const activeUser: User = isUserAuthenticated
     ? {
-        id: profile.id,
-        email: profile.email,
-        fullName: profile.full_name || profile.email.split('@')[0],
-        role: profile.role,
-        status: profile.status,
-        createdAt: profile.created_at,
-        avatarUrl: profile.avatar_url,
-        phone: profile.phone,
+        id: profile?.id || supabaseUser?.id || session?.user.id || '',
+        email: profile?.email || supabaseUser?.email || session?.user.email || '',
+        fullName:
+          profile?.full_name ||
+          (supabaseUser?.user_metadata?.full_name as string) ||
+          (session?.user?.user_metadata?.full_name as string) ||
+          supabaseUser?.email?.split('@')[0] ||
+          session?.user?.email?.split('@')[0] ||
+          'Cloud Trader',
+        role: profile?.role || 'trader',
+        status: profile?.status || 'active',
+        createdAt:
+          profile?.created_at ||
+          supabaseUser?.created_at ||
+          session?.user?.created_at ||
+          new Date().toISOString(),
+        avatarUrl: profile?.avatar_url,
+        phone: profile?.phone,
       }
     : demoUser;
 
@@ -307,8 +343,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         supabaseUser,
         profile,
         user: activeUser,
-        isAuthenticated: Boolean(session?.user),
-        isCloudMode,
+        isAuthenticated: isUserAuthenticated,
+        isCloudMode: isUserAuthenticated || isCloudMode,
         isConfigured: configured,
         isLoading,
         authError,
