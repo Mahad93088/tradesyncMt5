@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ShieldCheck } from 'lucide-react';
 import { AuthProvider } from './contexts/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { Navbar } from './components/common/Navbar';
@@ -49,10 +50,12 @@ const AppContent: React.FC = () => {
     setIsArchitectureModalOpen,
     isAuthModalOpen,
     setIsAuthModalOpen,
-    parentChildLinks
+    parentChildLinks,
+    switchRole
   } = useApp();
 
   const [currentTab, setCurrentTab] = useState<string>('overview');
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   // Modal states
   const [isCreateMentorOpen, setIsCreateMentorOpen] = useState(false);
@@ -71,15 +74,24 @@ const AppContent: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-200">
       {/* Top Navbar */}
-      <Navbar />
+      <Navbar
+        onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)}
+        currentTab={currentTab}
+        onTabChange={(tab) => setCurrentTab(tab)}
+      />
 
       {/* Interactive Simulation Harness Toolbar */}
       <SimulationToolbar />
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Dynamic Sidebar */}
-        <Sidebar currentTab={currentTab} onTabChange={(tab) => setCurrentTab(tab)} />
+        {/* Dynamic Sidebar with mobile drawer support */}
+        <Sidebar
+          currentTab={currentTab}
+          onTabChange={(tab) => setCurrentTab(tab)}
+          isMobileOpen={isMobileNavOpen}
+          onCloseMobile={() => setIsMobileNavOpen(false)}
+        />
 
         {/* Content View Area */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
@@ -94,8 +106,12 @@ const AppContent: React.FC = () => {
                     onOpenAddTrader={() => setIsAddTraderOpen(true)}
                   />
                 )}
-                {currentTab === 'parent-accounts' && <ParentAccountsView />}
-                {currentTab === 'child-accounts' && <ChildAccountsView />}
+                {(currentTab === 'parent-accounts' || currentTab === 'admin-parent-accounts') && (
+                  <ParentAccountsView />
+                )}
+                {(currentTab === 'child-accounts' || currentTab === 'admin-child-accounts') && (
+                  <ChildAccountsView />
+                )}
                 {currentTab === 'mentors' && (
                   <MentorsManagement
                     isCreateOpen={isCreateMentorOpen}
@@ -186,6 +202,27 @@ const AppContent: React.FC = () => {
                 {currentTab === 'notifications' && <NotificationsView />}
                 {currentTab === 'settings' && <AccountSettingsView />}
               </>
+            )}
+
+            {/* Super Admin MT5 Accounts Guard & Quick Jump */}
+            {role !== 'admin' && (currentTab === 'parent-accounts' || currentTab === 'child-accounts') && (
+              <div className="rounded-2xl border border-sky-800 bg-slate-900/90 p-8 text-center space-y-4 shadow-xl">
+                <div className="h-12 w-12 rounded-xl bg-sky-950 border border-sky-800 text-sky-400 mx-auto flex items-center justify-center">
+                  <ShieldCheck className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Super Admin Access Required</h3>
+                  <p className="text-xs text-slate-300 max-w-md mx-auto mt-1 leading-relaxed">
+                    {currentTab === 'parent-accounts' ? 'Parent MT5 Accounts' : 'Child MT5 Accounts'} management is part of the Super Admin Portal. Click below to switch to your Super Admin workspace.
+                  </p>
+                </div>
+                <button
+                  onClick={() => switchRole('admin')}
+                  className="rounded-lg bg-sky-600 hover:bg-sky-500 px-5 py-2.5 text-xs font-semibold text-white shadow-md transition-colors"
+                >
+                  Switch to Super Admin View
+                </button>
+              </div>
             )}
           </div>
         </main>

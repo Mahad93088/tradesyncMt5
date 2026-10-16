@@ -13,15 +13,26 @@ import {
   Terminal,
   ShieldAlert,
   Cloud,
-  Database,
+  LogIn,
   LogOut,
-  LogIn
+  Menu,
+  Layers
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { UserRole } from '../../types';
 
-export const Navbar: React.FC = () => {
+interface NavbarProps {
+  onToggleMobileNav?: () => void;
+  currentTab?: string;
+  onTabChange?: (tab: string) => void;
+}
+
+export const Navbar: React.FC<NavbarProps> = ({
+  onToggleMobileNav,
+  currentTab,
+  onTabChange
+}) => {
   const {
     currentUser,
     users,
@@ -64,7 +75,18 @@ export const Navbar: React.FC = () => {
     <header className="sticky top-0 z-40 border-b border-slate-800 bg-slate-950">
       <div className="flex h-14 items-center justify-between px-4 sm:px-6">
         {/* Left: Brand & Status */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2.5 sm:gap-4">
+          {onToggleMobileNav && (
+            <button
+              onClick={onToggleMobileNav}
+              className="md:hidden -ml-1 p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-900 border border-slate-800 transition-colors"
+              aria-label="Toggle navigation menu"
+              title="Navigation Menu"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
+          )}
+
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 border border-slate-700 text-sky-400">
               <Terminal className="h-4 w-4" />
@@ -336,6 +358,87 @@ export const Navbar: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Quick Tab Bar for Super Admin (Visible on all devices for fast access to Parent & Child MT5 Accounts) */}
+      {currentUser.role === 'admin' && onTabChange && currentTab && (
+        <div className="border-t border-slate-800/80 bg-slate-950/95 px-3 sm:px-6 py-1.5 overflow-x-auto flex items-center gap-1.5">
+          <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold shrink-0 mr-1 hidden sm:inline">
+            Admin Hub:
+          </span>
+          <button
+            onClick={() => onTabChange('overview')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'overview'
+                ? 'bg-slate-800 text-sky-300 font-semibold border border-slate-700'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            Overview
+          </button>
+          <button
+            onClick={() => onTabChange('parent-accounts')}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'parent-accounts'
+                ? 'bg-cyan-950 border border-cyan-800 text-cyan-300 font-semibold shadow-sm'
+                : 'text-cyan-400/90 hover:text-cyan-200 hover:bg-slate-900'
+            }`}
+          >
+            <Server className="h-3.5 w-3.5" />
+            <span>Parent MT5 Accounts</span>
+          </button>
+          <button
+            onClick={() => onTabChange('child-accounts')}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'child-accounts'
+                ? 'bg-emerald-950 border border-emerald-800 text-emerald-300 font-semibold shadow-sm'
+                : 'text-emerald-400/90 hover:text-emerald-200 hover:bg-slate-900'
+            }`}
+          >
+            <Layers className="h-3.5 w-3.5" />
+            <span>Child MT5 Accounts</span>
+          </button>
+          <button
+            onClick={() => onTabChange('mentors')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'mentors'
+                ? 'bg-slate-800 text-sky-300 font-semibold border border-slate-700'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            Mentors
+          </button>
+          <button
+            onClick={() => onTabChange('traders')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'traders'
+                ? 'bg-slate-800 text-sky-300 font-semibold border border-slate-700'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            Traders
+          </button>
+          <button
+            onClick={() => onTabChange('plans')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'plans'
+                ? 'bg-slate-800 text-sky-300 font-semibold border border-slate-700'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            Subscriptions
+          </button>
+          <button
+            onClick={() => onTabChange('relationships')}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              currentTab === 'relationships'
+                ? 'bg-slate-800 text-sky-300 font-semibold border border-slate-700'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            Relationships
+          </button>
+        </div>
+      )}
     </header>
   );
 };

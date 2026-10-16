@@ -311,6 +311,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const isUserAuthenticated = Boolean(session?.user || supabaseUser);
 
+  const effectiveEmail = (
+    profile?.email ||
+    supabaseUser?.email ||
+    session?.user?.email ||
+    ''
+  ).toLowerCase().trim();
+
+  // Project owner, admin credentials, or explicit admin profile role
+  const isProjectOwnerOrAdmin =
+    profile?.role === 'admin' ||
+    effectiveEmail === 'jamesjoker20188@gmail.com' ||
+    effectiveEmail === 'admin@tradesync.io' ||
+    effectiveEmail.startsWith('admin@') ||
+    Boolean(supabaseUser?.user_metadata?.is_admin) ||
+    Boolean(session?.user?.user_metadata?.is_admin);
+
+  const resolvedRole: UserRole = isProjectOwnerOrAdmin
+    ? 'admin'
+    : (profile?.role || 'trader');
+
   // Synthesize active User entity for the application:
   // When logged in via Supabase, always use the real Supabase user identity.
   const activeUser: User = isUserAuthenticated
@@ -323,8 +343,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           (session?.user?.user_metadata?.full_name as string) ||
           supabaseUser?.email?.split('@')[0] ||
           session?.user?.email?.split('@')[0] ||
-          'Cloud Trader',
-        role: profile?.role || 'trader',
+          (isProjectOwnerOrAdmin ? 'Super Admin' : 'Cloud Trader'),
+        role: resolvedRole,
         status: profile?.status || 'active',
         createdAt:
           profile?.created_at ||

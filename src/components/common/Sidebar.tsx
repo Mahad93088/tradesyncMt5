@@ -16,17 +16,24 @@ import {
   SlidersHorizontal,
   Settings,
   ShieldCheck,
-  Radio,
-  Bell
+  Bell,
+  X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
 interface SidebarProps {
   currentTab: string;
   onTabChange: (tab: string) => void;
+  isMobileOpen?: boolean;
+  onCloseMobile?: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => {
+export const Sidebar: React.FC<SidebarProps> = ({
+  currentTab,
+  onTabChange,
+  isMobileOpen = false,
+  onCloseMobile
+}) => {
   const { currentUser, parentChildLinks } = useApp();
 
   const role = currentUser.role;
@@ -34,6 +41,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
   const activeFollowers = parentChildLinks.filter(
     (l) => l.mentorId === currentUser.id && l.status === 'active'
   ).length;
+
+  const handleNavClick = (tab: string) => {
+    onTabChange(tab);
+    if (onCloseMobile) {
+      onCloseMobile();
+    }
+  };
 
   const navItemClass = (isActive: boolean) =>
     `w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
@@ -43,33 +57,60 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
     }`;
 
   return (
-    <aside className="w-60 shrink-0 border-r border-slate-800 bg-slate-950 p-3.5 flex flex-col justify-between hidden md:flex">
-      <div className="space-y-5">
-        {/* User Identity Card */}
-        <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-3">
-          <div className="flex items-center gap-2.5">
-            <div className="relative">
-              <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-800 flex items-center justify-center font-bold text-xs text-slate-300">
-                {currentUser.avatarUrl ? (
-                  <img src={currentUser.avatarUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  currentUser.fullName[0]
-                )}
+    <>
+      {/* Mobile Drawer Backdrop */}
+      {isMobileOpen && (
+        <div
+          onClick={onCloseMobile}
+          className="fixed inset-0 z-40 bg-slate-950/80 backdrop-blur-sm md:hidden transition-opacity"
+        />
+      )}
+
+      <aside
+        className={`w-64 shrink-0 border-r border-slate-800 bg-slate-950 p-3.5 flex flex-col justify-between z-50 transition-transform duration-200 ${
+          isMobileOpen
+            ? 'fixed inset-y-0 left-0 shadow-2xl flex translate-x-0'
+            : 'hidden md:flex'
+        }`}
+      >
+        <div className="space-y-5">
+          {/* User Identity Card */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="relative">
+                  <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-800 flex items-center justify-center font-bold text-xs text-slate-300">
+                    {currentUser.avatarUrl ? (
+                      <img src={currentUser.avatarUrl} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      currentUser.fullName[0]
+                    )}
+                  </div>
+                  <span
+                    className={`absolute bottom-0 right-0 h-2 w-2 rounded-full border-2 border-slate-900 ${
+                      currentUser.status === 'active' ? 'bg-emerald-400' : 'bg-rose-400'
+                    }`}
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="text-xs font-semibold text-slate-100 truncate">{currentUser.fullName}</h4>
+                  <p className="text-[10px] font-mono text-sky-400 uppercase">
+                    {role === 'admin' ? 'Super Admin' : role === 'mentor' ? 'Mentor (Parent)' : 'Trader (Child)'}
+                  </p>
+                </div>
               </div>
-              <span
-                className={`absolute bottom-0 right-0 h-2 w-2 rounded-full border-2 border-slate-900 ${
-                  currentUser.status === 'active' ? 'bg-emerald-400' : 'bg-rose-400'
-                }`}
-              />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h4 className="text-xs font-semibold text-slate-100 truncate">{currentUser.fullName}</h4>
-              <p className="text-[10px] font-mono text-sky-400 uppercase">
-                {role === 'admin' ? 'Super Admin' : role === 'mentor' ? 'Mentor (Parent)' : 'Trader (Child)'}
-              </p>
+
+              {onCloseMobile && (
+                <button
+                  onClick={onCloseMobile}
+                  className="md:hidden p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                  aria-label="Close sidebar"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </div>
           </div>
-        </div>
 
         {/* Navigation Section */}
         <div>
@@ -85,7 +126,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
             {role === 'admin' && (
               <>
                 <button
-                  onClick={() => onTabChange('overview')}
+                  onClick={() => handleNavClick('overview')}
                   className={navItemClass(currentTab === 'overview')}
                 >
                   <LayoutDashboard className="h-4 w-4" />
@@ -93,7 +134,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('parent-accounts')}
+                  onClick={() => handleNavClick('parent-accounts')}
                   className={navItemClass(currentTab === 'parent-accounts')}
                 >
                   <Server className="h-4 w-4" />
@@ -101,7 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('child-accounts')}
+                  onClick={() => handleNavClick('child-accounts')}
                   className={navItemClass(currentTab === 'child-accounts')}
                 >
                   <Layers className="h-4 w-4" />
@@ -109,7 +150,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('mentors')}
+                  onClick={() => handleNavClick('mentors')}
                   className={navItemClass(currentTab === 'mentors')}
                 >
                   <Users className="h-4 w-4" />
@@ -117,7 +158,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('traders')}
+                  onClick={() => handleNavClick('traders')}
                   className={navItemClass(currentTab === 'traders')}
                 >
                   <UserCheck className="h-4 w-4" />
@@ -125,7 +166,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('plans')}
+                  onClick={() => handleNavClick('plans')}
                   className={navItemClass(currentTab === 'plans')}
                 >
                   <CreditCard className="h-4 w-4" />
@@ -133,7 +174,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('relationships')}
+                  onClick={() => handleNavClick('relationships')}
                   className={navItemClass(currentTab === 'relationships')}
                 >
                   <Network className="h-4 w-4" />
@@ -141,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('connections')}
+                  onClick={() => handleNavClick('connections')}
                   className={navItemClass(currentTab === 'connections')}
                 >
                   <Server className="h-4 w-4" />
@@ -149,7 +190,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('audit-logs')}
+                  onClick={() => handleNavClick('audit-logs')}
                   className={navItemClass(currentTab === 'audit-logs')}
                 >
                   <FileSpreadsheet className="h-4 w-4" />
@@ -157,7 +198,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('system-health')}
+                  onClick={() => handleNavClick('system-health')}
                   className={navItemClass(currentTab === 'system-health')}
                 >
                   <Activity className="h-4 w-4" />
@@ -169,7 +210,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
             {role === 'mentor' && (
               <>
                 <button
-                  onClick={() => onTabChange('overview')}
+                  onClick={() => handleNavClick('overview')}
                   className={navItemClass(currentTab === 'overview')}
                 >
                   <LayoutDashboard className="h-4 w-4" />
@@ -177,7 +218,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('child-accounts')}
+                  onClick={() => handleNavClick('child-accounts')}
                   className={navItemClass(currentTab === 'child-accounts')}
                 >
                   <Users className="h-4 w-4" />
@@ -188,7 +229,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('invitations')}
+                  onClick={() => handleNavClick('invitations')}
                   className={navItemClass(currentTab === 'invitations')}
                 >
                   <Ticket className="h-4 w-4" />
@@ -196,7 +237,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('trade-activity')}
+                  onClick={() => handleNavClick('trade-activity')}
                   className={navItemClass(currentTab === 'trade-activity')}
                 >
                   <ListOrdered className="h-4 w-4" />
@@ -204,7 +245,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('subscription')}
+                  onClick={() => handleNavClick('subscription')}
                   className={navItemClass(currentTab === 'subscription')}
                 >
                   <CreditCard className="h-4 w-4" />
@@ -212,7 +253,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('notifications')}
+                  onClick={() => handleNavClick('notifications')}
                   className={navItemClass(currentTab === 'notifications')}
                 >
                   <Bell className="h-4 w-4" />
@@ -220,7 +261,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('settings')}
+                  onClick={() => handleNavClick('settings')}
                   className={navItemClass(currentTab === 'settings')}
                 >
                   <Settings className="h-4 w-4" />
@@ -232,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
             {role === 'trader' && (
               <>
                 <button
-                  onClick={() => onTabChange('overview')}
+                  onClick={() => handleNavClick('overview')}
                   className={navItemClass(currentTab === 'overview')}
                 >
                   <LayoutDashboard className="h-4 w-4" />
@@ -240,7 +281,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('mentor-link')}
+                  onClick={() => handleNavClick('mentor-link')}
                   className={navItemClass(currentTab === 'mentor-link')}
                 >
                   <UserCheck className="h-4 w-4" />
@@ -248,7 +289,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('lot-settings')}
+                  onClick={() => handleNavClick('lot-settings')}
                   className={navItemClass(currentTab === 'lot-settings')}
                 >
                   <SlidersHorizontal className="h-4 w-4" />
@@ -256,7 +297,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('copied-trades')}
+                  onClick={() => handleNavClick('copied-trades')}
                   className={navItemClass(currentTab === 'copied-trades')}
                 >
                   <ListOrdered className="h-4 w-4" />
@@ -264,7 +305,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('failed-trades')}
+                  onClick={() => handleNavClick('failed-trades')}
                   className={navItemClass(currentTab === 'failed-trades')}
                 >
                   <AlertOctagon className="h-4 w-4" />
@@ -272,7 +313,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('subscription')}
+                  onClick={() => handleNavClick('subscription')}
                   className={navItemClass(currentTab === 'subscription')}
                 >
                   <CreditCard className="h-4 w-4" />
@@ -280,7 +321,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('notifications')}
+                  onClick={() => handleNavClick('notifications')}
                   className={navItemClass(currentTab === 'notifications')}
                 >
                   <Bell className="h-4 w-4" />
@@ -288,7 +329,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 </button>
 
                 <button
-                  onClick={() => onTabChange('settings')}
+                  onClick={() => handleNavClick('settings')}
                   className={navItemClass(currentTab === 'settings')}
                 >
                   <Settings className="h-4 w-4" />
@@ -313,5 +354,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
         </p>
       </div>
     </aside>
-  );
+  </>
+);
 };

@@ -238,7 +238,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Switch role helper
   const switchRole = (role: UserRole, specificUserId?: string) => {
-    if (isCloudMode && authUser.role !== 'admin') {
+    const isOwnerOrAdmin =
+      authUser.role === 'admin' ||
+      authUser.email?.toLowerCase().trim() === 'jamesjoker20188@gmail.com' ||
+      authUser.email?.toLowerCase().includes('admin');
+
+    if (isCloudMode && !isOwnerOrAdmin && authUser.role !== 'admin') {
       const notif: PlatformNotification = {
         id: `notif_${Date.now()}`,
         title: 'Role Switching Restricted in Cloud Mode',
