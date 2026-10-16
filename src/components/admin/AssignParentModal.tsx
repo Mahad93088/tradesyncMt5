@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Server,
@@ -7,11 +7,19 @@ import {
   ShieldCheck,
   AlertCircle,
   CheckCircle2,
-  RefreshCw
+  RefreshCw,
+  Database,
+  SlidersHorizontal
 } from 'lucide-react';
-import { ParentAccountItem, ChildAccountItem, mt5AdminService } from '../../services/mt5AdminService';
+import {
+  ParentAccountItem,
+  ChildAccountItem,
+  mt5AdminService,
+  isValidUUID
+} from '../../services/mt5AdminService';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
+import { ParentChildLink } from '../../types';
 
 interface AssignParentModalProps {
   isOpen: boolean;
@@ -44,17 +52,34 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Set default selection when modal opens
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isOpen || !targetAccount) return;
     setErrorMessage(null);
 
     if (type === 'child') {
       const child = targetAccount as ChildAccountItem;
       setSelectedChildId(child.id);
-      setSelectedParentId(child.assignedMentorId || (allParents[0]?.userId || ''));
+
+      // Pre-select current mentor or first available parent
+      if (child.assignedParentAccountId) {
+        setSelectedParentId(child.assignedParentAccountId);
+      } else if (child.assignedMentorId) {
+        const matchingParent = allParents.find((p) => p.userId === child.assignedMentorId);
+        setSelectedParentId(matchingParent ? matchingParent.id : (allParents[0]?.id || ''));
+      } else {
+        setSelectedParentId(allParents[0]?.id || '');
+      }
+
+      if (child.copyMode === 'fixed') {
+        setCopyMode('fixed');
+        setFixedLot(child.fixedLot || 0.1);
+      } else {
+        setCopyMode('multiplier');
+        setLotMultiplier(child.lotMultiplier || 1.0);
+      }
     } else {
       const parent = targetAccount as ParentAccountItem;
-      setSelectedParentId(parent.userId);
+      setSelectedParentId(parent.id);
       // Pick first unassigned or available child
       const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
       setSelectedChildId(unassignedChild?.id || '');
@@ -85,30 +110,60 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     );
   }
 
+  const chosenParent = allParents.find(
+    (p) => p.id === selectedParentId || p.userId === selectedParentId
+  );
+  const chosenChild = allChildren.find(
+    (c) => c.id === selectedChildId || c.userId === selectedChildId
+  );
+
   const handleAssignSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
-
-    const chosenParent = allParents.find((p) => p.userId === selectedParentId || p.id === selectedParentId);
-    const chosenChild = allChildren.find((c) => c.id === selectedChildId);
 
     if (!chosenParent || !chosenChild) {
       setErrorMessage('Please select both a valid Parent Mentor and a Follower Child account.');
       return;
     }
 
+    // Anti-Self Assignment constraint
     if (chosenParent.userId === chosenChild.userId) {
       setErrorMessage('Security constraint: An account holder cannot be assigned to copy from themselves.');
       return;
     }
 
+    // Database UUID validation in Cloud Mode
+    if (isCloudMode) {
+      if (!isValidUUID(chosenParent.userId)) {
+        setErrorMessage(
+          `Invalid Mentor UUID: "${chosenParent.userId}". Selected parent "${chosenParent.mentorName}" uses a local placeholder ID. Cloud mode requires a valid Supabase profile UUID from public.profiles.`
+        );
+        return;
+      }
+
+      if (!isValidUUID(chosenChild.userId)) {
+        setErrorMessage(
+          `Invalid Trader UUID: "${chosenChild.userId}". Selected child "${chosenChild.traderName}" uses a local placeholder ID. Cloud mode requires a valid Supabase profile UUID from public.profiles.`
+        );
+        return;
+      }
+    }
+
     setIsSubmitting(true);
 
     try {
-      // 1. Execute database mutation via mt5AdminService
+      // 1. Execute database mutation via mt5AdminService using real UUIDs
       const res = await mt5AdminService.assignChildToParent({
         mentorId: chosenParent.userId,
         traderId: chosenChild.userId,
+        parentAccountId: chosenParent.id,
+        childAccountId: chosenChild.id,
+        lotSettings: {
+          copyMode,
+          multiplier: lotMultiplier,
+          fixedLot,
+          riskPercent: 1.5,
+        },
         isCloudMode,
       });
 
@@ -116,7 +171,47 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         throw new Error(res.error || 'Failed to assign account in Supabase');
       }
 
-      // 2. Log audit event
+      // 2. Synchronize AppContext & localStorage state so the relationship persists immediately
+      const existingLinkIndex = parentChildLinks.findIndex(
+        (l) => l.traderId === chosenChild.userId || l.childAccountId === chosenChild.id
+      );
+
+      const updatedLink: ParentChildLink = {
+        id: res.assignmentId || `link_${Date.now()}`,
+        mentorId: chosenParent.userId,
+        traderId: chosenChild.userId,
+        mentorName: chosenParent.mentorName,
+        traderName: chosenChild.traderName,
+        parentAccountId: chosenParent.id,
+        childAccountId: chosenChild.id,
+        status: 'active',
+        lotSettings: {
+          mode: 'custom_lot',
+          customType: copyMode,
+          fixedLot,
+          multiplier: lotMultiplier,
+          riskPercent: 1.5,
+          maxLotCap: 5.0,
+          minLotClamp: 0.01,
+          maxDrawdownProtectionPercent: 15.0,
+          copyPendingOrders: true,
+          syncSlTp: true,
+          slippageMaxPips: 3.0,
+        },
+        linkedAt: new Date().toISOString(),
+        totalTradesCopied: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalTradesCopied : 0,
+        totalProfitUSD: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalProfitUSD : 0.0,
+        lastSyncAt: new Date().toISOString(),
+      };
+
+      const nextLinks =
+        existingLinkIndex >= 0
+          ? parentChildLinks.map((l, idx) => (idx === existingLinkIndex ? updatedLink : l))
+          : [updatedLink, ...parentChildLinks];
+
+      localStorage.setItem('tradesync_links', JSON.stringify(nextLinks));
+
+      // 3. Log audit event
       addAuditLog({
         actorId: currentUser.id,
         actorName: currentUser.fullName,
@@ -125,7 +220,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         targetResource: 'mt5_accounts / mentor_assignments',
         targetId: chosenChild.id,
         result: 'success',
-        details: `Assigned Child #${chosenChild.accountNumber} (${chosenChild.traderName}) to Parent #${chosenParent.accountNumber} (${chosenParent.mentorName}). Sizing: ${copyMode} (${copyMode === 'multiplier' ? lotMultiplier + 'x' : fixedLot + ' lots'}).`,
+        details: `Assigned Child #${chosenChild.accountNumber} (${chosenChild.traderName}) to Parent #${chosenParent.accountNumber} (${chosenParent.mentorName}). Sizing: ${copyMode} (${copyMode === 'multiplier' ? lotMultiplier + 'x' : fixedLot + ' lots'}). Persistence: Supabase mentor_assignments [${res.assignmentId || 'synced'}].`,
       });
 
       onAssignmentSuccess();
@@ -136,9 +231,6 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       setIsSubmitting(false);
     }
   };
-
-  const selectedParentObj = allParents.find((p) => p.userId === selectedParentId || p.id === selectedParentId);
-  const selectedChildObj = allChildren.find((c) => c.id === selectedChildId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
@@ -153,8 +245,13 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
               <h3 className="text-base font-bold text-white">
                 {type === 'parent' ? 'Link Child Account to Parent' : 'Assign Child to Mentor'}
               </h3>
-              <p className="text-xs text-slate-400">
-                Authorized Super Admin Parent-Child Stream Mapping
+              <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                <span>Authorized Super Admin Parent-Child Stream Mapping</span>
+                {isCloudMode && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
+                    • <Database className="h-3 w-3" /> Supabase
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -169,9 +266,12 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         {/* Form Body */}
         <form onSubmit={handleAssignSubmit} className="p-5 space-y-4">
           {errorMessage && (
-            <div className="rounded-lg border border-rose-800 bg-rose-950/40 p-3 flex items-start gap-2.5 text-xs text-rose-300">
-              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>{errorMessage}</span>
+            <div className="rounded-lg border border-rose-800 bg-rose-950/40 p-3 flex items-start gap-2.5 text-xs text-rose-300 animate-in fade-in">
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+              <div className="space-y-0.5">
+                <span className="font-semibold block">Assignment Error</span>
+                <span className="font-mono text-[11px] leading-relaxed block">{errorMessage}</span>
+              </div>
             </div>
           )}
 
@@ -182,10 +282,10 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 Master Parent
               </span>
               <div className="text-xs font-semibold text-white truncate">
-                {selectedParentObj ? selectedParentObj.mentorName : 'Select Parent'}
+                {chosenParent ? chosenParent.mentorName : 'Select Parent'}
               </div>
               <div className="text-[10px] text-slate-400 font-mono">
-                {selectedParentObj ? `#${selectedParentObj.accountNumber}` : '—'}
+                {chosenParent ? `#${chosenParent.accountNumber}` : '—'}
               </div>
             </div>
 
@@ -199,10 +299,10 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 Follower Child
               </span>
               <div className="text-xs font-semibold text-white truncate">
-                {selectedChildObj ? selectedChildObj.traderName : 'Select Child'}
+                {chosenChild ? chosenChild.traderName : 'Select Child'}
               </div>
               <div className="text-[10px] text-slate-400 font-mono">
-                {selectedChildObj ? `#${selectedChildObj.accountNumber}` : '—'}
+                {chosenChild ? `#${chosenChild.accountNumber}` : '—'}
               </div>
             </div>
           </div>
@@ -210,7 +310,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
           {/* Parent Selection */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
-              <span>Parent MT5 Account (Mentor)</span>
+              <span>Parent MT5 Account (Mentor Master)</span>
               <span className="text-[10px] text-slate-500 font-mono">Role: Mentor</span>
             </label>
             <select
@@ -219,12 +319,22 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
               disabled={type === 'parent'}
               className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {allParents.map((p) => (
-                <option key={p.userId || p.id} value={p.userId}>
-                  {p.mentorName} — #{p.accountNumber} ({p.brokerName} / {p.brokerServer}) [{p.assignedChildCount} Followers]
-                </option>
-              ))}
+              {allParents.length === 0 ? (
+                <option value="">No Parent MT5 Accounts Available</option>
+              ) : (
+                allParents.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.mentorName} — #{p.accountNumber} ({p.brokerName} / {p.brokerServer}) [{p.assignedChildCount} Followers]
+                  </option>
+                ))
+              )}
             </select>
+            {chosenParent && (
+              <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 px-1">
+                <span>Account ID: {chosenParent.id.substring(0, 8)}...</span>
+                <span>Mentor UUID: {chosenParent.userId.substring(0, 8)}...</span>
+              </div>
+            )}
           </div>
 
           {/* Child Selection */}
@@ -239,12 +349,22 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
               disabled={type === 'child'}
               className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {allChildren.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.traderName} — #{c.accountNumber} ({c.brokerName}) {c.isAssigned ? `[Assigned: ${c.assignedMentorName}]` : '[UNASSIGNED]'}
-                </option>
-              ))}
+              {allChildren.length === 0 ? (
+                <option value="">No Follower Child Accounts Available</option>
+              ) : (
+                allChildren.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.traderName} — #{c.accountNumber} ({c.brokerName}) {c.isAssigned ? `[Assigned: ${c.assignedMentorName}]` : '[UNASSIGNED]'}
+                  </option>
+                ))
+              )}
             </select>
+            {chosenChild && (
+              <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 px-1">
+                <span>Account ID: {chosenChild.id.substring(0, 8)}...</span>
+                <span>Trader UUID: {chosenChild.userId.substring(0, 8)}...</span>
+              </div>
+            )}
           </div>
 
           {/* Copy Mode & Risk Controls */}
@@ -318,7 +438,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
 
           {/* Authorization Notice */}
           <div className="text-[10px] text-slate-500 font-mono leading-tight">
-            Authorization: Executing as Super Admin. This operation updates database link metadata and initiates real-time MT5 bridge order routing.
+            Authorization: Executing as Super Admin. Updates public.mentor_assignments in Supabase and synchronizes trade-copy routing parameters.
           </div>
 
           {/* Modal Actions */}
@@ -333,8 +453,8 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors flex items-center gap-1.5"
+              disabled={isSubmitting || allParents.length === 0 || allChildren.length === 0}
+              className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
                 <>
