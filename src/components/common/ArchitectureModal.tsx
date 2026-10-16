@@ -598,13 +598,23 @@ CREATE POLICY "Traders view their active links" ON parent_child_links FOR SELECT
                   <h4 className="text-xs font-bold text-white">schema.sql</h4>
                   <p className="text-[11px] text-slate-400">Paste directly into Supabase SQL Editor</p>
                 </div>
-                <button
-                  onClick={() => copyToClipboard(supabaseSchema, 'supabase')}
-                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
-                >
-                  {copiedKey === 'supabase' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                  <span>{copiedKey === 'supabase' ? 'Copied SQL' : 'Copy SQL'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="/schema.sql"
+                    download="schema.sql"
+                    className="flex items-center gap-1.5 rounded-lg border border-cyan-700/60 bg-cyan-950/60 hover:bg-cyan-900/60 px-3 py-1.5 text-xs text-cyan-300 transition-colors"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download .sql</span>
+                  </a>
+                  <button
+                    onClick={() => copyToClipboard(supabaseSchema, 'supabase')}
+                    className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700 transition-colors"
+                  >
+                    {copiedKey === 'supabase' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    <span>{copiedKey === 'supabase' ? 'Copied SQL' : 'Copy SQL'}</span>
+                  </button>
+                </div>
               </div>
               <pre className="rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs text-slate-300 overflow-x-auto max-h-[55vh]">
                 <code>{supabaseSchema}</code>

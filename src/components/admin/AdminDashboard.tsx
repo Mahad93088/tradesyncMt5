@@ -16,7 +16,8 @@ import {
   ShieldCheck,
   Bell,
   Clock,
-  Info
+  Info,
+  Layers
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StatsCard } from '../common/StatsCard';
@@ -180,6 +181,59 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           isDemo={true}
           onClick={() => onNavigateTab('connections')}
         />
+      </div>
+
+      {/* MT5 Account Management Quick Navigation Hub */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+        <div
+          onClick={() => onNavigateTab('parent-accounts')}
+          className="group rounded-xl border border-slate-800 bg-slate-900/80 hover:border-cyan-700/80 p-4 transition-all cursor-pointer flex items-center justify-between"
+        >
+          <div className="flex items-center gap-3.5">
+            <div className="p-2.5 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400 group-hover:scale-105 transition-transform">
+              <Server className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-bold text-white group-hover:text-cyan-300 transition-colors">
+                  Parent MT5 Accounts
+                </h4>
+                <span className="rounded bg-cyan-950 border border-cyan-800 px-1.5 py-0.2 text-[10px] font-mono text-cyan-400">
+                  {mt5Accounts.filter((a) => a.accountRole === 'parent').length} Masters
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Manage mentor terminals, inspect connected children, and reassign streams.
+              </p>
+            </div>
+          </div>
+          <ArrowUpRight className="h-4 w-4 text-slate-500 group-hover:text-cyan-400 transition-colors shrink-0" />
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('child-accounts')}
+          className="group rounded-xl border border-slate-800 bg-slate-900/80 hover:border-emerald-700/80 p-4 transition-all cursor-pointer flex items-center justify-between"
+        >
+          <div className="flex items-center gap-3.5">
+            <div className="p-2.5 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-400 group-hover:scale-105 transition-transform">
+              <Layers className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-bold text-white group-hover:text-emerald-300 transition-colors">
+                  Child MT5 Accounts
+                </h4>
+                <span className="rounded bg-emerald-950 border border-emerald-800 px-1.5 py-0.2 text-[10px] font-mono text-emerald-400">
+                  {mt5Accounts.filter((a) => a.accountRole === 'child').length} Followers
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Audit follower accounts, assign mentor parents, and toggle trading status.
+              </p>
+            </div>
+          </div>
+          <ArrowUpRight className="h-4 w-4 text-slate-500 group-hover:text-emerald-400 transition-colors shrink-0" />
+        </div>
       </div>
 
       {/* User, Subscription, Connection, and Signal Status Breakdown */}

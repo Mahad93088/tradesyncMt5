@@ -1,0 +1,6 @@
+{
+  "summary": "Complete, production-ready TradeSync MT5 Supabase PostgreSQL migration file (schema.sql). Defines profiles, mentor_assignments, mt5_accounts, trades, trade_feedback tables, comprehensive Row Level Security (RLS) policies, anti-privilege escalation triggers, and promote_user_to_admin utility.",
+  "updatedAt": "2026-10-15T11:29:00.380496+00:00",
+  "requestFeedback": false,
+  "userFacing": true
+}

@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   AlertOctagon,
   Server,
+  Layers,
   Zap,
   Ticket,
   SlidersHorizontal,
@@ -89,6 +90,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
                 >
                   <LayoutDashboard className="h-4 w-4" />
                   <span>Overview</span>
+                </button>
+
+                <button
+                  onClick={() => onTabChange('parent-accounts')}
+                  className={navItemClass(currentTab === 'parent-accounts')}
+                >
+                  <Server className="h-4 w-4" />
+                  <span>Parent MT5 Accounts</span>
+                </button>
+
+                <button
+                  onClick={() => onTabChange('child-accounts')}
+                  className={navItemClass(currentTab === 'child-accounts')}
+                >
+                  <Layers className="h-4 w-4" />
+                  <span>Child MT5 Accounts</span>
                 </button>
 
                 <button

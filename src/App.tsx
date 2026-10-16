@@ -9,6 +9,8 @@ import { AuthModal } from './components/common/AuthModal';
 
 // Admin Views
 import { AdminDashboard } from './components/admin/AdminDashboard';
+import { ParentAccountsView } from './components/admin/ParentAccountsView';
+import { ChildAccountsView } from './components/admin/ChildAccountsView';
 import { MentorsManagement } from './components/admin/MentorsManagement';
 import { ProvisionMentorModal } from './components/admin/ProvisionMentorModal';
 import { TradersManagement } from './components/admin/TradersManagement';
@@ -92,6 +94,8 @@ const AppContent: React.FC = () => {
                     onOpenAddTrader={() => setIsAddTraderOpen(true)}
                   />
                 )}
+                {currentTab === 'parent-accounts' && <ParentAccountsView />}
+                {currentTab === 'child-accounts' && <ChildAccountsView />}
                 {currentTab === 'mentors' && (
                   <MentorsManagement
                     isCreateOpen={isCreateMentorOpen}

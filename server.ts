@@ -88,6 +88,21 @@ async function startServer() {
     });
   });
 
+  // Dedicated Download Endpoint for schema.sql
+  app.get(['/schema.sql', '/api/download-schema'], (_req: Request, res: Response) => {
+    const schemaPath = path.resolve(__dirname, 'supabase', 'schema.sql');
+    res.setHeader('Content-Type', 'application/sql');
+    res.setHeader('Content-Disposition', 'attachment; filename="schema.sql"');
+    res.download(schemaPath, 'schema.sql', (err) => {
+      if (err) {
+        console.error('Download schema error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to download schema.sql' });
+        }
+      }
+    });
+  });
+
   // Dedicated Supabase Connection, Auth & Tables Verification Endpoint
   app.get('/api/supabase/verify', async (_req: Request, res: Response) => {
     if (!supabaseUrl || !publishableKey) {
