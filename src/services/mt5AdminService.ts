@@ -1,4 +1,10 @@
 import { supabase, isSupabaseConfigured, DbMT5Account, DbProfile, DbMentorAssignment, DbTrade } from '../lib/supabase';
+import {
+  ensureValidSession,
+  executeWithAuthRetry,
+  isJwtExpiredError,
+  SessionExpiredError,
+} from '../lib/sessionManager';
 import { MT5Account, User, ParentChildLink, Trade, LotSettings } from '../types';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -141,6 +147,13 @@ export interface AssignChildToParentParams {
   isCloudMode?: boolean;
 }
 
+export interface AssignChildResult {
+  success: boolean;
+  error?: string;
+  assignmentId?: string;
+  needsReauth?: boolean;
+}
+
 /**
  * Service to manage Parent and Child MT5 Accounts for Super Admins.
  * Connects directly to Supabase PostgreSQL (mt5_accounts, profiles, mentor_assignments, trades)
@@ -161,6 +174,9 @@ export const mt5AdminService = {
 
     if (isCloud) {
       try {
+        // 0. Proactively verify and refresh Supabase session if expired
+        await ensureValidSession();
+
         // 1. Fetch verified mentor profiles from Supabase profiles
         const { data: mentorProfiles, error: mentorsError } = await supabase
           .from('profiles')
@@ -436,6 +452,9 @@ export const mt5AdminService = {
 
     if (isCloud) {
       try {
+        // 0. Proactively verify and refresh Supabase session if expired
+        await ensureValidSession();
+
         // 1. Fetch trader profiles from Supabase profiles (role != mentor and role != admin)
         const { data: traderProfiles, error: traderError } = await supabase
           .from('profiles')
@@ -680,11 +699,7 @@ export const mt5AdminService = {
    * Assigns or reassigns a child account/trader to a parent account/mentor in Supabase.
    * Validates database UUIDs strictly before sending to PostgreSQL, preventing syntax errors.
    */
-  async assignChildToParent(params: AssignChildToParentParams): Promise<{
-    success: boolean;
-    error?: string;
-    assignmentId?: string;
-  }> {
+  async assignChildToParent(params: AssignChildToParentParams): Promise<AssignChildResult> {
     const isCloud = params.isCloudMode && isSupabaseConfigured();
 
     // 1. Structural and Anti-Self-Assignment Checks
@@ -719,115 +734,155 @@ export const mt5AdminService = {
       }
 
       try {
-        // 3. Verify Mentor Eligibility (must be active mentor in profiles)
-        const { data: mentorProfile, error: mentorCheckErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, email, role, status')
-          .eq('id', params.mentorId)
-          .single();
+        // 3. Execute with automatic session verification and JWT expiration retry
+        return await executeWithAuthRetry(async (activeSession) => {
+          // Explicitly ensure Supabase client session uses the current authenticated session
+          await supabase.auth.setSession({
+            access_token: activeSession.access_token,
+            refresh_token: activeSession.refresh_token,
+          });
 
-        if (mentorCheckErr || !mentorProfile) {
-          return {
-            success: false,
-            error: `Target mentor profile not found in public.profiles (UUID: ${params.mentorId}).`,
-          };
-        }
-
-        if (mentorProfile.role !== 'mentor') {
-          return {
-            success: false,
-            error: `Security constraint: User "${mentorProfile.full_name || mentorProfile.email}" has role "${mentorProfile.role}". Only accounts with role 'mentor' can receive follower assignments.`,
-          };
-        }
-
-        if (mentorProfile.status !== 'active') {
-          return {
-            success: false,
-            error: `Mentor account "${mentorProfile.full_name}" is currently ${mentorProfile.status}. Only active mentors can receive assignments.`,
-          };
-        }
-
-        // 4. Verify Trader Eligibility (must be active in profiles)
-        const { data: traderProfile, error: traderCheckErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, status')
-          .eq('id', params.traderId)
-          .single();
-
-        if (traderCheckErr || !traderProfile) {
-          return {
-            success: false,
-            error: `Target trader profile not found in public.profiles (UUID: ${params.traderId}).`,
-          };
-        }
-
-        if (traderProfile.status !== 'active') {
-          return {
-            success: false,
-            error: `Trader account "${traderProfile.full_name}" is currently ${traderProfile.status}. Account must be active to create or update an assignment.`,
-          };
-        }
-
-        // 5. Update MT5 Accounts Roles if account UUIDs were provided
-        if (params.parentAccountId && isValidUUID(params.parentAccountId)) {
-          await supabase
-            .from('mt5_accounts')
-            .update({ account_role: 'parent' })
-            .eq('id', params.parentAccountId);
-        }
-
-        if (params.childAccountId && isValidUUID(params.childAccountId)) {
-          await supabase
-            .from('mt5_accounts')
-            .update({ account_role: 'child' })
-            .eq('id', params.childAccountId);
-        }
-
-        // 6. Check existing assignment in public.mentor_assignments
-        const { data: existing, error: existingErr } = await supabase
-          .from('mentor_assignments')
-          .select('id, mentor_id, trader_id, status')
-          .eq('trader_id', params.traderId)
-          .maybeSingle();
-
-        if (existingErr) {
-          console.warn('[mt5AdminService] Error checking existing assignment:', existingErr.message);
-        }
-
-        if (existing) {
-          // If already assigned to this or another mentor, update to the target mentor and mark active
-          const { data: updated, error: updateError } = await supabase
-            .from('mentor_assignments')
-            .update({
-              mentor_id: params.mentorId,
-              status: 'active',
-              assigned_at: new Date().toISOString(),
-            })
-            .eq('id', existing.id)
-            .select()
+          // Verify Mentor Eligibility (must be active mentor in profiles)
+          const { data: mentorProfile, error: mentorCheckErr } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, role, status')
+            .eq('id', params.mentorId)
             .single();
 
-          if (updateError) throw updateError;
-          return { success: true, assignmentId: updated.id };
-        } else {
-          // Create fresh assignment in public.mentor_assignments
-          const { data: inserted, error: insertError } = await supabase
-            .from('mentor_assignments')
-            .insert([{
-              mentor_id: params.mentorId,
-              trader_id: params.traderId,
-              status: 'active',
-              assigned_at: new Date().toISOString(),
-            }])
-            .select()
+          if (mentorCheckErr) {
+            if (isJwtExpiredError(mentorCheckErr)) throw mentorCheckErr;
+            return {
+              success: false,
+              error: `Target mentor profile not found in public.profiles (UUID: ${params.mentorId}).`,
+            };
+          }
+
+          if (!mentorProfile) {
+            return {
+              success: false,
+              error: `Target mentor profile not found in public.profiles (UUID: ${params.mentorId}).`,
+            };
+          }
+
+          if (mentorProfile.role !== 'mentor') {
+            return {
+              success: false,
+              error: `Security constraint: User "${mentorProfile.full_name || mentorProfile.email}" has role "${mentorProfile.role}". Only accounts with role 'mentor' can receive follower assignments.`,
+            };
+          }
+
+          if (mentorProfile.status !== 'active') {
+            return {
+              success: false,
+              error: `Mentor account "${mentorProfile.full_name}" is currently ${mentorProfile.status}. Only active mentors can receive assignments.`,
+            };
+          }
+
+          // Verify Trader Eligibility (must be active in profiles)
+          const { data: traderProfile, error: traderCheckErr } = await supabase
+            .from('profiles')
+            .select('id, full_name, status')
+            .eq('id', params.traderId)
             .single();
 
-          if (insertError) throw insertError;
-          return { success: true, assignmentId: inserted.id };
-        }
+          if (traderCheckErr) {
+            if (isJwtExpiredError(traderCheckErr)) throw traderCheckErr;
+            return {
+              success: false,
+              error: `Target trader profile not found in public.profiles (UUID: ${params.traderId}).`,
+            };
+          }
+
+          if (!traderProfile) {
+            return {
+              success: false,
+              error: `Target trader profile not found in public.profiles (UUID: ${params.traderId}).`,
+            };
+          }
+
+          if (traderProfile.status !== 'active') {
+            return {
+              success: false,
+              error: `Trader account "${traderProfile.full_name}" is currently ${traderProfile.status}. Account must be active to create or update an assignment.`,
+            };
+          }
+
+          // Update MT5 Accounts Roles if account UUIDs were provided
+          if (params.parentAccountId && isValidUUID(params.parentAccountId)) {
+            const { error: pErr } = await supabase
+              .from('mt5_accounts')
+              .update({ account_role: 'parent' })
+              .eq('id', params.parentAccountId);
+            if (pErr && isJwtExpiredError(pErr)) throw pErr;
+          }
+
+          if (params.childAccountId && isValidUUID(params.childAccountId)) {
+            const { error: cErr } = await supabase
+              .from('mt5_accounts')
+              .update({ account_role: 'child' })
+              .eq('id', params.childAccountId);
+            if (cErr && isJwtExpiredError(cErr)) throw cErr;
+          }
+
+          // Check existing assignment in public.mentor_assignments
+          const { data: existing, error: existingErr } = await supabase
+            .from('mentor_assignments')
+            .select('id, mentor_id, trader_id, status')
+            .eq('trader_id', params.traderId)
+            .maybeSingle();
+
+          if (existingErr && isJwtExpiredError(existingErr)) {
+            throw existingErr;
+          }
+
+          if (existing) {
+            // If already assigned to this or another mentor, update to the target mentor and mark active
+            const { data: updated, error: updateError } = await supabase
+              .from('mentor_assignments')
+              .update({
+                mentor_id: params.mentorId,
+                status: 'active',
+                assigned_at: new Date().toISOString(),
+              })
+              .eq('id', existing.id)
+              .select()
+              .single();
+
+            if (updateError) {
+              if (isJwtExpiredError(updateError)) throw updateError;
+              throw updateError;
+            }
+            return { success: true, assignmentId: updated.id };
+          } else {
+            // Create fresh assignment in public.mentor_assignments
+            const { data: inserted, error: insertError } = await supabase
+              .from('mentor_assignments')
+              .insert([{
+                mentor_id: params.mentorId,
+                trader_id: params.traderId,
+                status: 'active',
+                assigned_at: new Date().toISOString(),
+              }])
+              .select()
+              .single();
+
+            if (insertError) {
+              if (isJwtExpiredError(insertError)) throw insertError;
+              throw insertError;
+            }
+            return { success: true, assignmentId: inserted.id };
+          }
+        });
       } catch (err: any) {
         console.error('[mt5AdminService] Assignment failed in Supabase:', err);
-        return { success: false, error: err.message || 'Supabase database error during assignment.' };
+        const isExpired = isJwtExpiredError(err) || err.needsReauth || err instanceof SessionExpiredError;
+        return {
+          success: false,
+          error: isExpired
+            ? 'Your authentication session has expired. Please sign in again to complete the assignment.'
+            : (err.message || 'Supabase database error during assignment.'),
+          needsReauth: isExpired,
+        };
       }
     }
 
@@ -841,29 +896,47 @@ export const mt5AdminService = {
     assignmentId?: string;
     traderId: string;
     isCloudMode?: boolean;
-  }): Promise<{ success: boolean; error?: string }> {
+  }): Promise<{ success: boolean; error?: string; needsReauth?: boolean }> {
     const isCloud = params.isCloudMode && isSupabaseConfigured();
 
     if (isCloud) {
       try {
-        if (params.assignmentId && isValidUUID(params.assignmentId)) {
-          const { error } = await supabase
-            .from('mentor_assignments')
-            .update({ status: 'inactive' })
-            .eq('id', params.assignmentId);
+        return await executeWithAuthRetry(async (activeSession) => {
+          await supabase.auth.setSession({
+            access_token: activeSession.access_token,
+            refresh_token: activeSession.refresh_token,
+          });
 
-          if (error) throw error;
-        } else if (isValidUUID(params.traderId)) {
-          const { error } = await supabase
-            .from('mentor_assignments')
-            .update({ status: 'inactive' })
-            .eq('trader_id', params.traderId);
+          if (params.assignmentId && isValidUUID(params.assignmentId)) {
+            const { error } = await supabase
+              .from('mentor_assignments')
+              .update({ status: 'inactive' })
+              .eq('id', params.assignmentId);
 
-          if (error) throw error;
-        }
-        return { success: true };
+            if (error) {
+              if (isJwtExpiredError(error)) throw error;
+              throw error;
+            }
+          } else if (isValidUUID(params.traderId)) {
+            const { error } = await supabase
+              .from('mentor_assignments')
+              .update({ status: 'inactive' })
+              .eq('trader_id', params.traderId);
+
+            if (error) {
+              if (isJwtExpiredError(error)) throw error;
+              throw error;
+            }
+          }
+          return { success: true };
+        });
       } catch (err: any) {
-        return { success: false, error: err.message };
+        const isExpired = isJwtExpiredError(err) || err.needsReauth || err instanceof SessionExpiredError;
+        return {
+          success: false,
+          error: isExpired ? 'Your session has expired. Please sign in again.' : err.message,
+          needsReauth: isExpired,
+        };
       }
     }
 

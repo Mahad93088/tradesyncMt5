@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Session, User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase, isSupabaseConfigured, DbProfile } from '../lib/supabase';
+import { ensureValidSession } from '../lib/sessionManager';
 import { User, UserRole } from '../types';
 
 interface AuthContextType {
@@ -25,6 +26,10 @@ interface AuthContextType {
   switchToDemoMode: (role?: UserRole) => void;
   switchToCloudMode: () => void;
   setDemoUser: (user: User) => void;
+
+  // Session Refresh & Token Management
+  refreshSession: () => Promise<{ success: boolean; error?: string }>;
+  checkAndRefreshSession: () => Promise<Session | null>;
 
   // Admin Server-Side Role Promotion (Calls Express backend proxy)
   promoteUser: (targetUserId: string, newRole: UserRole) => Promise<{ success: boolean; error?: string }>;
@@ -282,9 +287,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Refresh expired access token using Supabase client session-refresh flow
+  const refreshSession = async (): Promise<{ success: boolean; error?: string }> => {
+    if (!configured) return { success: false, error: 'Supabase credentials are not configured.' };
+    try {
+      const { data, error } = await supabase.auth.refreshSession(
+        session?.refresh_token ? { refresh_token: session.refresh_token } : undefined
+      );
+      if (error || !data.session) {
+        return { success: false, error: error?.message || 'Failed to refresh authentication session.' };
+      }
+      setSession(data.session);
+      setSupabaseUser(data.user);
+      await supabase.auth.setSession({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      });
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Error refreshing session' };
+    }
+  };
+
+  // Proactively check session validity and refresh if expired or near expiration
+  const checkAndRefreshSession = async (): Promise<Session | null> => {
+    const res = await ensureValidSession();
+    if (res.valid && res.session) {
+      if (res.refreshed) {
+        setSession(res.session);
+        setSupabaseUser(res.session.user);
+      }
+      return res.session;
+    }
+    return null;
+  };
+
   // Promote user via server-side secure Express endpoint using service role
   const promoteUser = async (targetUserId: string, newRole: UserRole) => {
-    if (!session?.access_token) {
+    // Ensure token is non-expired before making backend call
+    const activeSession = await checkAndRefreshSession();
+    const token = activeSession?.access_token || session?.access_token;
+    if (!token) {
       return { success: false, error: 'Unauthorized: You must be logged in as an administrator.' };
     }
 
@@ -293,7 +336,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ targetUserId, newRole }),
       });
@@ -372,6 +415,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signIn,
         signOut,
         resetPassword,
+        refreshSession,
+        checkAndRefreshSession,
         switchToDemoMode,
         switchToCloudMode,
         setDemoUser,
