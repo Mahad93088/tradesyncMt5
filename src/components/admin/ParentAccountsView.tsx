@@ -14,12 +14,15 @@ import {
   Radio,
   ExternalLink,
   ShieldCheck,
-  UserCheck
+  UserCheck,
+  Sparkles,
+  AlertCircle
 } from 'lucide-react';
 import { StatusBadge } from '../common/StatusBadge';
 import { ParentAccountItem, ChildAccountItem, mt5AdminService } from '../../services/mt5AdminService';
 import { AccountDetailsModal } from './AccountDetailsModal';
 import { AssignParentModal } from './AssignParentModal';
+import { CreateDemoAccountModal } from './CreateDemoAccountModal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
 
@@ -39,6 +42,11 @@ export const ParentAccountsView: React.FC = () => {
   const [selectedAccountForDetails, setSelectedAccountForDetails] = useState<ParentAccountItem | null>(null);
   const [selectedParentForAssign, setSelectedParentForAssign] = useState<ParentAccountItem | null>(null);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
+  const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState(false);
+
+  // Seeding state
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [seedNotice, setSeedNotice] = useState<string | null>(null);
 
   const fetchAccounts = async () => {
     setIsLoading(true);
@@ -71,6 +79,27 @@ export const ParentAccountsView: React.FC = () => {
   useEffect(() => {
     fetchAccounts();
   }, [mt5Accounts, users, parentChildLinks, isCloudMode]);
+
+  const handleSeedDemoAccounts = async () => {
+    setIsSeeding(true);
+    setSeedNotice(null);
+    try {
+      const res = await mt5AdminService.seedStandardDemoAccounts({
+        isCloudMode,
+        currentUserId: currentUser.id,
+      });
+
+      if (res.success) {
+        setSeedNotice('Successfully provisioned sandbox demo accounts! Refreshing list...');
+        await fetchAccounts();
+        setTimeout(() => setSeedNotice(null), 4000);
+      }
+    } catch (err: any) {
+      console.error('Failed to seed demo accounts:', err);
+    } finally {
+      setIsSeeding(false);
+    }
+  };
 
   const handleUnlinkChild = async (childAccountId: string, traderId: string, assignmentId?: string) => {
     if (!window.confirm('Are you sure you want to unlink this child account from the master parent?')) {
@@ -150,7 +179,25 @@ export const ParentAccountsView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={handleSeedDemoAccounts}
+            disabled={isSeeding || isLoading}
+            className="flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
+            title="Seed sandbox demo parent and child accounts for testing"
+          >
+            <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
+            <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
+          </button>
+
+          <button
+            onClick={() => setIsCreateDemoModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>New Demo Parent</span>
+          </button>
+
           <button
             onClick={fetchAccounts}
             disabled={isLoading}
@@ -161,6 +208,13 @@ export const ParentAccountsView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {seedNotice && (
+        <div className="rounded-lg border border-emerald-800 bg-emerald-950/60 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+          <span>{seedNotice}</span>
+        </div>
+      )}
 
       {/* Operational Disclaimer & Demo / Live Distinction Banner */}
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-2 text-xs">
@@ -181,126 +235,108 @@ export const ParentAccountsView: React.FC = () => {
               </span>
             </div>
             <p className="text-slate-400 text-[11px] leading-relaxed">
-              <strong>Live Account Verification:</strong> Accounts tagged as <span className="text-emerald-400 font-semibold font-mono">LIVE</span> connect to genuine MT5 brokers via the TradeSync EA daemon bridge. Accounts tagged as <span className="text-amber-400 font-semibold font-mono">DEMO</span> or running in simulation harness emulate trade feeds for staging and verification.
+              Parent terminals broadcast orders to child terminals based on Row-Level Security and active mentor assignments. Demo accounts are simulated sandbox bridges for testing sizing and execution routing.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Search and Filters Bar */}
-      <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-3.5">
+      {/* Filter and Search Bar */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
-            placeholder="Search mentor name, login #, broker, or server..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+            placeholder="Search by mentor name, account #, broker, or server..."
+            className="w-full rounded-lg border border-slate-800 bg-slate-900 pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
           />
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 text-xs">
-          {/* Connection Status Filter */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400 font-medium">Status:</span>
-            <select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
-            >
-              <option value="all">All Statuses</option>
-              <option value="connected">Connected</option>
-              <option value="disconnected">Disconnected</option>
-              <option value="connecting">Connecting</option>
-              <option value="error">Error</option>
-            </select>
-          </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
+          >
+            <option value="all">All Statuses</option>
+            <option value="connected">Connected</option>
+            <option value="disconnected">Disconnected</option>
+            <option value="connecting">Connecting</option>
+            <option value="error">Error</option>
+          </select>
 
-          {/* Account Type Filter */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-400 font-medium">Type:</span>
-            <select
-              value={filterAccountType}
-              onChange={(e) => setFilterAccountType(e.target.value)}
-              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
-            >
-              <option value="all">All Types</option>
-              <option value="live">Live Accounts</option>
-              <option value="demo">Demo / Sandbox</option>
-            </select>
-          </div>
-
-          {(searchQuery || filterStatus !== 'all' || filterAccountType !== 'all') && (
-            <button
-              onClick={() => {
-                setSearchQuery('');
-                setFilterStatus('all');
-                setFilterAccountType('all');
-              }}
-              className="text-[11px] text-cyan-400 hover:underline px-1 py-1"
-            >
-              Reset Filters
-            </button>
-          )}
+          <select
+            value={filterAccountType}
+            onChange={(e) => setFilterAccountType(e.target.value)}
+            className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
+          >
+            <option value="all">All Account Types</option>
+            <option value="demo">Demo Only</option>
+            <option value="live">Live Broker</option>
+          </select>
         </div>
       </div>
 
-      {/* Parent Accounts Table */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/90 shadow-md overflow-hidden">
+      {/* Accounts Table */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900 overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950/60 border-b border-slate-800 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+            <thead className="bg-slate-950/60 border-b border-slate-800 text-slate-400 font-medium">
               <tr>
-                <th className="py-3 px-4">Mentor / Provider</th>
-                <th className="py-3 px-4">MT5 Login</th>
+                <th className="py-3 px-4">Master Mentor</th>
+                <th className="py-3 px-4">MT5 Account #</th>
                 <th className="py-3 px-4">Broker / Server</th>
                 <th className="py-3 px-4">Account Type</th>
                 <th className="py-3 px-4">Connection</th>
                 <th className="py-3 px-4 text-right">Balance / Equity</th>
                 <th className="py-3 px-4 text-center">Assigned Children</th>
-                <th className="py-3 px-4">Created Date</th>
+                <th className="py-3 px-4">Registered</th>
                 <th className="py-3 px-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {isLoading ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400 font-mono">
-                    <div className="flex items-center justify-center gap-2">
-                      <RefreshCw className="h-4 w-4 animate-spin text-cyan-400" />
-                      <span>Loading Parent MT5 Accounts...</span>
-                    </div>
+                  <td colSpan={9} className="py-12 text-center text-slate-400">
+                    <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2 text-cyan-400" />
+                    <p className="text-xs">Loading Parent MT5 Accounts...</p>
                   </td>
                 </tr>
               ) : filteredParents.length > 0 ? (
                 filteredParents.map((parent) => (
-                  <tr key={parent.id} className="hover:bg-slate-850/50 transition-colors">
-                    {/* Mentor Name */}
+                  <tr key={parent.id} className="hover:bg-slate-800/40 transition-colors">
+                    {/* Mentor Info */}
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2.5">
-                        <div className="h-7 w-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-xs text-slate-300 overflow-hidden shrink-0">
-                          {parent.mentorAvatar ? (
-                            <img src={parent.mentorAvatar} alt="" className="h-full w-full object-cover" />
-                          ) : (
-                            parent.mentorName[0]
-                          )}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="font-semibold text-white truncate">{parent.mentorName}</div>
-                          <div className="text-[10px] text-slate-400 font-mono truncate">{parent.mentorEmail}</div>
+                        {parent.mentorAvatar ? (
+                          <img
+                            src={parent.mentorAvatar}
+                            alt={parent.mentorName}
+                            className="h-7 w-7 rounded-full object-cover border border-slate-700"
+                          />
+                        ) : (
+                          <div className="h-7 w-7 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-300 font-bold flex items-center justify-center text-[10px]">
+                            {parent.mentorName.slice(0, 2).toUpperCase()}
+                          </div>
+                        )}
+                        <div>
+                          <div className="font-semibold text-white flex items-center gap-1.5">
+                            <span>{parent.mentorName}</span>
+                            <span className="text-[10px] text-cyan-400 font-mono">Master</span>
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono">{parent.mentorEmail}</div>
                         </div>
                       </div>
                     </td>
 
-                    {/* MT5 Login */}
-                    <td className="py-3 px-4">
-                      <span className="font-mono font-bold text-cyan-300 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                        #{parent.accountNumber}
-                      </span>
+                    {/* Account Number */}
+                    <td className="py-3 px-4 font-mono font-bold text-white">
+                      #{parent.accountNumber}
                     </td>
 
-                    {/* Broker / Server */}
+                    {/* Broker & Server */}
                     <td className="py-3 px-4">
                       <div className="font-medium text-slate-200">{parent.brokerName}</div>
                       <div className="text-[10px] text-slate-400 font-mono">{parent.brokerServer}</div>
@@ -308,12 +344,12 @@ export const ParentAccountsView: React.FC = () => {
 
                     {/* Account Type */}
                     <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono border font-semibold ${
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase border ${
                         parent.accountType === 'live'
-                          ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                          : 'bg-amber-950/80 text-amber-300 border-amber-800'
+                          ? 'bg-rose-950/70 text-rose-300 border-rose-800'
+                          : 'bg-cyan-950/70 text-cyan-300 border-cyan-800'
                       }`}>
-                        {parent.accountType === 'live' ? 'Live MT5' : 'Simulated Demo'}
+                        {parent.accountType}
                       </span>
                     </td>
 
@@ -382,7 +418,38 @@ export const ParentAccountsView: React.FC = () => {
               ) : (
                 <tr>
                   <td colSpan={9} className="py-12 text-center text-slate-400">
-                    <p className="text-xs">No parent MT5 accounts match the selected filters.</p>
+                    {parents.length === 0 ? (
+                      <div className="max-w-md mx-auto space-y-3 p-4">
+                        <div className="p-3 bg-slate-800/80 rounded-full w-12 h-12 flex items-center justify-center mx-auto text-cyan-400 border border-slate-700">
+                          <Server className="h-6 w-6" />
+                        </div>
+                        <h4 className="text-sm font-bold text-white">No Parent MT5 Accounts Found</h4>
+                        <p className="text-xs text-slate-400 leading-relaxed">
+                          No mentor master trading accounts are currently provisioned in the system. You can provision demo accounts for sandbox routing tests or create a custom account record.
+                        </p>
+                        <div className="flex items-center justify-center gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={handleSeedDemoAccounts}
+                            disabled={isSeeding}
+                            className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-3.5 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>⚡ Seed Sandbox Demo Accounts</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsCreateDemoModalOpen(true)}
+                            className="rounded-lg bg-slate-800 hover:bg-slate-700 text-white px-3.5 py-1.5 text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            <span>Create Demo Parent</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs">No parent MT5 accounts match the selected filters.</p>
+                    )}
                   </td>
                 </tr>
               )}
@@ -416,6 +483,16 @@ export const ParentAccountsView: React.FC = () => {
         allParents={parents}
         allChildren={children}
         onAssignmentSuccess={async () => {
+          await fetchAccounts();
+        }}
+      />
+
+      {/* Create Demo Account Modal */}
+      <CreateDemoAccountModal
+        isOpen={isCreateDemoModalOpen}
+        onClose={() => setIsCreateDemoModalOpen(false)}
+        defaultRole="parent"
+        onSuccess={async () => {
           await fetchAccounts();
         }}
       />

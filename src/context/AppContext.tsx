@@ -35,6 +35,7 @@ import {
   INITIAL_SYSTEM_HEALTH,
   INITIAL_NOTIFICATIONS
 } from '../data/mockData';
+import { STANDARD_DEMO_ACCOUNTS } from '../services/mt5AdminService';
 
 interface AppContextType {
   currentUser: User;
@@ -106,6 +107,12 @@ interface AppContextType {
   clearSyncLogs: () => void;
   resetDemoData: () => void;
 
+  // State Setters & Seeding
+  setUsers: React.Dispatch<React.SetStateAction<User[]>>;
+  setMt5Accounts: React.Dispatch<React.SetStateAction<MT5Account[]>>;
+  setParentChildLinks: React.Dispatch<React.SetStateAction<ParentChildLink[]>>;
+  seedDemoAccounts: () => { createdCount: number; accounts: MT5Account[] };
+
   // Audit and Notifications
   addAuditLog: (log: Omit<AuditLog, 'id' | 'timestamp'>) => void;
   markNotificationRead: (id: string) => void;
@@ -118,7 +125,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Load from local storage or fallback to defaults
   const [users, setUsers] = useState<User[]>(() => {
     const saved = localStorage.getItem('tradesync_users');
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        console.warn('Failed to parse tradesync_users:', e);
+      }
+    }
+    return INITIAL_USERS;
   });
 
   const [currentUser, setCurrentUser] = useState<User>(() => {
@@ -127,7 +142,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [mt5Accounts, setMt5Accounts] = useState<MT5Account[]>(() => {
     const saved = localStorage.getItem('tradesync_mt5_accounts');
-    return saved ? JSON.parse(saved) : INITIAL_MT5_ACCOUNTS;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        console.warn('Failed to parse tradesync_mt5_accounts:', e);
+      }
+    }
+    return INITIAL_MT5_ACCOUNTS;
   });
 
   const [mentorProfiles, setMentorProfiles] = useState<MentorProfile[]>(() => {
@@ -1606,17 +1629,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications((prev) => [newNotif, ...prev]);
   };
 
+  const seedDemoAccounts = () => {
+    const existingAccNumbers = new Set(mt5Accounts.map((a) => a.accountNumber));
+    const accountsToAdd: MT5Account[] = [];
+    const usersToAdd: User[] = [];
+
+    for (const item of STANDARD_DEMO_ACCOUNTS) {
+      if (!existingAccNumbers.has(item.account.accountNumber)) {
+        accountsToAdd.push(item.account);
+        usersToAdd.push(item.owner);
+      }
+    }
+
+    const nextAccounts = [...accountsToAdd, ...mt5Accounts];
+    const nextUsers = [...usersToAdd, ...users.filter((u) => !usersToAdd.some((nu) => nu.id === u.id))];
+
+    setMt5Accounts(nextAccounts);
+    setUsers(nextUsers);
+
+    localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(nextAccounts));
+    localStorage.setItem('tradesync_users', JSON.stringify(nextUsers));
+
+    return { createdCount: accountsToAdd.length, accounts: nextAccounts };
+  };
+
   return (
     <AppContext.Provider
       value={{
         currentUser,
         setCurrentUser,
         users,
+        setUsers,
         mt5Accounts,
+        setMt5Accounts,
         mentorProfiles,
         subscriptionPlans,
         subscriptions,
         parentChildLinks,
+        setParentChildLinks,
         trades,
         tradeMappings,
         syncLogs,
@@ -1651,6 +1701,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         simulateErrorEvent,
         clearSyncLogs,
         resetDemoData,
+        seedDemoAccounts,
         addAuditLog,
         markNotificationRead,
         broadcastAnnouncement

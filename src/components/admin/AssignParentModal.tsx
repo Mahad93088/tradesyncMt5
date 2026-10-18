@@ -14,18 +14,23 @@ import {
   LogIn,
   Lock,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Plus,
+  Sparkles,
+  Info
 } from 'lucide-react';
 import {
   ParentAccountItem,
   ChildAccountItem,
   mt5AdminService,
-  isValidUUID
+  isValidUUID,
+  toValidUUID
 } from '../../services/mt5AdminService';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
 import { ParentChildLink } from '../../types';
 import { ensureValidSession, isJwtExpiredError } from '../../lib/sessionManager';
+import { CreateDemoAccountModal } from './CreateDemoAccountModal';
 
 interface AssignParentModalProps {
   isOpen: boolean;
@@ -67,9 +72,15 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [inlineSigningIn, setInlineSigningIn] = useState<boolean>(false);
   const [inlineAuthError, setInlineAuthError] = useState<string | null>(null);
 
-  // Set default selection when modal opens
+  // Account creation & seeding states
+  const [isSeedingAccounts, setIsSeedingAccounts] = useState<boolean>(false);
+  const [seedSuccessNotice, setSeedSuccessNotice] = useState<string | null>(null);
+  const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState<boolean>(false);
+  const [createDemoDefaultRole, setCreateDemoDefaultRole] = useState<'parent' | 'child'>('parent');
+
+  // Set default selection when modal opens or when accounts change
   useEffect(() => {
-    if (!isOpen || !targetAccount) return;
+    if (!isOpen) return;
     setErrorMessage(null);
     setIsSessionExpired(false);
     setShowInlineSignIn(false);
@@ -79,36 +90,55 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     setInlineEmail(currentUser?.email || user?.email || 'admin@tradesync.io');
 
     if (type === 'child') {
-      const child = targetAccount as ChildAccountItem;
-      setSelectedChildId(child.id);
+      const child = targetAccount as ChildAccountItem | null;
+      if (child) {
+        setSelectedChildId(child.id);
 
-      // Pre-select current mentor or first available parent
-      if (child.assignedParentAccountId) {
-        setSelectedParentId(child.assignedParentAccountId);
-      } else if (child.assignedMentorId) {
-        const matchingParent = allParents.find((p) => p.userId === child.assignedMentorId);
-        setSelectedParentId(matchingParent ? matchingParent.id : (allParents[0]?.id || ''));
-      } else {
-        setSelectedParentId(allParents[0]?.id || '');
-      }
+        if (child.assignedParentAccountId) {
+          setSelectedParentId(child.assignedParentAccountId);
+        } else if (child.assignedMentorId) {
+          const matchingParent = allParents.find(
+            (p) => p.userId === child.assignedMentorId || toValidUUID(p.userId) === toValidUUID(child.assignedMentorId)
+          );
+          setSelectedParentId(matchingParent ? matchingParent.id : (allParents[0]?.id || ''));
+        } else {
+          setSelectedParentId(allParents[0]?.id || '');
+        }
 
-      if (child.copyMode === 'fixed') {
-        setCopyMode('fixed');
-        setFixedLot(child.fixedLot || 0.1);
+        if (child.copyMode === 'fixed') {
+          setCopyMode('fixed');
+          setFixedLot(child.fixedLot || 0.1);
+        } else {
+          setCopyMode('multiplier');
+          setLotMultiplier(child.lotMultiplier || 1.0);
+        }
       } else {
-        setCopyMode('multiplier');
-        setLotMultiplier(child.lotMultiplier || 1.0);
+        if (!selectedChildId && allChildren.length > 0) {
+          setSelectedChildId(allChildren[0].id);
+        }
+        if (!selectedParentId && allParents.length > 0) {
+          setSelectedParentId(allParents[0].id);
+        }
       }
     } else {
-      const parent = targetAccount as ParentAccountItem;
-      setSelectedParentId(parent.id);
-      // Pick first unassigned or available child
-      const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
-      setSelectedChildId(unassignedChild?.id || '');
+      const parent = targetAccount as ParentAccountItem | null;
+      if (parent) {
+        setSelectedParentId(parent.id);
+        const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
+        setSelectedChildId(unassignedChild?.id || '');
+      } else {
+        if (!selectedParentId && allParents.length > 0) {
+          setSelectedParentId(allParents[0].id);
+        }
+        if (!selectedChildId && allChildren.length > 0) {
+          const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
+          setSelectedChildId(unassignedChild?.id || '');
+        }
+      }
     }
   }, [isOpen, targetAccount, type, allParents, allChildren, currentUser, user]);
 
-  // Synchronize when active session changes (e.g. after signing in via AuthModal or inline)
+  // Synchronize when active session changes
   useEffect(() => {
     if (session && isSessionExpired) {
       setIsSessionExpired(false);
@@ -121,7 +151,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     }
   }, [session, isSessionExpired, errorMessage]);
 
-  if (!isOpen || !targetAccount) return null;
+  if (!isOpen) return null;
 
   // Authorization check
   const isAdmin = currentUser.role === 'admin' || user.role === 'admin';
@@ -146,11 +176,15 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   }
 
   const chosenParent = allParents.find(
-    (p) => p.id === selectedParentId || p.userId === selectedParentId
+    (p) => p.id === selectedParentId || p.userId === selectedParentId || toValidUUID(p.id) === selectedParentId
   );
   const chosenChild = allChildren.find(
-    (c) => c.id === selectedChildId || c.userId === selectedChildId
+    (c) => c.id === selectedChildId || c.userId === selectedChildId || toValidUUID(c.id) === selectedChildId
   );
+
+  const hasParents = allParents.length > 0;
+  const hasChildren = allChildren.length > 0;
+  const hasAccounts = hasParents && hasChildren;
 
   // Manual token refresh trigger
   const handleManualRefresh = async () => {
@@ -206,6 +240,30 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     }
   };
 
+  // One-click Sandbox Demo Account Seeder (Requirement 7 & 8)
+  const handleSeedDemoAccounts = async () => {
+    setIsSeedingAccounts(true);
+    setErrorMessage(null);
+    try {
+      const res = await mt5AdminService.seedStandardDemoAccounts({
+        isCloudMode,
+        currentUserId: currentUser.id,
+      });
+
+      if (res.success) {
+        setSeedSuccessNotice('Successfully provisioned sandbox demo accounts! Refreshing options...');
+        onAssignmentSuccess();
+        setTimeout(() => setSeedSuccessNotice(null), 4000);
+      } else {
+        setErrorMessage(res.error || 'Failed to seed demo accounts.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error seeding demo accounts.');
+    } finally {
+      setIsSeedingAccounts(false);
+    }
+  };
+
   const handleAssignSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -215,29 +273,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       return;
     }
 
+    const safeMentorId = toValidUUID(chosenParent.userId);
+    const safeTraderId = toValidUUID(chosenChild.userId);
+
     // Anti-Self Assignment constraint
-    if (chosenParent.userId === chosenChild.userId) {
+    if (safeMentorId === safeTraderId) {
       setErrorMessage('Security constraint: An account holder cannot be assigned to copy from themselves.');
       return;
     }
 
-    // Database UUID validation in Cloud Mode
+    // Database session validation in Cloud Mode
     if (isCloudMode) {
-      if (!isValidUUID(chosenParent.userId)) {
-        setErrorMessage(
-          `Invalid Mentor UUID: "${chosenParent.userId}". Selected parent "${chosenParent.mentorName}" uses a local placeholder ID. Cloud mode requires a valid Supabase profile UUID from public.profiles.`
-        );
-        return;
-      }
-
-      if (!isValidUUID(chosenChild.userId)) {
-        setErrorMessage(
-          `Invalid Trader UUID: "${chosenChild.userId}". Selected child "${chosenChild.traderName}" uses a local placeholder ID. Cloud mode requires a valid Supabase profile UUID from public.profiles.`
-        );
-        return;
-      }
-
-      // Requirement 3: Before submitting the assignment, verify that the current user session is valid
       const sessionCheck = await ensureValidSession();
       if (!sessionCheck.valid || !sessionCheck.session) {
         setIsSessionExpired(true);
@@ -254,10 +300,10 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     try {
       // 1. Execute database mutation via mt5AdminService using real UUIDs and active session
       const res = await mt5AdminService.assignChildToParent({
-        mentorId: chosenParent.userId,
-        traderId: chosenChild.userId,
-        parentAccountId: chosenParent.id,
-        childAccountId: chosenChild.id,
+        mentorId: safeMentorId,
+        traderId: safeTraderId,
+        parentAccountId: toValidUUID(chosenParent.id),
+        childAccountId: toValidUUID(chosenChild.id),
         lotSettings: {
           copyMode,
           multiplier: lotMultiplier,
@@ -277,17 +323,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
 
       // 2. Synchronize AppContext & localStorage state so the relationship persists immediately
       const existingLinkIndex = parentChildLinks.findIndex(
-        (l) => l.traderId === chosenChild.userId || l.childAccountId === chosenChild.id
+        (l) => l.traderId === safeTraderId || l.childAccountId === chosenChild.id || toValidUUID(l.childAccountId) === chosenChild.id
       );
 
       const updatedLink: ParentChildLink = {
         id: res.assignmentId || `link_${Date.now()}`,
-        mentorId: chosenParent.userId,
-        traderId: chosenChild.userId,
+        mentorId: safeMentorId,
+        traderId: safeTraderId,
         mentorName: chosenParent.mentorName,
         traderName: chosenChild.traderName,
-        parentAccountId: chosenParent.id,
-        childAccountId: chosenChild.id,
+        parentAccountId: toValidUUID(chosenParent.id),
+        childAccountId: toValidUUID(chosenChild.id),
         status: 'active',
         lotSettings: {
           mode: 'custom_lot',
@@ -341,346 +387,453 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
-      <div className="relative w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden my-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4 bg-slate-900/90">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-white">
-                {type === 'parent' ? 'Link Child Account to Parent' : 'Assign Child to Mentor'}
-              </h3>
-              <p className="text-xs text-slate-400 flex items-center gap-1.5">
-                <span>Authorized Super Admin Parent-Child Stream Mapping</span>
-                {isCloudMode && (
-                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
-                    • <Database className="h-3 w-3" /> Supabase Cloud
-                  </span>
-                )}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {/* Form Body */}
-        <form onSubmit={handleAssignSubmit} className="p-5 space-y-4">
-          {/* Success Notification on Session Recovery */}
-          {sessionRefreshedSuccess && (
-            <div className="rounded-lg border border-emerald-800 bg-emerald-950/50 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-              <span>Authentication verified. Current Supabase session is active and valid.</span>
-            </div>
-          )}
-
-          {/* Session Expired / Re-authentication Notification Banner */}
-          {isSessionExpired && (
-            <div className="rounded-xl border border-amber-600/70 bg-gradient-to-r from-amber-950/60 to-slate-950 p-4 space-y-3 animate-in fade-in">
-              <div className="flex items-start gap-2.5">
-                <AlertCircle className="h-5 w-5 shrink-0 text-amber-400 mt-0.5" />
-                <div className="space-y-1">
-                  <h4 className="text-xs font-bold text-amber-200">Authentication Session Expired</h4>
-                  <p className="text-[11px] text-amber-300/90 leading-relaxed">
-                    Your Supabase Cloud session has expired. To enforce Row-Level Security policies and link MT5 accounts in PostgreSQL, please refresh your session or sign in again. Your selected accounts and settings will remain preserved.
-                  </p>
-                </div>
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
+        <div className="relative w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden my-auto">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4 bg-slate-900/90">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400">
+                <ShieldCheck className="h-5 w-5" />
               </div>
-
-              {/* Action Buttons */}
-              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-800/40">
-                <button
-                  type="button"
-                  onClick={handleManualRefresh}
-                  disabled={isRefreshingToken}
-                  className="rounded-lg bg-amber-600/80 hover:bg-amber-600 text-slate-950 px-3 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingToken ? 'animate-spin' : ''}`} />
-                  <span>{isRefreshingToken ? 'Refreshing Token...' : 'Refresh Session Token'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowInlineSignIn(!showInlineSignIn)}
-                  className="rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-600/40 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1"
-                >
-                  <KeyRound className="h-3.5 w-3.5" />
-                  <span>{showInlineSignIn ? 'Hide Quick Sign-In' : 'Sign In with Password'}</span>
-                  {showInlineSignIn ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setIsAuthModalOpen(true)}
-                  className="rounded-lg bg-transparent hover:bg-slate-800 text-slate-300 px-2.5 py-1.5 text-xs underline underline-offset-2 transition-colors ml-auto"
-                >
-                  Open Full Sign-In Dialog
-                </button>
-              </div>
-
-              {/* Inline Quick Sign-In Form */}
-              {showInlineSignIn && (
-                <div className="pt-2 border-t border-slate-800/80">
-                  <div className="rounded-lg bg-slate-900 border border-slate-800 p-3 space-y-2.5">
-                    <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
-                      <Lock className="h-3.5 w-3.5 text-cyan-400" />
-                      <span>Re-authenticate Super Admin</span>
-                    </div>
-
-                    {inlineAuthError && (
-                      <div className="text-[11px] text-rose-300 bg-rose-950/60 border border-rose-800 rounded p-2">
-                        {inlineAuthError}
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Admin Email</label>
-                        <input
-                          type="email"
-                          value={inlineEmail}
-                          onChange={(e) => setInlineEmail(e.target.value)}
-                          className="w-full rounded bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
-                          placeholder="admin@tradesync.io"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-slate-400 block mb-0.5">Password</label>
-                        <input
-                          type="password"
-                          value={inlinePassword}
-                          onChange={(e) => setInlinePassword(e.target.value)}
-                          className="w-full rounded bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
-                          placeholder="Enter your password"
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleInlineSignInSubmit}
-                        disabled={inlineSigningIn || !inlinePassword}
-                        className="w-full rounded bg-cyan-600 hover:bg-cyan-500 py-1.5 text-xs font-semibold text-white transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
-                      >
-                        {inlineSigningIn ? (
-                          <>
-                            <RefreshCw className="h-3 w-3 animate-spin" />
-                            <span>Signing In...</span>
-                          </>
-                        ) : (
-                          <>
-                            <LogIn className="h-3 w-3" />
-                            <span>Sign In & Continue Assignment</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Standard Error Message Display */}
-          {errorMessage && !isSessionExpired && (
-            <div className="rounded-lg border border-rose-800 bg-rose-950/40 p-3 flex items-start gap-2.5 text-xs text-rose-300 animate-in fade-in">
-              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
-              <div className="space-y-0.5">
-                <span className="font-semibold block">Assignment Error</span>
-                <span className="font-mono text-[11px] leading-relaxed block">{errorMessage}</span>
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  {type === 'parent' ? 'Link Child Account to Parent' : 'Assign Child to Mentor'}
+                </h3>
+                <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                  <span>Authorized Super Admin Parent-Child Stream Mapping</span>
+                  {isCloudMode && (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
+                      • <Database className="h-3 w-3" /> Supabase Cloud
+                    </span>
+                  )}
+                </p>
               </div>
             </div>
-          )}
-
-          {/* Visual Link Diagram */}
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0 text-left">
-              <span className="text-[10px] font-mono uppercase text-cyan-400 font-bold block">
-                Master Parent
-              </span>
-              <div className="text-xs font-semibold text-white truncate">
-                {chosenParent ? chosenParent.mentorName : 'Select Parent'}
-              </div>
-              <div className="text-[10px] text-slate-400 font-mono">
-                {chosenParent ? `#${chosenParent.accountNumber}` : '—'}
-              </div>
-            </div>
-
-            <div className="flex flex-col items-center justify-center shrink-0 px-2 text-cyan-400">
-              <ArrowRight className="h-4 w-4" />
-              <span className="text-[9px] font-mono text-slate-500 uppercase">COPY</span>
-            </div>
-
-            <div className="flex-1 min-w-0 text-right">
-              <span className="text-[10px] font-mono uppercase text-emerald-400 font-bold block">
-                Follower Child
-              </span>
-              <div className="text-xs font-semibold text-white truncate">
-                {chosenChild ? chosenChild.traderName : 'Select Child'}
-              </div>
-              <div className="text-[10px] text-slate-400 font-mono">
-                {chosenChild ? `#${chosenChild.accountNumber}` : '—'}
-              </div>
-            </div>
-          </div>
-
-          {/* Parent Selection */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
-              <span>Parent MT5 Account (Mentor Master)</span>
-              <span className="text-[10px] text-slate-500 font-mono">Role: Mentor</span>
-            </label>
-            <select
-              value={selectedParentId}
-              onChange={(e) => setSelectedParentId(e.target.value)}
-              disabled={type === 'parent'}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
             >
-              {allParents.length === 0 ? (
-                <option value="">No active parent accounts available</option>
-              ) : (
-                allParents.map((parent) => (
-                  <option key={parent.id} value={parent.id}>
-                    {parent.mentorName} — MT5 #{parent.accountNumber} ({parent.brokerName} / {parent.brokerServer})
-                  </option>
-                ))
-              )}
-            </select>
+              <X className="h-5 w-5" />
+            </button>
           </div>
 
-          {/* Child Selection */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
-              <span>Child MT5 Account (Follower Trader)</span>
-              <span className="text-[10px] text-slate-500 font-mono">Role: Follower</span>
-            </label>
-            <select
-              value={selectedChildId}
-              onChange={(e) => setSelectedChildId(e.target.value)}
-              disabled={type === 'child'}
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {allChildren.length === 0 ? (
-                <option value="">No follower child accounts available</option>
-              ) : (
-                allChildren.map((child) => (
-                  <option key={child.id} value={child.id}>
-                    {child.traderName} — MT5 #{child.accountNumber} ({child.brokerName})
-                    {child.isAssigned ? ` [Currently Linked: ${child.assignedMentorName || 'Active'}]` : ' [Unassigned]'}
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
-
-          {/* Copy Sizing Controls */}
-          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
-                <span>Trade Execution Sizing Mode</span>
-              </span>
-              <div className="flex rounded-lg bg-slate-900 border border-slate-800 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setCopyMode('multiplier')}
-                  className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
-                    copyMode === 'multiplier'
-                      ? 'bg-cyan-600 text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Multiplier Ratio
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCopyMode('fixed')}
-                  className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
-                    copyMode === 'fixed'
-                      ? 'bg-cyan-600 text-white shadow-xs'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Fixed Lot Size
-                </button>
-              </div>
-            </div>
-
-            {copyMode === 'multiplier' ? (
-              <div className="space-y-1">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Multiplier Ratio:</span>
-                  <span className="font-mono text-cyan-400 font-bold">{lotMultiplier.toFixed(2)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="5.0"
-                  step="0.05"
-                  value={lotMultiplier}
-                  onChange={(e) => setLotMultiplier(parseFloat(e.target.value))}
-                  className="w-full accent-cyan-500 cursor-pointer"
-                />
-                <span className="text-[10px] text-slate-500 block">
-                  e.g., Parent trade of 1.00 lot will execute as {(1.0 * lotMultiplier).toFixed(2)} lots on child terminal.
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 block">Fixed Order Size (Lots):</label>
-                <input
-                  type="number"
-                  min="0.01"
-                  max="10.0"
-                  step="0.01"
-                  value={fixedLot}
-                  onChange={(e) => setFixedLot(parseFloat(e.target.value) || 0.01)}
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
-                />
-                <span className="text-[10px] text-slate-500 block">
-                  Every synchronized trade will open with exactly {fixedLot.toFixed(2)} lots regardless of parent volume.
-                </span>
+          {/* Form Body */}
+          <form onSubmit={handleAssignSubmit} className="p-5 space-y-4">
+            {/* Success Notifications */}
+            {sessionRefreshedSuccess && (
+              <div className="rounded-lg border border-emerald-800 bg-emerald-950/50 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>Authentication verified. Current Supabase session is active and valid.</span>
               </div>
             )}
-          </div>
 
-          {/* Authorization Notice */}
-          <div className="text-[10px] text-slate-500 font-mono leading-tight">
-            Authorization: Executing as Super Admin. Updates public.mentor_assignments in Supabase and synchronizes trade-copy routing parameters.
-          </div>
+            {seedSuccessNotice && (
+              <div className="rounded-lg border border-emerald-800 bg-emerald-950/50 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>{seedSuccessNotice}</span>
+              </div>
+            )}
 
-          {/* Modal Actions */}
-          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isSubmitting}
-              className="rounded-lg bg-slate-800 hover:bg-slate-750 px-3.5 py-1.5 text-xs font-semibold text-slate-300 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting || allParents.length === 0 || allChildren.length === 0}
-              className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isSubmitting ? (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  <span>Saving Link...</span>
-                </>
+            {/* Empty State Banner (Requirement 6 & 7) */}
+            {!hasAccounts && (
+              <div className="rounded-xl border border-amber-600/60 bg-gradient-to-r from-amber-950/50 to-slate-950 p-4 space-y-3 animate-in fade-in">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-amber-400 mt-0.5" />
+                  <div className="space-y-1">
+                    <h4 className="text-xs font-bold text-amber-200">No MT5 Accounts Available for Assignment</h4>
+                    <p className="text-[11px] text-amber-300/90 leading-relaxed">
+                      {!hasParents && !hasChildren && 'No eligible Parent or Child MT5 account records are currently provisioned in the database. You need at least one Master Parent and one Follower Child account to create an assignment.'}
+                      {!hasParents && hasChildren && 'No Parent MT5 accounts (Mentor Masters) are available. A parent account is required to serve as the trade signal provider.'}
+                      {hasParents && !hasChildren && 'No Child MT5 accounts (Follower Traders) are available. A child account is required to copy trades from the parent.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-800/40">
+                  <button
+                    type="button"
+                    onClick={handleSeedDemoAccounts}
+                    disabled={isSeedingAccounts}
+                    className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-3 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                  >
+                    {isSeedingAccounts ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>Provisioning Sandbox...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        <span>⚡ Seed Sandbox Demo Accounts</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateDemoDefaultRole(!hasParents ? 'parent' : 'child');
+                      setIsCreateDemoModalOpen(true);
+                    }}
+                    className="rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-600/40 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Create Custom Demo Account</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Session Expired / Re-authentication Notification Banner */}
+            {isSessionExpired && (
+              <div className="rounded-xl border border-amber-600/70 bg-gradient-to-r from-amber-950/60 to-slate-950 p-4 space-y-3 animate-in fade-in">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="h-5 w-5 shrink-0 text-amber-400 mt-0.5" />
+                  <div className="space-y-1">
+                    <h4 className="text-xs font-bold text-amber-200">Authentication Session Expired</h4>
+                    <p className="text-[11px] text-amber-300/90 leading-relaxed">
+                      Your Supabase Cloud session has expired. To enforce Row-Level Security policies and link MT5 accounts in PostgreSQL, please refresh your session or sign in again. Your selected accounts and settings will remain preserved.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-800/40">
+                  <button
+                    type="button"
+                    onClick={handleManualRefresh}
+                    disabled={isRefreshingToken}
+                    className="rounded-lg bg-amber-600/80 hover:bg-amber-600 text-slate-950 px-3 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingToken ? 'animate-spin' : ''}`} />
+                    <span>{isRefreshingToken ? 'Refreshing Token...' : 'Refresh Session Token'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowInlineSignIn(!showInlineSignIn)}
+                    className="rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-600/40 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    <span>{showInlineSignIn ? 'Hide Quick Sign-In' : 'Sign In with Password'}</span>
+                    {showInlineSignIn ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsAuthModalOpen(true)}
+                    className="rounded-lg bg-transparent hover:bg-slate-800 text-slate-300 px-2.5 py-1.5 text-xs underline underline-offset-2 transition-colors ml-auto"
+                  >
+                    Open Full Sign-In Dialog
+                  </button>
+                </div>
+
+                {/* Inline Quick Sign-In Form */}
+                {showInlineSignIn && (
+                  <div className="pt-2 border-t border-slate-800/80">
+                    <div className="rounded-lg bg-slate-900 border border-slate-800 p-3 space-y-2.5">
+                      <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                        <Lock className="h-3.5 w-3.5 text-cyan-400" />
+                        <span>Re-authenticate Super Admin</span>
+                      </div>
+
+                      {inlineAuthError && (
+                        <div className="text-[11px] text-rose-300 bg-rose-950/60 border border-rose-800 rounded p-2">
+                          {inlineAuthError}
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Admin Email</label>
+                          <input
+                            type="email"
+                            value={inlineEmail}
+                            onChange={(e) => setInlineEmail(e.target.value)}
+                            className="w-full rounded bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                            placeholder="admin@tradesync.io"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Password</label>
+                          <input
+                            type="password"
+                            value={inlinePassword}
+                            onChange={(e) => setInlinePassword(e.target.value)}
+                            className="w-full rounded bg-slate-950 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                            placeholder="Enter your password"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleInlineSignInSubmit}
+                          disabled={inlineSigningIn || !inlinePassword}
+                          className="w-full rounded bg-cyan-600 hover:bg-cyan-500 py-1.5 text-xs font-semibold text-white transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                        >
+                          {inlineSigningIn ? (
+                            <>
+                              <RefreshCw className="h-3 w-3 animate-spin" />
+                              <span>Signing In...</span>
+                            </>
+                          ) : (
+                            <>
+                              <LogIn className="h-3 w-3" />
+                              <span>Sign In & Continue Assignment</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Standard Error Message Display */}
+            {errorMessage && !isSessionExpired && (
+              <div className="rounded-lg border border-rose-800 bg-rose-950/40 p-3 flex items-start gap-2.5 text-xs text-rose-300 animate-in fade-in">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+                <div className="space-y-0.5">
+                  <span className="font-semibold block">Assignment Notice</span>
+                  <span className="font-mono text-[11px] leading-relaxed block">{errorMessage}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Visual Link Diagram */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0 text-left">
+                <span className="text-[10px] font-mono uppercase text-cyan-400 font-bold block">
+                  Master Parent
+                </span>
+                <div className="text-xs font-semibold text-white truncate">
+                  {chosenParent ? chosenParent.mentorName : (hasParents ? 'Select Master Parent' : 'No Parent Accounts')}
+                </div>
+                <div className="text-[10px] text-slate-400 font-mono truncate">
+                  {chosenParent ? `#${chosenParent.accountNumber} (${chosenParent.brokerName})` : '—'}
+                </div>
+              </div>
+
+              <div className="flex flex-col items-center justify-center shrink-0 px-2 text-cyan-400">
+                <ArrowRight className="h-4 w-4" />
+                <span className="text-[9px] font-mono text-slate-500 uppercase">COPY</span>
+              </div>
+
+              <div className="flex-1 min-w-0 text-right">
+                <span className="text-[10px] font-mono uppercase text-emerald-400 font-bold block">
+                  Follower Child
+                </span>
+                <div className="text-xs font-semibold text-white truncate">
+                  {chosenChild ? chosenChild.traderName : (hasChildren ? 'Select Follower Child' : 'No Child Accounts')}
+                </div>
+                <div className="text-[10px] text-slate-400 font-mono truncate">
+                  {chosenChild ? `#${chosenChild.accountNumber} (${chosenChild.brokerName})` : '—'}
+                </div>
+              </div>
+            </div>
+
+            {/* Parent Selection */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Server className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>Parent MT5 Account (Mentor Master)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {allParents.length} eligible parent{allParents.length === 1 ? '' : 's'}
+                  </span>
+                  {!hasParents && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreateDemoDefaultRole('parent');
+                        setIsCreateDemoModalOpen(true);
+                      }}
+                      className="text-[10px] text-cyan-400 hover:text-cyan-300 font-medium underline flex items-center gap-0.5"
+                    >
+                      <Plus className="h-2.5 w-2.5" /> Create Parent
+                    </button>
+                  )}
+                </div>
+              </div>
+              <select
+                value={selectedParentId}
+                onChange={(e) => setSelectedParentId(e.target.value)}
+                disabled={type === 'parent' && Boolean(targetAccount)}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {!hasParents ? (
+                  <option value="">No active parent accounts available (Create or Seed demo accounts)</option>
+                ) : (
+                  allParents.map((parent) => (
+                    <option key={parent.id} value={parent.id}>
+                      {parent.mentorName} — MT5 #{parent.accountNumber} ({parent.brokerName}) [${parent.balance.toLocaleString()}]
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            {/* Child Selection */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Layers className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Child MT5 Account (Follower Trader)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {allChildren.length} eligible child{allChildren.length === 1 ? '' : 'ren'}
+                  </span>
+                  {!hasChildren && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreateDemoDefaultRole('child');
+                        setIsCreateDemoModalOpen(true);
+                      }}
+                      className="text-[10px] text-emerald-400 hover:text-emerald-300 font-medium underline flex items-center gap-0.5"
+                    >
+                      <Plus className="h-2.5 w-2.5" /> Create Child
+                    </button>
+                  )}
+                </div>
+              </div>
+              <select
+                value={selectedChildId}
+                onChange={(e) => setSelectedChildId(e.target.value)}
+                disabled={type === 'child' && Boolean(targetAccount)}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {!hasChildren ? (
+                  <option value="">No follower child accounts available (Create or Seed demo accounts)</option>
+                ) : (
+                  allChildren.map((child) => (
+                    <option key={child.id} value={child.id}>
+                      {child.traderName} — MT5 #{child.accountNumber} ({child.brokerName}) [${child.balance.toLocaleString()}]
+                      {child.isAssigned ? ` [Linked to: ${child.assignedMentorName || 'Active'}]` : ' [Unassigned]'}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            {/* Copy Sizing Controls */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>Trade Execution Sizing Mode</span>
+                </span>
+                <div className="flex rounded-lg bg-slate-900 border border-slate-800 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setCopyMode('multiplier')}
+                    className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
+                      copyMode === 'multiplier'
+                        ? 'bg-cyan-600 text-white shadow-xs'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Multiplier Ratio
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCopyMode('fixed')}
+                    className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
+                      copyMode === 'fixed'
+                        ? 'bg-cyan-600 text-white shadow-xs'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Fixed Lot Size
+                  </button>
+                </div>
+              </div>
+
+              {copyMode === 'multiplier' ? (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-400">Multiplier Ratio:</span>
+                    <span className="font-mono text-cyan-400 font-bold">{lotMultiplier.toFixed(2)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="5.0"
+                    step="0.05"
+                    value={lotMultiplier}
+                    onChange={(e) => setLotMultiplier(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-500 cursor-pointer"
+                  />
+                  <span className="text-[10px] text-slate-500 block">
+                    e.g., Parent trade of 1.00 lot will execute as {(1.0 * lotMultiplier).toFixed(2)} lots on child terminal.
+                  </span>
+                </div>
               ) : (
-                <span>Confirm Assignment</span>
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-400 block">Fixed Order Size (Lots):</label>
+                  <input
+                    type="number"
+                    min="0.01"
+                    max="10.0"
+                    step="0.01"
+                    value={fixedLot}
+                    onChange={(e) => setFixedLot(parseFloat(e.target.value) || 0.01)}
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
+                  />
+                  <span className="text-[10px] text-slate-500 block">
+                    Every synchronized trade will open with exactly {fixedLot.toFixed(2)} lots regardless of parent volume.
+                  </span>
+                </div>
               )}
-            </button>
-          </div>
-        </form>
+            </div>
+
+            {/* Authorization Notice */}
+            <div className="text-[10px] text-slate-500 font-mono leading-tight">
+              Authorization: Executing as Super Admin. Updates public.mentor_assignments in Supabase and synchronizes trade-copy routing parameters.
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isSubmitting}
+                className="rounded-lg bg-slate-800 hover:bg-slate-750 px-3.5 py-1.5 text-xs font-semibold text-slate-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting || !hasAccounts}
+                className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    <span>Saving Link...</span>
+                  </>
+                ) : (
+                  <span>Confirm Assignment</span>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
+
+      {/* Embedded Create Demo Account Modal */}
+      <CreateDemoAccountModal
+        isOpen={isCreateDemoModalOpen}
+        onClose={() => setIsCreateDemoModalOpen(false)}
+        defaultRole={createDemoDefaultRole}
+        onSuccess={() => {
+          onAssignmentSuccess();
+        }}
+      />
+    </>
   );
 };
