@@ -17,7 +17,10 @@ import {
   ChevronUp,
   Plus,
   Sparkles,
-  Info
+  Info,
+  AlertTriangle,
+  Link2,
+  UserCheck
 } from 'lucide-react';
 import {
   ParentAccountItem,
