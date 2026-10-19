@@ -567,7 +567,18 @@ export const mt5AdminService = {
     const storedLinksRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_links') : null;
     const localLinks: ParentChildLink[] = storedLinksRaw ? JSON.parse(storedLinksRaw) : (options?.demoLinks || []);
 
-    const demoAccs = localAccounts.filter((a) => a.accountRole === 'parent');
+    let demoAccs = localAccounts.filter((a) => a.accountRole === 'parent');
+    if (demoAccs.length === 0) {
+      const stdParents = STANDARD_DEMO_ACCOUNTS.filter((i) => i.account.accountRole === 'parent').map((i) => i.account);
+      const stdOwners = STANDARD_DEMO_ACCOUNTS.filter((i) => i.account.accountRole === 'parent').map((i) => i.owner);
+      demoAccs = stdParents;
+      localAccounts = [...stdParents, ...localAccounts.filter((a) => a.accountRole !== 'parent')];
+      localUsers = [...stdOwners, ...localUsers.filter((u) => !stdOwners.some((o) => o.id === u.id))];
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(localAccounts));
+        localStorage.setItem('tradesync_users', JSON.stringify(localUsers));
+      }
+    }
 
     const parents: ParentAccountItem[] = demoAccs.map((acc) => {
       const user = localUsers.find((u) => u.id === acc.userId);
@@ -778,7 +789,18 @@ export const mt5AdminService = {
     const storedLinksRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_links') : null;
     const localLinks: ParentChildLink[] = storedLinksRaw ? JSON.parse(storedLinksRaw) : (options?.demoLinks || []);
 
-    const demoAccs = localAccounts.filter((a) => a.accountRole === 'child');
+    let demoAccs = localAccounts.filter((a) => a.accountRole === 'child');
+    if (demoAccs.length === 0) {
+      const stdChildren = STANDARD_DEMO_ACCOUNTS.filter((i) => i.account.accountRole === 'child').map((i) => i.account);
+      const stdOwners = STANDARD_DEMO_ACCOUNTS.filter((i) => i.account.accountRole === 'child').map((i) => i.owner);
+      demoAccs = stdChildren;
+      localAccounts = [...localAccounts.filter((a) => a.accountRole !== 'child'), ...stdChildren];
+      localUsers = [...localUsers.filter((u) => !stdOwners.some((o) => o.id === u.id)), ...stdOwners];
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(localAccounts));
+        localStorage.setItem('tradesync_users', JSON.stringify(localUsers));
+      }
+    }
 
     const children: ChildAccountItem[] = demoAccs.map((acc) => {
       const user = localUsers.find((u) => u.id === acc.userId);
@@ -847,7 +869,7 @@ export const mt5AdminService = {
   async seedStandardDemoAccounts(options?: {
     isCloudMode?: boolean;
     currentUserId?: string;
-  }): Promise<{ success: boolean; createdCount: number; error?: string }> {
+  }): Promise<{ success: boolean; createdCount: number; accounts?: MT5Account[]; users?: User[]; error?: string }> {
     try {
       // 1. Read existing local accounts
       const storedRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
@@ -881,13 +903,12 @@ export const mt5AdminService = {
         try {
           const sessionCheck = await ensureValidSession();
           if (sessionCheck.valid && sessionCheck.session) {
-            const authUserId = sessionCheck.session.user.id;
             for (const item of accountsToAdd) {
               await supabase
                 .from('mt5_accounts')
                 .insert([{
                   id: item.id,
-                  user_id: authUserId, // Use authenticated profile UUID
+                  user_id: item.userId, // Preserves distinct mentor/trader owner UUIDs and prevents self-assignment
                   account_number: item.accountNumber,
                   broker_server: item.server,
                   broker_name: item.broker,
@@ -983,12 +1004,11 @@ export const mt5AdminService = {
         try {
           const sessionCheck = await ensureValidSession();
           if (sessionCheck.valid && sessionCheck.session) {
-            const authUserId = sessionCheck.session.user.id;
             await supabase
               .from('mt5_accounts')
               .insert([{
                 id: newAccount.id,
-                user_id: authUserId, // Valid authenticated profile UUID
+                user_id: newAccount.userId, // Distinct owner profile UUID, prevents self-assignment collision
                 account_number: newAccount.accountNumber,
                 broker_server: newAccount.server,
                 broker_name: newAccount.broker,
@@ -1240,5 +1260,98 @@ export const mt5AdminService = {
       }
     }
     return { success: true };
+  },
+
+  /**
+   * Toggles trader status between 'active' and 'suspended'
+   */
+  async toggleTraderStatus(
+    traderId: string,
+    currentStatus: string,
+    isCloudMode?: boolean
+  ): Promise<{ success: boolean; newStatus: 'active' | 'suspended'; error?: string }> {
+    const newStatus: 'active' | 'suspended' = currentStatus === 'active' ? 'suspended' : 'active';
+    const safeTraderId = toValidUUID(traderId);
+
+    if (isCloudMode && isSupabaseConfigured()) {
+      try {
+        const { error } = await supabase
+          .from('profiles')
+          .update({ status: newStatus })
+          .eq('id', safeTraderId);
+
+        if (error) {
+          console.warn('[mt5AdminService] Supabase profile status update notice:', error.message);
+        }
+      } catch (err: any) {
+        console.warn('[mt5AdminService] Profile status update notice:', err.message);
+      }
+    }
+
+    return { success: true, newStatus };
+  },
+
+  /**
+   * Fetches trade execution history for a specific parent or child MT5 account
+   */
+  async getAccountTrades(
+    accountId: string,
+    isCloudMode?: boolean,
+    demoTrades?: Trade[]
+  ): Promise<AccountTradeItem[]> {
+    const safeAccId = toValidUUID(accountId);
+
+    if (isCloudMode && isSupabaseConfigured() && isValidUUID(safeAccId)) {
+      try {
+        const { data, error } = await supabase
+          .from('trades')
+          .select('*')
+          .eq('account_id', safeAccId)
+          .order('open_time', { ascending: false })
+          .limit(100);
+
+        if (!error && data && data.length > 0) {
+          return data.map((t: DbTrade) => ({
+            id: t.id,
+            ticket: String(t.ticket || t.id.slice(0, 8)),
+            symbol: t.symbol,
+            type: t.type,
+            volume: Number(t.volume || 0.1),
+            openPrice: Number(t.open_price || 0),
+            closePrice: t.close_price ? Number(t.close_price) : undefined,
+            profit: Number(t.profit || 0),
+            pips: t.pips,
+            status: t.status || 'OPEN',
+            openTime: t.open_time,
+            closeTime: t.close_time || undefined,
+            dataSource: 'supabase',
+          }));
+        }
+      } catch (err) {
+        console.warn('[mt5AdminService] Trade fetch notice, falling back to local trades:', err);
+      }
+    }
+
+    // Fall back to demoTrades in memory/context
+    const source = demoTrades || [];
+    const matched = source.filter(
+      (t) => t.accountId === accountId || toValidUUID(t.accountId) === safeAccId
+    );
+    const pool = matched.length > 0 ? matched : source.slice(0, 8);
+
+    return pool.map((t) => ({
+      id: t.id,
+      ticket: String(t.ticket),
+      symbol: t.symbol,
+      type: t.type,
+      volume: t.lots,
+      openPrice: t.openPrice,
+      closePrice: t.closePrice,
+      profit: t.profit,
+      status: t.status,
+      openTime: t.openTime,
+      closeTime: t.closeTime,
+      dataSource: 'demo_harness',
+    }));
   },
 };

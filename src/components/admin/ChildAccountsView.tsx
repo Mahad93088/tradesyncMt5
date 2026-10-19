@@ -16,13 +16,16 @@ import {
   Power,
   ShieldCheck,
   UserCheck,
-  UserX
+  UserX,
+  Plus,
+  Sparkles
 } from 'lucide-react';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { ParentAccountItem, ChildAccountItem, mt5AdminService } from '../../services/mt5AdminService';
 import { AccountDetailsModal } from './AccountDetailsModal';
 import { AssignParentModal } from './AssignParentModal';
+import { CreateDemoAccountModal } from './CreateDemoAccountModal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
 
@@ -43,6 +46,11 @@ export const ChildAccountsView: React.FC = () => {
   const [selectedAccountForDetails, setSelectedAccountForDetails] = useState<ChildAccountItem | null>(null);
   const [selectedChildForAssign, setSelectedChildForAssign] = useState<ChildAccountItem | null>(null);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
+  const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState(false);
+
+  // Seeding state
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [seedNotice, setSeedNotice] = useState<string | null>(null);
 
   // Status toggle confirmation
   const [confirmStatusModal, setConfirmStatusModal] = useState<{
@@ -149,6 +157,27 @@ export const ChildAccountsView: React.FC = () => {
     return matchesSearch && matchesAccountStatus && matchesConnectionStatus && matchesParent;
   });
 
+  const handleSeedDemoAccounts = async () => {
+    setIsSeeding(true);
+    setSeedNotice(null);
+    try {
+      const res = await mt5AdminService.seedStandardDemoAccounts({
+        isCloudMode,
+        currentUserId: currentUser.id,
+      });
+
+      if (res.success) {
+        setSeedNotice('Successfully provisioned sandbox demo accounts! Refreshing list...');
+        await fetchAccounts();
+        setTimeout(() => setSeedNotice(null), 4000);
+      }
+    } catch (err: any) {
+      console.error('Failed to seed demo accounts:', err);
+    } finally {
+      setIsSeeding(false);
+    }
+  };
+
   const unassignedCount = children.filter((c) => !c.isAssigned).length;
   const activeCount = children.filter((c) => c.traderStatus === 'active').length;
 
@@ -182,6 +211,24 @@ export const ChildAccountsView: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <button
+            onClick={handleSeedDemoAccounts}
+            disabled={isSeeding}
+            className="flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-xs font-bold text-slate-950 transition-colors shadow-sm disabled:opacity-50"
+            title="Provision standard demo master and follower accounts for testing"
+          >
+            <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
+            <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
+          </button>
+
+          <button
+            onClick={() => setIsCreateDemoModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>New Demo Child</span>
+          </button>
+
+          <button
             onClick={fetchAccounts}
             disabled={isLoading}
             className="flex items-center gap-1.5 rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
@@ -191,6 +238,13 @@ export const ChildAccountsView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {seedNotice && (
+        <div className="rounded-lg border border-emerald-800 bg-emerald-950/60 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+          <span>{seedNotice}</span>
+        </div>
+      )}
 
       {/* Operational Disclaimer Banner */}
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-2 text-xs">
@@ -469,7 +523,38 @@ export const ChildAccountsView: React.FC = () => {
               ) : (
                 <tr>
                   <td colSpan={9} className="py-12 text-center text-slate-400">
-                    <p className="text-xs">No child MT5 accounts match the selected filters.</p>
+                    {children.length === 0 ? (
+                      <div className="max-w-md mx-auto space-y-3 p-4">
+                        <div className="p-3 bg-slate-800/80 rounded-full w-12 h-12 flex items-center justify-center mx-auto text-emerald-400 border border-slate-700">
+                          <Layers className="h-6 w-6" />
+                        </div>
+                        <h4 className="text-sm font-bold text-white">No Child MT5 Accounts Found</h4>
+                        <p className="text-xs text-slate-400 leading-relaxed">
+                          No follower client trading terminals are currently provisioned in the system. You can provision demo accounts for sandbox trade-copy routing tests or create a custom child account record.
+                        </p>
+                        <div className="flex items-center justify-center gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={handleSeedDemoAccounts}
+                            disabled={isSeeding}
+                            className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-3.5 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>⚡ Seed Sandbox Demo Accounts</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsCreateDemoModalOpen(true)}
+                            className="rounded-lg bg-slate-800 hover:bg-slate-700 text-white px-3.5 py-1.5 text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            <span>Create Demo Child</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs">No child MT5 accounts match the selected filters.</p>
+                    )}
                   </td>
                 </tr>
               )}
@@ -502,6 +587,16 @@ export const ChildAccountsView: React.FC = () => {
         allParents={parents}
         allChildren={children}
         onAssignmentSuccess={async () => {
+          await fetchAccounts();
+        }}
+      />
+
+      {/* Create Demo Account Modal */}
+      <CreateDemoAccountModal
+        isOpen={isCreateDemoModalOpen}
+        onClose={() => setIsCreateDemoModalOpen(false)}
+        defaultRole="child"
+        onSuccess={async () => {
           await fetchAccounts();
         }}
       />

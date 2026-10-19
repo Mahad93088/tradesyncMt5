@@ -52,7 +52,11 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   onAssignmentSuccess,
 }) => {
   const { isCloudMode, user, session, signIn, refreshSession } = useAuth();
-  const { parentChildLinks, currentUser, addAuditLog, setIsAuthModalOpen } = useApp();
+  const { parentChildLinks, currentUser, mt5Accounts, users, addAuditLog, setIsAuthModalOpen } = useApp();
+
+  const [internalParents, setInternalParents] = useState<ParentAccountItem[]>(allParents);
+  const [internalChildren, setInternalChildren] = useState<ChildAccountItem[]>(allChildren);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState<boolean>(false);
 
   const [selectedParentId, setSelectedParentId] = useState<string>('');
   const [selectedChildId, setSelectedChildId] = useState<string>('');
@@ -78,6 +82,52 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState<boolean>(false);
   const [createDemoDefaultRole, setCreateDemoDefaultRole] = useState<'parent' | 'child'>('parent');
 
+  // Keep internal parents and children synced with incoming props
+  useEffect(() => {
+    if (allParents && allParents.length > 0) {
+      setInternalParents(allParents);
+    }
+  }, [allParents]);
+
+  useEffect(() => {
+    if (allChildren && allChildren.length > 0) {
+      setInternalChildren(allChildren);
+    }
+  }, [allChildren]);
+
+  // Load accounts dynamically from service
+  const loadAccounts = async () => {
+    setIsLoadingAccounts(true);
+    try {
+      const [parentsRes, childrenRes] = await Promise.all([
+        mt5AdminService.getParentAccounts({
+          demoAccounts: mt5Accounts,
+          demoUsers: users,
+          demoLinks: parentChildLinks,
+          isCloudMode,
+        }),
+        mt5AdminService.getChildAccounts({
+          demoAccounts: mt5Accounts,
+          demoUsers: users,
+          demoLinks: parentChildLinks,
+          isCloudMode,
+        }),
+      ]);
+
+      setInternalParents(parentsRes.data);
+      setInternalChildren(childrenRes.data);
+      return { parents: parentsRes.data, children: childrenRes.data };
+    } catch (err) {
+      console.error('Failed to load accounts in AssignParentModal:', err);
+      return { parents: [], children: [] };
+    } finally {
+      setIsLoadingAccounts(false);
+    }
+  };
+
+  const effectiveParents = internalParents.length > 0 ? internalParents : allParents;
+  const effectiveChildren = internalChildren.length > 0 ? internalChildren : allChildren;
+
   // Set default selection when modal opens or when accounts change
   useEffect(() => {
     if (!isOpen) return;
@@ -85,6 +135,11 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     setIsSessionExpired(false);
     setShowInlineSignIn(false);
     setSessionRefreshedSuccess(false);
+
+    // If accounts are empty on open, dynamically fetch them
+    if (effectiveParents.length === 0 || effectiveChildren.length === 0) {
+      loadAccounts();
+    }
 
     // Prefill login email for session recovery
     setInlineEmail(currentUser?.email || user?.email || 'admin@tradesync.io');
@@ -97,12 +152,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         if (child.assignedParentAccountId) {
           setSelectedParentId(child.assignedParentAccountId);
         } else if (child.assignedMentorId) {
-          const matchingParent = allParents.find(
+          const matchingParent = effectiveParents.find(
             (p) => p.userId === child.assignedMentorId || toValidUUID(p.userId) === toValidUUID(child.assignedMentorId)
           );
-          setSelectedParentId(matchingParent ? matchingParent.id : (allParents[0]?.id || ''));
+          setSelectedParentId(matchingParent ? matchingParent.id : (effectiveParents[0]?.id || ''));
         } else {
-          setSelectedParentId(allParents[0]?.id || '');
+          // Select first eligible parent that does not belong to the same user
+          const eligibleParent = effectiveParents.find(
+            (p) => p.userId !== child.userId && toValidUUID(p.userId) !== toValidUUID(child.userId)
+          ) || effectiveParents[0];
+          setSelectedParentId(eligibleParent?.id || '');
         }
 
         if (child.copyMode === 'fixed') {
@@ -113,30 +172,37 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
           setLotMultiplier(child.lotMultiplier || 1.0);
         }
       } else {
-        if (!selectedChildId && allChildren.length > 0) {
-          setSelectedChildId(allChildren[0].id);
+        if (!selectedChildId && effectiveChildren.length > 0) {
+          setSelectedChildId(effectiveChildren[0].id);
         }
-        if (!selectedParentId && allParents.length > 0) {
-          setSelectedParentId(allParents[0].id);
+        if (!selectedParentId && effectiveParents.length > 0) {
+          setSelectedParentId(effectiveParents[0].id);
         }
       }
     } else {
       const parent = targetAccount as ParentAccountItem | null;
       if (parent) {
         setSelectedParentId(parent.id);
-        const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
-        setSelectedChildId(unassignedChild?.id || '');
+        // Find unassigned child that belongs to a different user
+        const eligibleChild = effectiveChildren.find(
+          (c) => (!c.isAssigned || c.assignedMentorId === parent.userId) &&
+                 c.userId !== parent.userId &&
+                 toValidUUID(c.userId) !== toValidUUID(parent.userId)
+        ) || effectiveChildren.find(
+          (c) => c.userId !== parent.userId && toValidUUID(c.userId) !== toValidUUID(parent.userId)
+        ) || effectiveChildren[0];
+        setSelectedChildId(eligibleChild?.id || '');
       } else {
-        if (!selectedParentId && allParents.length > 0) {
-          setSelectedParentId(allParents[0].id);
+        if (!selectedParentId && effectiveParents.length > 0) {
+          setSelectedParentId(effectiveParents[0].id);
         }
-        if (!selectedChildId && allChildren.length > 0) {
-          const unassignedChild = allChildren.find((c) => !c.isAssigned) || allChildren[0];
+        if (!selectedChildId && effectiveChildren.length > 0) {
+          const unassignedChild = effectiveChildren.find((c) => !c.isAssigned) || effectiveChildren[0];
           setSelectedChildId(unassignedChild?.id || '');
         }
       }
     }
-  }, [isOpen, targetAccount, type, allParents, allChildren, currentUser, user]);
+  }, [isOpen, targetAccount, type, effectiveParents.length, effectiveChildren.length, currentUser, user]);
 
   // Synchronize when active session changes
   useEffect(() => {
@@ -175,16 +241,24 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     );
   }
 
-  const chosenParent = allParents.find(
+  const chosenParent = effectiveParents.find(
     (p) => p.id === selectedParentId || p.userId === selectedParentId || toValidUUID(p.id) === selectedParentId
   );
-  const chosenChild = allChildren.find(
+  const chosenChild = effectiveChildren.find(
     (c) => c.id === selectedChildId || c.userId === selectedChildId || toValidUUID(c.id) === selectedChildId
   );
 
-  const hasParents = allParents.length > 0;
-  const hasChildren = allChildren.length > 0;
+  const hasParents = effectiveParents.length > 0;
+  const hasChildren = effectiveChildren.length > 0;
   const hasAccounts = hasParents && hasChildren;
+
+  // Anti-self-assignment constraint check
+  const isSelfAssignment = Boolean(
+    chosenParent && chosenChild && (
+      chosenParent.userId === chosenChild.userId ||
+      toValidUUID(chosenParent.userId) === toValidUUID(chosenChild.userId)
+    )
+  );
 
   // Manual token refresh trigger
   const handleManualRefresh = async () => {
@@ -252,6 +326,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
 
       if (res.success) {
         setSeedSuccessNotice('Successfully provisioned sandbox demo accounts! Refreshing options...');
+        const loaded = await loadAccounts();
+        if (loaded.parents.length > 0 && !selectedParentId) {
+          setSelectedParentId(loaded.parents[0].id);
+        }
+        if (loaded.children.length > 0 && !selectedChildId) {
+          const eligible = loaded.children.find(
+            (c) => !loaded.parents[0] || c.userId !== loaded.parents[0].userId
+          ) || loaded.children[0];
+          setSelectedChildId(eligible.id);
+        }
         onAssignmentSuccess();
         setTimeout(() => setSeedSuccessNotice(null), 4000);
       } else {
@@ -642,7 +726,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 </label>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-slate-500 font-mono">
-                    {allParents.length} eligible parent{allParents.length === 1 ? '' : 's'}
+                    {effectiveParents.length} eligible parent{effectiveParents.length === 1 ? '' : 's'}
                   </span>
                   {!hasParents && (
                     <button
@@ -667,7 +751,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 {!hasParents ? (
                   <option value="">No active parent accounts available (Create or Seed demo accounts)</option>
                 ) : (
-                  allParents.map((parent) => (
+                  effectiveParents.map((parent) => (
                     <option key={parent.id} value={parent.id}>
                       {parent.mentorName} — MT5 #{parent.accountNumber} ({parent.brokerName}) [${parent.balance.toLocaleString()}]
                     </option>
@@ -685,7 +769,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 </label>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-slate-500 font-mono">
-                    {allChildren.length} eligible child{allChildren.length === 1 ? '' : 'ren'}
+                    {effectiveChildren.length} eligible child{effectiveChildren.length === 1 ? '' : 'ren'}
                   </span>
                   {!hasChildren && (
                     <button
@@ -710,7 +794,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 {!hasChildren ? (
                   <option value="">No follower child accounts available (Create or Seed demo accounts)</option>
                 ) : (
-                  allChildren.map((child) => (
+                  effectiveChildren.map((child) => (
                     <option key={child.id} value={child.id}>
                       {child.traderName} — MT5 #{child.accountNumber} ({child.brokerName}) [${child.balance.toLocaleString()}]
                       {child.isAssigned ? ` [Linked to: ${child.assignedMentorName || 'Active'}]` : ' [Unassigned]'}

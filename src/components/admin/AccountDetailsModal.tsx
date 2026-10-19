@@ -56,13 +56,13 @@ export const AccountDetailsModal: React.FC<AccountDetailsModalProps> = ({
     setIsLoadingTrades(true);
 
     mt5AdminService.getAccountTrades(account.id, isCloudMode, trades)
-      .then((data) => {
+      .then((data: AccountTradeItem[]) => {
         if (isMounted) {
           setTradeLogs(data);
           setIsLoadingTrades(false);
         }
       })
-      .catch((err) => {
+      .catch((err: any) => {
         console.error('Error fetching account trades:', err);
         if (isMounted) setIsLoadingTrades(false);
       });

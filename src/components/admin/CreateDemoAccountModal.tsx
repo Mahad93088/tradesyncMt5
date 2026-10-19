@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Server,
@@ -43,6 +43,17 @@ export const CreateDemoAccountModal: React.FC<CreateDemoAccountModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Sync with defaultRole when modal opens or defaultRole prop updates
+  useEffect(() => {
+    if (isOpen) {
+      setAccountRole(defaultRole);
+      setAccountNumber(`DEMO-${defaultRole === 'parent' ? '700' : '900'}${Math.floor(100 + Math.random() * 900)}`);
+      setBalance(defaultRole === 'parent' ? 100000 : 10000);
+      setOwnerName('');
+      setErrorMessage(null);
+    }
+  }, [isOpen, defaultRole]);
 
   // Update defaults when role changes
   const handleRoleChange = (role: 'parent' | 'child') => {
