@@ -1069,10 +1069,24 @@ export const mt5AdminService = {
     const safeParentAccId = params.parentAccountId ? toValidUUID(params.parentAccountId) : undefined;
     const safeChildAccId = params.childAccountId ? toValidUUID(params.childAccountId) : undefined;
 
+    // Strict Distinction: Never allow MT5 Account UUID to be passed as mentor_id or trader_id
+    if (safeParentAccId && safeMentorId === safeParentAccId) {
+      return {
+        success: false,
+        error: 'Security constraint violation: MT5 Account ID cannot be used as mentor_id. The mentor profile UUID (profiles.id) from public.profiles is required.',
+      };
+    }
+    if (safeChildAccId && safeTraderId === safeChildAccId) {
+      return {
+        success: false,
+        error: 'Security constraint violation: MT5 Account ID cannot be used as trader_id. The follower profile UUID (profiles.id) from public.profiles is required.',
+      };
+    }
+
     if (safeMentorId.trim() === safeTraderId.trim()) {
       return {
         success: false,
-        error: 'Security constraint: An account holder cannot be assigned to copy from themselves.',
+        error: 'Security error: A user cannot assign themselves as their own mentor (anti-self-assignment protection).',
       };
     }
 
@@ -1145,19 +1159,35 @@ export const mt5AdminService = {
 
           // 3. Update MT5 Accounts Roles and profile ownership (ensures account user_id links directly to verified profile)
           if (safeParentAccId && isValidUUID(safeParentAccId)) {
-            const { error: pErr } = await supabase
+            const { data: pAcc } = await supabase
               .from('mt5_accounts')
-              .update({ account_role: 'parent', user_id: safeMentorId })
-              .eq('id', safeParentAccId);
-            if (pErr && isJwtExpiredError(pErr)) throw pErr;
+              .select('id')
+              .eq('id', safeParentAccId)
+              .maybeSingle();
+
+            if (pAcc) {
+              const { error: pErr } = await supabase
+                .from('mt5_accounts')
+                .update({ account_role: 'parent', user_id: safeMentorId })
+                .eq('id', safeParentAccId);
+              if (pErr && isJwtExpiredError(pErr)) throw pErr;
+            }
           }
 
           if (safeChildAccId && isValidUUID(safeChildAccId)) {
-            const { error: cErr } = await supabase
+            const { data: cAcc } = await supabase
               .from('mt5_accounts')
-              .update({ account_role: 'child', user_id: safeTraderId })
-              .eq('id', safeChildAccId);
-            if (cErr && isJwtExpiredError(cErr)) throw cErr;
+              .select('id')
+              .eq('id', safeChildAccId)
+              .maybeSingle();
+
+            if (cAcc) {
+              const { error: cErr } = await supabase
+                .from('mt5_accounts')
+                .update({ account_role: 'child', user_id: safeTraderId })
+                .eq('id', safeChildAccId);
+              if (cErr && isJwtExpiredError(cErr)) throw cErr;
+            }
           }
 
           // Check existing assignment in public.mentor_assignments
@@ -1439,8 +1469,13 @@ export const mt5AdminService = {
             status: 'active' as const,
           }));
         }
+
+        // In Cloud Mode, if no active mentors exist in Supabase, return empty array
+        // Never return mock demo IDs in Cloud Mode to prevent database foreign key / trigger failures
+        return [];
       } catch (err) {
         console.warn('[mt5AdminService] Could not fetch verified mentors from Supabase:', err);
+        return [];
       }
     }
 
@@ -1458,7 +1493,7 @@ export const mt5AdminService = {
       }));
     }
 
-    // Standard demo mentors fallback
+    // Standard demo mentors fallback for demo sandbox
     return STANDARD_DEMO_ACCOUNTS
       .filter((item) => item.owner.role === 'mentor' && item.owner.status === 'active')
       .map((item) => ({
@@ -1494,8 +1529,10 @@ export const mt5AdminService = {
             status: 'active' as const,
           }));
         }
+        return [];
       } catch (err) {
         console.warn('[mt5AdminService] Could not fetch verified traders from Supabase:', err);
+        return [];
       }
     }
 
@@ -1525,7 +1562,7 @@ export const mt5AdminService = {
     if (params.isCloudMode && isSupabaseConfigured()) {
       try {
         return await executeWithAuthRetry(async () => {
-          // 1. Verify target mentor is indeed active with role = 'mentor'
+          // 1. Verify target mentor is indeed active with role = 'mentor' in public.profiles
           const { data: mentorProfile, error: mentorErr } = await supabase
             .from('profiles')
             .select('id, full_name, email, role, status')
@@ -1536,20 +1573,60 @@ export const mt5AdminService = {
           if (!mentorProfile || mentorProfile.role !== 'mentor' || mentorProfile.status !== 'active') {
             return {
               success: false,
-              error: 'Selected user profile is not a verified active mentor.',
+              error: 'Security error: Selected user profile is not a verified active mentor in public.profiles.',
             };
           }
 
-          // 2. Update mt5_accounts.user_id
-          const { error: accErr } = await supabase
+          // 2. Check if mt5_accounts record exists; update if so, or insert if from sandbox
+          const { data: existingAcc } = await supabase
             .from('mt5_accounts')
-            .update({
-              user_id: safeMentorProfileId,
-              account_role: 'parent',
-            })
-            .eq('id', safeParentAccId);
+            .select('id')
+            .eq('id', safeParentAccId)
+            .maybeSingle();
 
-          if (accErr) throw accErr;
+          if (existingAcc) {
+            const { error: accErr } = await supabase
+              .from('mt5_accounts')
+              .update({
+                user_id: safeMentorProfileId,
+                account_role: 'parent',
+              })
+              .eq('id', safeParentAccId);
+
+            if (accErr) throw accErr;
+          } else {
+            const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
+            const list: MT5Account[] = stored ? JSON.parse(stored) : [];
+            const localAcc = list.find(a => a.id === params.parentAccountId || toValidUUID(a.id) === safeParentAccId) ||
+              STANDARD_DEMO_ACCOUNTS.find(i => i.account.id === params.parentAccountId || toValidUUID(i.account.id) === safeParentAccId)?.account;
+
+            if (localAcc) {
+              const { error: insertErr } = await supabase
+                .from('mt5_accounts')
+                .insert([{
+                  id: safeParentAccId,
+                  user_id: safeMentorProfileId,
+                  account_number: localAcc.accountNumber,
+                  broker_server: localAcc.server,
+                  broker_name: localAcc.broker,
+                  account_role: 'parent',
+                  account_type: localAcc.accountType || 'demo',
+                  balance: localAcc.balance,
+                  equity: localAcc.equity,
+                  margin: 0,
+                  free_margin: localAcc.freeMargin,
+                  currency: localAcc.currency,
+                  leverage: localAcc.leverage,
+                  connection_status: 'connected',
+                  ping_ms: localAcc.pingMs || 15,
+                  is_investor_password: true,
+                  auto_trading_enabled: true,
+                }]);
+              if (insertErr) {
+                console.warn('[associateParentAccountMentor] notice creating account in Supabase:', insertErr.message);
+              }
+            }
+          }
 
           return {
             success: true,
@@ -1608,19 +1685,59 @@ export const mt5AdminService = {
           if (!traderProfile || traderProfile.status !== 'active') {
             return {
               success: false,
-              error: 'Selected user profile is not an active trader profile.',
+              error: 'Security error: Selected user profile is not an active trader profile in public.profiles.',
             };
           }
 
-          const { error: accErr } = await supabase
+          const { data: existingAcc } = await supabase
             .from('mt5_accounts')
-            .update({
-              user_id: safeTraderProfileId,
-              account_role: 'child',
-            })
-            .eq('id', safeChildAccId);
+            .select('id')
+            .eq('id', safeChildAccId)
+            .maybeSingle();
 
-          if (accErr) throw accErr;
+          if (existingAcc) {
+            const { error: accErr } = await supabase
+              .from('mt5_accounts')
+              .update({
+                user_id: safeTraderProfileId,
+                account_role: 'child',
+              })
+              .eq('id', safeChildAccId);
+
+            if (accErr) throw accErr;
+          } else {
+            const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
+            const list: MT5Account[] = stored ? JSON.parse(stored) : [];
+            const localAcc = list.find(a => a.id === params.childAccountId || toValidUUID(a.id) === safeChildAccId) ||
+              STANDARD_DEMO_ACCOUNTS.find(i => i.account.id === params.childAccountId || toValidUUID(i.account.id) === safeChildAccId)?.account;
+
+            if (localAcc) {
+              const { error: insertErr } = await supabase
+                .from('mt5_accounts')
+                .insert([{
+                  id: safeChildAccId,
+                  user_id: safeTraderProfileId,
+                  account_number: localAcc.accountNumber,
+                  broker_server: localAcc.server,
+                  broker_name: localAcc.broker,
+                  account_role: 'child',
+                  account_type: localAcc.accountType || 'demo',
+                  balance: localAcc.balance,
+                  equity: localAcc.equity,
+                  margin: 0,
+                  free_margin: localAcc.freeMargin,
+                  currency: localAcc.currency,
+                  leverage: localAcc.leverage,
+                  connection_status: 'connected',
+                  ping_ms: localAcc.pingMs || 15,
+                  is_investor_password: true,
+                  auto_trading_enabled: true,
+                }]);
+              if (insertErr) {
+                console.warn('[associateChildAccountTrader] notice creating account in Supabase:', insertErr.message);
+              }
+            }
+          }
 
           return {
             success: true,

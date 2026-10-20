@@ -85,6 +85,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState<boolean>(false);
   const [createDemoDefaultRole, setCreateDemoDefaultRole] = useState<'parent' | 'child'>('parent');
 
+  // Verified Mentors & Traders for Super Admin Association (Requirement 4 & 5 & 6)
+  const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string }>>([]);
+  const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string }>>([]);
+  const [selectedMentorProfileId, setSelectedMentorProfileId] = useState<string>('');
+  const [selectedTraderProfileId, setSelectedTraderProfileId] = useState<string>('');
+  const [isAssociatingMentor, setIsAssociatingMentor] = useState<boolean>(false);
+  const [isAssociatingTrader, setIsAssociatingTrader] = useState<boolean>(false);
+  const [mentorAssociationNotice, setMentorAssociationNotice] = useState<string | null>(null);
+  const [traderAssociationNotice, setTraderAssociationNotice] = useState<string | null>(null);
+
   // Keep internal parents and children synced with incoming props
   useEffect(() => {
     if (allParents && allParents.length > 0) {
@@ -97,6 +107,20 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       setInternalChildren(allChildren);
     }
   }, [allChildren]);
+
+  // Load verified mentors and traders from profiles
+  const loadVerifiedProfiles = async () => {
+    try {
+      const [mentors, traders] = await Promise.all([
+        mt5AdminService.getVerifiedMentors(isCloudMode, users),
+        mt5AdminService.getVerifiedTraders(isCloudMode, users),
+      ]);
+      setVerifiedMentors(mentors);
+      setVerifiedTraders(traders);
+    } catch (e) {
+      console.warn('Could not load verified profiles:', e);
+    }
+  };
 
   // Load accounts dynamically from service
   const loadAccounts = async () => {
@@ -138,6 +162,10 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     setIsSessionExpired(false);
     setShowInlineSignIn(false);
     setSessionRefreshedSuccess(false);
+    setMentorAssociationNotice(null);
+    setTraderAssociationNotice(null);
+
+    loadVerifiedProfiles();
 
     // If accounts are empty on open, dynamically fetch them
     if (effectiveParents.length === 0 || effectiveChildren.length === 0) {
@@ -255,13 +283,172 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const hasChildren = effectiveChildren.length > 0;
   const hasAccounts = hasParents && hasChildren;
 
+  // Helper: check if a UUID is a sandbox/demo mock ID
+  const isMockUUID = (uuid?: string | null): boolean => {
+    if (!uuid) return true;
+    return (
+      uuid.startsWith('00000000-0000-4000-a000-00000000000') ||
+      uuid === '00000000-0000-4000-a000-000000000001' ||
+      uuid === '00000000-0000-4000-a000-000000000002' ||
+      uuid.startsWith('user_') ||
+      uuid.startsWith('acc_')
+    );
+  };
+
+  // Mentor Verification State: must exist in public.profiles with role = 'mentor' and status = 'active'
+  const matchingVerifiedMentor = verifiedMentors.find(
+    (m) => m.id === chosenParent?.userId || toValidUUID(m.id) === toValidUUID(chosenParent?.userId)
+  );
+
+  const isParentMentorVerified = Boolean(
+    chosenParent && (
+      isCloudMode
+        ? ((chosenParent.isMentorVerified && !isMockUUID(chosenParent.userId)) || Boolean(matchingVerifiedMentor))
+        : (chosenParent.isMentorVerified || Boolean(matchingVerifiedMentor) || users.some(u => u.id === chosenParent.userId && u.role === 'mentor' && u.status === 'active'))
+    )
+  );
+
+  // Trader Verification State: must exist in public.profiles with status = 'active'
+  const matchingVerifiedTrader = verifiedTraders.find(
+    (t) => t.id === chosenChild?.userId || toValidUUID(t.id) === toValidUUID(chosenChild?.userId)
+  );
+
+  const isChildTraderVerified = Boolean(
+    chosenChild && (
+      isCloudMode
+        ? ((chosenChild.traderStatus === 'active' && !isMockUUID(chosenChild.userId)) || Boolean(matchingVerifiedTrader))
+        : (chosenChild.traderStatus === 'active' || Boolean(matchingVerifiedTrader) || users.some(u => u.id === chosenChild.userId && u.status === 'active'))
+    )
+  );
+
+  // Automatically keep selectedMentorProfileId and selectedTraderProfileId synced
+  useEffect(() => {
+    if (chosenParent) {
+      if (matchingVerifiedMentor) {
+        setSelectedMentorProfileId(matchingVerifiedMentor.id);
+      } else if (verifiedMentors.length > 0 && (!selectedMentorProfileId || !verifiedMentors.some(m => m.id === selectedMentorProfileId))) {
+        setSelectedMentorProfileId(verifiedMentors[0].id);
+      }
+    }
+  }, [chosenParent?.id, chosenParent?.userId, verifiedMentors.length]);
+
+  useEffect(() => {
+    if (chosenChild) {
+      if (matchingVerifiedTrader) {
+        setSelectedTraderProfileId(matchingVerifiedTrader.id);
+      } else if (verifiedTraders.length > 0 && (!selectedTraderProfileId || !verifiedTraders.some(t => t.id === selectedTraderProfileId))) {
+        setSelectedTraderProfileId(verifiedTraders[0].id);
+      }
+    }
+  }, [chosenChild?.id, chosenChild?.userId, verifiedTraders.length]);
+
   // Anti-self-assignment constraint check
   const isSelfAssignment = Boolean(
     chosenParent && chosenChild && (
       chosenParent.userId === chosenChild.userId ||
-      toValidUUID(chosenParent.userId) === toValidUUID(chosenChild.userId)
+      toValidUUID(chosenParent.userId) === toValidUUID(chosenChild.userId) ||
+      (selectedMentorProfileId && selectedTraderProfileId && selectedMentorProfileId === selectedTraderProfileId)
     )
   );
+
+  // Secure Super Admin Association Handler: Mentor (Requirement 5)
+  const handleAssociateMentor = async () => {
+    if (!chosenParent || !selectedMentorProfileId) return;
+    setIsAssociatingMentor(true);
+    setMentorAssociationNotice(null);
+    setErrorMessage(null);
+
+    try {
+      const res = await mt5AdminService.associateParentAccountMentor({
+        parentAccountId: chosenParent.id,
+        mentorProfileId: selectedMentorProfileId,
+        isCloudMode,
+      });
+
+      if (res.success) {
+        const selectedMentor = verifiedMentors.find((m) => m.id === selectedMentorProfileId);
+        const mentorName = selectedMentor ? selectedMentor.fullName : 'Verified Active Mentor';
+        const mentorEmail = selectedMentor ? selectedMentor.email : '';
+
+        // Immediately update in-memory accounts state
+        setInternalParents((prev) =>
+          prev.map((p) => {
+            if (p.id === chosenParent.id || toValidUUID(p.id) === toValidUUID(chosenParent.id)) {
+              return {
+                ...p,
+                userId: selectedMentorProfileId,
+                mentorName,
+                mentorEmail,
+                isMentorVerified: true,
+                mentorStatus: 'active',
+              };
+            }
+            return p;
+          })
+        );
+
+        setMentorAssociationNotice(
+          `Successfully associated Parent MT5 Account #${chosenParent.accountNumber} with verified active mentor "${mentorName}".`
+        );
+        setTimeout(() => setMentorAssociationNotice(null), 5000);
+      } else {
+        setErrorMessage(res.error || 'Failed to associate mentor profile.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error associating mentor profile.');
+    } finally {
+      setIsAssociatingMentor(false);
+    }
+  };
+
+  // Secure Super Admin Association Handler: Follower Trader (Requirement 6)
+  const handleAssociateTrader = async () => {
+    if (!chosenChild || !selectedTraderProfileId) return;
+    setIsAssociatingTrader(true);
+    setTraderAssociationNotice(null);
+    setErrorMessage(null);
+
+    try {
+      const res = await mt5AdminService.associateChildAccountTrader({
+        childAccountId: chosenChild.id,
+        traderProfileId: selectedTraderProfileId,
+        isCloudMode,
+      });
+
+      if (res.success) {
+        const selectedTrader = verifiedTraders.find((t) => t.id === selectedTraderProfileId);
+        const traderName = selectedTrader ? selectedTrader.fullName : 'Active Trader';
+        const traderEmail = selectedTrader ? selectedTrader.email : '';
+
+        // Immediately update in-memory accounts state
+        setInternalChildren((prev) =>
+          prev.map((c) => {
+            if (c.id === chosenChild.id || toValidUUID(c.id) === toValidUUID(chosenChild.id)) {
+              return {
+                ...c,
+                userId: selectedTraderProfileId,
+                traderName,
+                traderEmail,
+                traderStatus: 'active',
+              };
+            }
+            return c;
+          })
+        );
+
+        setTraderAssociationNotice(
+          `Successfully associated Child MT5 Account #${chosenChild.accountNumber} with active trader "${traderName}".`
+        );
+        setTimeout(() => setTraderAssociationNotice(null), 5000);
+      } else {
+        setErrorMessage(res.error || 'Failed to associate trader profile.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error associating trader profile.');
+    } finally {
+      setIsAssociatingTrader(false);
+    }
+  };
 
   // Manual token refresh trigger
   const handleManualRefresh = async () => {
@@ -360,10 +547,66 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       return;
     }
 
-    const safeMentorId = toValidUUID(chosenParent.userId);
-    const safeTraderId = toValidUUID(chosenChild.userId);
+    // 1. Resolve actual Mentor Profile UUID (profiles.id)
+    // Never allow MT5 account ID, display name, or mock ID (Requirement 2 & 3)
+    let finalMentorId = chosenParent.userId;
+    if (!isParentMentorVerified) {
+      if (selectedMentorProfileId) {
+        finalMentorId = selectedMentorProfileId;
+      } else {
+        setErrorMessage(
+          'Security error: Target mentor_id is not a verified active mentor. Please associate this Parent MT5 account with a verified active mentor profile before assigning.'
+        );
+        return;
+      }
+    }
 
-    // Anti-Self Assignment constraint
+    let finalTraderId = chosenChild.userId;
+    if (!isChildTraderVerified) {
+      if (selectedTraderProfileId) {
+        finalTraderId = selectedTraderProfileId;
+      } else {
+        setErrorMessage(
+          'Security error: Trader account must be active to create or update an assignment. Please associate this Child MT5 account with an active trader profile.'
+        );
+        return;
+      }
+    }
+
+    const safeMentorId = toValidUUID(finalMentorId);
+    const safeTraderId = toValidUUID(finalTraderId);
+
+    // Strict identity distinction validation (Requirement 2 & 3)
+    if (safeMentorId === toValidUUID(chosenParent.id)) {
+      setErrorMessage(
+        'Security constraint violation: MT5 Account UUID cannot be used as mentor_id. The mentor profile UUID (profiles.id) is strictly required.'
+      );
+      return;
+    }
+    if (safeTraderId === toValidUUID(chosenChild.id)) {
+      setErrorMessage(
+        'Security constraint violation: MT5 Account UUID cannot be used as trader_id. The follower profile UUID (profiles.id) is strictly required.'
+      );
+      return;
+    }
+
+    // In Cloud Mode, reject any mock demo IDs to guarantee foreign keys in public.profiles
+    if (isCloudMode) {
+      if (isMockUUID(safeMentorId) && !verifiedMentors.some((m) => m.id === safeMentorId)) {
+        setErrorMessage(
+          'Security error: Target mentor_id is a sandbox mock ID and does not exist in public.profiles. Please associate this Parent account with a verified active mentor profile before assigning.'
+        );
+        return;
+      }
+      if (isMockUUID(safeTraderId) && !verifiedTraders.some((t) => t.id === safeTraderId)) {
+        setErrorMessage(
+          'Security error: Follower trader is a mock ID and does not exist in public.profiles. Please associate with an active trader profile.'
+        );
+        return;
+      }
+    }
+
+    // Anti-Self Assignment constraint (Requirement 8)
     if (safeMentorId === safeTraderId) {
       setErrorMessage('Security constraint: An account holder cannot be assigned to copy from themselves.');
       return;
@@ -385,6 +628,23 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     setIsSubmitting(true);
 
     try {
+      // If mentor was associated via selection, ensure mt5_accounts record is linked first
+      if (finalMentorId !== chosenParent.userId) {
+        await mt5AdminService.associateParentAccountMentor({
+          parentAccountId: chosenParent.id,
+          mentorProfileId: finalMentorId,
+          isCloudMode,
+        });
+      }
+
+      if (finalTraderId !== chosenChild.userId) {
+        await mt5AdminService.associateChildAccountTrader({
+          childAccountId: chosenChild.id,
+          traderProfileId: finalTraderId,
+          isCloudMode,
+        });
+      }
+
       // 1. Execute database mutation via mt5AdminService using real UUIDs and active session
       const res = await mt5AdminService.assignChildToParent({
         mentorId: safeMentorId,
@@ -700,6 +960,19 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 <div className="text-[10px] text-slate-400 font-mono truncate">
                   {chosenParent ? `#${chosenParent.accountNumber} (${chosenParent.brokerName})` : '—'}
                 </div>
+                {chosenParent && (
+                  <div className="mt-1">
+                    {isParentMentorVerified ? (
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded">
+                        <CheckCircle2 className="h-2.5 w-2.5" /> Verified Active Mentor
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-amber-400 bg-amber-950/60 border border-amber-800/60 px-1.5 py-0.5 rounded">
+                        <AlertTriangle className="h-2.5 w-2.5" /> No Mentor Profile
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-col items-center justify-center shrink-0 px-2 text-cyan-400">
@@ -717,11 +990,24 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 <div className="text-[10px] text-slate-400 font-mono truncate">
                   {chosenChild ? `#${chosenChild.accountNumber} (${chosenChild.brokerName})` : '—'}
                 </div>
+                {chosenChild && (
+                  <div className="mt-1 flex justify-end">
+                    {isChildTraderVerified ? (
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded">
+                        <CheckCircle2 className="h-2.5 w-2.5" /> Active Trader
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[9px] font-medium text-amber-400 bg-amber-950/60 border border-amber-800/60 px-1.5 py-0.5 rounded">
+                        <AlertTriangle className="h-2.5 w-2.5" /> Unverified Trader
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Parent Selection */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                   <Server className="h-3.5 w-3.5 text-cyan-400" />
@@ -761,10 +1047,122 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   ))
                 )}
               </select>
+
+              {/* Mentor Profile Status & Secure Association (Requirement 4 & 5) */}
+              {chosenParent && (
+                <>
+                  {isParentMentorVerified ? (
+                    <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-3 py-2 rounded-lg">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                      <div className="flex-1 truncate">
+                        <span className="font-semibold text-white">Verified Mentor:</span> {chosenParent.mentorName}{' '}
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          ({chosenParent.mentorEmail || 'role: mentor, active'})
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-emerald-300 uppercase px-1.5 py-0.5 bg-emerald-900/60 rounded shrink-0">
+                        Verified
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-amber-600/50 bg-amber-950/40 p-3.5 space-y-3 animate-in fade-in">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                        <div className="space-y-1">
+                          <h4 className="text-xs font-bold text-amber-300">
+                            Security Warning: Target mentor_id is not a verified active mentor
+                          </h4>
+                          <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                            Parent MT5 Account #{chosenParent.accountNumber} ({chosenParent.brokerName}) is not currently associated with a verified active mentor profile in <code className="font-mono text-cyan-300 bg-slate-900 px-1 py-0.5 rounded">public.profiles</code>. Database constraint <code className="font-mono text-cyan-300 bg-slate-900 px-1 py-0.5 rounded">validate_mentor_assignment()</code> requires the target mentor to exist with <code className="font-mono text-cyan-300 bg-slate-900 px-1 py-0.5 rounded">role = 'mentor'</code> and <code className="font-mono text-cyan-300 bg-slate-900 px-1 py-0.5 rounded">status = 'active'</code>.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Super Admin Secure Association Section */}
+                      <div className="pt-2 border-t border-amber-900/40 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                            <UserCheck className="h-3.5 w-3.5 text-cyan-400" />
+                            <span>Associate with Existing Active Mentor:</span>
+                          </label>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {verifiedMentors.length} active mentor{verifiedMentors.length === 1 ? '' : 's'} in database
+                          </span>
+                        </div>
+
+                        {verifiedMentors.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                              <select
+                                value={selectedMentorProfileId}
+                                onChange={(e) => setSelectedMentorProfileId(e.target.value)}
+                                className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                              >
+                                <option value="">-- Choose verified active mentor --</option>
+                                {verifiedMentors.map((m) => (
+                                  <option key={m.id} value={m.id}>
+                                    {m.fullName} ({m.email}) [role: mentor, active]
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={handleAssociateMentor}
+                                disabled={!selectedMentorProfileId || isAssociatingMentor}
+                                className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shrink-0"
+                              >
+                                {isAssociatingMentor ? (
+                                  <>
+                                    <RefreshCw className="h-3 w-3 animate-spin" />
+                                    <span>Associating...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Link2 className="h-3 w-3" />
+                                    <span>Associate Mentor</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                            <p className="text-[10px] text-slate-400 font-mono">
+                              Associates MT5 Account #{chosenParent.accountNumber} with profile UUID{' '}
+                              <span className="text-cyan-300">{selectedMentorProfileId || 'select above'}</span> in <code className="text-slate-300">public.mt5_accounts</code>.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="rounded-lg border border-slate-800 bg-slate-900/90 p-2.5 text-[11px] text-slate-300 space-y-1.5">
+                            <p className="text-amber-300 font-semibold flex items-center gap-1.5">
+                              <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
+                              No verified active mentors found in public.profiles.
+                            </p>
+                            <p className="text-slate-400 leading-relaxed">
+                              Security policy strictly prevents automatically promoting accounts to mentor. An administrator must approve or promote a mentor in Mentors Management before assigning followers.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={loadVerifiedProfiles}
+                              className="text-[10px] text-cyan-400 hover:text-cyan-300 font-medium underline flex items-center gap-1 pt-1"
+                            >
+                              <RefreshCw className="h-3 w-3" /> Re-check Profiles for Verified Mentors
+                            </button>
+                          </div>
+                        )}
+
+                        {mentorAssociationNotice && (
+                          <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-950/50 border border-emerald-800/60 p-2 rounded-lg animate-in fade-in">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                            <span>{mentorAssociationNotice}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Child Selection */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                   <Layers className="h-3.5 w-3.5 text-emerald-400" />
@@ -805,6 +1203,101 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   ))
                 )}
               </select>
+
+              {/* Trader Profile Status & Secure Association (Requirement 6) */}
+              {chosenChild && (
+                <>
+                  {isChildTraderVerified ? (
+                    <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-3 py-2 rounded-lg">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                      <div className="flex-1 truncate">
+                        <span className="font-semibold text-white">Active Trader:</span> {chosenChild.traderName}{' '}
+                        <span className="text-slate-400 font-mono text-[11px]">
+                          ({chosenChild.traderEmail || 'status: active in profiles'})
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-emerald-300 uppercase px-1.5 py-0.5 bg-emerald-900/60 rounded shrink-0">
+                        Active Trader
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-amber-600/50 bg-amber-950/40 p-3.5 space-y-3 animate-in fade-in">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                        <div className="space-y-1">
+                          <h4 className="text-xs font-bold text-amber-300">
+                            Unlinked Follower Trader Profile
+                          </h4>
+                          <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                            Child MT5 Account #{chosenChild.accountNumber} ({chosenChild.brokerName}) is not associated with an active trader profile in <code className="font-mono text-emerald-300 bg-slate-900 px-1 py-0.5 rounded">public.profiles</code>. Database constraint <code className="font-mono text-emerald-300 bg-slate-900 px-1 py-0.5 rounded">validate_mentor_assignment()</code> requires <code className="font-mono text-emerald-300 bg-slate-900 px-1 py-0.5 rounded">trader_id</code> to be an active account.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Super Admin Secure Trader Association Section */}
+                      <div className="pt-2 border-t border-amber-900/40 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                            <UserCheck className="h-3.5 w-3.5 text-emerald-400" />
+                            <span>Associate with Existing Active Trader:</span>
+                          </label>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {verifiedTraders.length} active trader{verifiedTraders.length === 1 ? '' : 's'} available
+                          </span>
+                        </div>
+
+                        {verifiedTraders.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                              <select
+                                value={selectedTraderProfileId}
+                                onChange={(e) => setSelectedTraderProfileId(e.target.value)}
+                                className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                              >
+                                <option value="">-- Choose active trader --</option>
+                                {verifiedTraders.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    {t.fullName} ({t.email}) [active trader]
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={handleAssociateTrader}
+                                disabled={!selectedTraderProfileId || isAssociatingTrader}
+                                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5 shrink-0"
+                              >
+                                {isAssociatingTrader ? (
+                                  <>
+                                    <RefreshCw className="h-3 w-3 animate-spin" />
+                                    <span>Associating...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Link2 className="h-3 w-3" />
+                                    <span>Associate Trader</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="rounded-lg border border-slate-800 bg-slate-900/80 p-2.5 text-[11px] text-slate-300">
+                            <p className="text-amber-300 font-medium">No active trader profiles found in database.</p>
+                          </div>
+                        )}
+
+                        {traderAssociationNotice && (
+                          <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/50 p-2 rounded-lg animate-in fade-in">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                            <span>{traderAssociationNotice}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Copy Sizing Controls */}
@@ -895,7 +1388,13 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isSubmitting || !hasAccounts}
+                disabled={
+                  isSubmitting ||
+                  !hasAccounts ||
+                  isSelfAssignment ||
+                  (!isParentMentorVerified && !selectedMentorProfileId) ||
+                  (!isChildTraderVerified && !selectedTraderProfileId)
+                }
                 className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
