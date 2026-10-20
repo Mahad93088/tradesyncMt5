@@ -248,29 +248,6 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     }
   }, [session, isSessionExpired, errorMessage]);
 
-  if (!isOpen) return null;
-
-  // Authorization check
-  const isAdmin = currentUser.role === 'admin' || user.role === 'admin';
-  if (!isAdmin) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-        <div className="w-full max-w-md rounded-2xl border border-rose-800 bg-slate-900 p-6 text-center space-y-4">
-          <AlertCircle className="h-10 w-10 text-rose-500 mx-auto" />
-          <h3 className="text-base font-bold text-white">Access Denied</h3>
-          <p className="text-xs text-slate-400">
-            Only Super Administrators are authorized to assign or reassign MT5 accounts.
-          </p>
-          <button
-            onClick={onClose}
-            className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-semibold text-white"
-          >
-            Dismiss
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   const chosenParent = effectiveParents.find(
     (p) => p.id === selectedParentId || p.userId === selectedParentId || toValidUUID(p.id) === selectedParentId
@@ -323,24 +300,32 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
 
   // Automatically keep selectedMentorProfileId and selectedTraderProfileId synced
   useEffect(() => {
+    if (!isOpen) return;
     if (chosenParent) {
       if (matchingVerifiedMentor) {
         setSelectedMentorProfileId(matchingVerifiedMentor.id);
-      } else if (verifiedMentors.length > 0 && (!selectedMentorProfileId || !verifiedMentors.some(m => m.id === selectedMentorProfileId))) {
-        setSelectedMentorProfileId(verifiedMentors[0].id);
+      } else if (verifiedMentors.length > 0) {
+        setSelectedMentorProfileId((prev) => {
+          if (prev && verifiedMentors.some((m) => m.id === prev)) return prev;
+          return verifiedMentors[0].id;
+        });
       }
     }
-  }, [chosenParent?.id, chosenParent?.userId, verifiedMentors.length]);
+  }, [isOpen, chosenParent?.id, chosenParent?.userId, matchingVerifiedMentor?.id, verifiedMentors]);
 
   useEffect(() => {
+    if (!isOpen) return;
     if (chosenChild) {
       if (matchingVerifiedTrader) {
         setSelectedTraderProfileId(matchingVerifiedTrader.id);
-      } else if (verifiedTraders.length > 0 && (!selectedTraderProfileId || !verifiedTraders.some(t => t.id === selectedTraderProfileId))) {
-        setSelectedTraderProfileId(verifiedTraders[0].id);
+      } else if (verifiedTraders.length > 0) {
+        setSelectedTraderProfileId((prev) => {
+          if (prev && verifiedTraders.some((t) => t.id === prev)) return prev;
+          return verifiedTraders[0].id;
+        });
       }
     }
-  }, [chosenChild?.id, chosenChild?.userId, verifiedTraders.length]);
+  }, [isOpen, chosenChild?.id, chosenChild?.userId, matchingVerifiedTrader?.id, verifiedTraders]);
 
   // Anti-self-assignment constraint check
   const isSelfAssignment = Boolean(
@@ -732,6 +717,30 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       setIsSubmitting(false);
     }
   };
+
+  if (!isOpen) return null;
+
+  // Authorization check
+  const isAdmin = currentUser.role === 'admin' || user.role === 'admin';
+  if (!isAdmin) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+        <div className="w-full max-w-md rounded-2xl border border-rose-800 bg-slate-900 p-6 text-center space-y-4">
+          <AlertCircle className="h-10 w-10 text-rose-500 mx-auto" />
+          <h3 className="text-base font-bold text-white">Access Denied</h3>
+          <p className="text-xs text-slate-400">
+            Only Super Administrators are authorized to assign or reassign MT5 accounts.
+          </p>
+          <button
+            onClick={onClose}
+            className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-semibold text-white"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>

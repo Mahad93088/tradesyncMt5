@@ -30,7 +30,9 @@ export const AccountRelationshipsView: React.FC = () => {
     return matchesSearch && matchesMentor;
   });
 
-  const mentorsList = Array.from(new Set(parentChildLinks.map((l) => ({ id: l.mentorId, name: l.mentorName }))));
+  const mentorsList = Array.from(
+    new Map(parentChildLinks.map((l) => [l.mentorId, { id: l.mentorId, name: l.mentorName }])).values()
+  );
 
   return (
     <div className="space-y-6">
