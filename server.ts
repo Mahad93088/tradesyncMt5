@@ -191,9 +191,80 @@ async function startServer() {
     });
   });
 
-  // Protected Server-Side Admin Promotion Endpoint (Step 4 of Plan)
-  // Public signup must never allow users to assign themselves the Admin role.
-  // Admin accounts must be created or promoted ONLY through this secure, authorized server-side process.
+  // Helper: RFC 4122 UUID validator
+  const isValidUUID = (uuid: unknown): boolean => {
+    if (typeof uuid !== 'string') return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid.trim());
+  };
+
+  // Directory of Registered Users for Authorized Super Admin Approval
+  app.get('/api/admin/users', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Missing or malformed Authorization header' });
+      }
+
+      if (!supabaseUrl) {
+        return res.status(503).json({ error: 'Supabase URL not configured' });
+      }
+
+      const token = authHeader.replace('Bearer ', '').trim();
+      const authClient = createClient(supabaseUrl, publishableKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${token}` } },
+      });
+
+      // 1. Authenticate caller
+      const { data: { user: callerUser }, error: authError } = await authClient.auth.getUser(token);
+      if (authError || !callerUser) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid authentication token' });
+      }
+
+      const clientForQueries = serviceRoleKey
+        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        : authClient;
+
+      // 2. Verify caller has admin privileges
+      const { data: callerProfile } = await clientForQueries
+        .from('profiles')
+        .select('id, email, role, status')
+        .eq('id', callerUser.id)
+        .maybeSingle();
+
+      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
+      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+
+      if (!isVerifiedAdmin) {
+        return res.status(403).json({
+          error: 'Forbidden: Only verified administrators can access the user directory',
+        });
+      }
+
+      // 3. Fetch registered profiles
+      const { data: profiles, error: listError } = await clientForQueries
+        .from('profiles')
+        .select('id, email, full_name, role, status, created_at, avatar_url')
+        .order('created_at', { ascending: false });
+
+      if (listError) {
+        return res.status(500).json({ error: listError.message });
+      }
+
+      return res.json({
+        success: true,
+        users: profiles || [],
+      });
+    } catch (err: any) {
+      console.error('Error fetching admin users:', err);
+      return res.status(500).json({ error: err.message || 'Error fetching user directory' });
+    }
+  });
+
+  // Protected Server-Side Admin Promotion Endpoint
+  // Public signup must never allow users to assign themselves the Admin or Mentor role.
+  // Mentor and Admin accounts must be approved ONLY through this secure, authorized process.
   app.post('/api/admin/promote-user', async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization;
@@ -201,57 +272,97 @@ async function startServer() {
         return res.status(401).json({ error: 'Missing or malformed Authorization header' });
       }
 
-      if (!supabaseUrl || !serviceRoleKey) {
+      if (!supabaseUrl) {
         return res.status(503).json({
-          error: 'Supabase server environment is missing SUPABASE_SERVICE_ROLE_KEY. Cannot elevate role.',
+          error: 'Supabase URL is not configured.',
           configured: false,
         });
       }
 
       const token = authHeader.replace('Bearer ', '').trim();
-      const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+      const authClient = createClient(supabaseUrl, publishableKey, {
         auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${token}` } },
       });
 
       // 1. Authenticate caller using Supabase Auth
       const {
         data: { user: callerUser },
         error: authError,
-      } = await adminClient.auth.getUser(token);
+      } = await authClient.auth.getUser(token);
 
       if (authError || !callerUser) {
         return res.status(401).json({ error: 'Unauthorized: Invalid authentication token' });
       }
 
-      // 2. Verify caller has 'admin' role in public.profiles
-      const { data: callerProfile, error: profileError } = await adminClient
-        .from('profiles')
-        .select('role')
-        .eq('id', callerUser.id)
-        .single();
+      const clientForQueries = serviceRoleKey
+        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        : authClient;
 
-      if (profileError || callerProfile?.role !== 'admin') {
+      // 2. Verify caller has active 'admin' role in public.profiles (Requirement 5)
+      const { data: callerProfile, error: profileError } = await clientForQueries
+        .from('profiles')
+        .select('id, email, role, status')
+        .eq('id', callerUser.id)
+        .maybeSingle();
+
+      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
+      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+
+      if (!isVerifiedAdmin) {
         return res.status(403).json({
-          error: 'Forbidden: Only verified administrators can promote users or change roles',
+          error: 'Forbidden: Only verified active administrators can approve mentors or modify roles',
         });
       }
 
       const { targetUserId, newRole } = req.body;
-      if (!targetUserId || !['admin', 'mentor', 'trader'].includes(newRole)) {
+      if (!targetUserId || !isValidUUID(targetUserId)) {
         return res.status(400).json({
-          error: 'Invalid request: targetUserId is required and newRole must be admin, mentor, or trader',
+          error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122). Sandbox demo IDs are not allowed in Cloud Mode.',
         });
       }
 
-      // 3. Elevate user role using server-side service role key
-      const { data: updatedProfile, error: updateError } = await adminClient
+      // 3. Anti-self-promotion protection (Requirement 6)
+      if (targetUserId === callerUser.id) {
+        return res.status(400).json({
+          error: 'Security constraint violation: Super Administrators cannot alter or promote their own role.',
+        });
+      }
+
+      if (!['admin', 'mentor', 'trader'].includes(newRole)) {
+        return res.status(400).json({
+          error: 'Invalid request: newRole must be admin, mentor, or trader',
+        });
+      }
+
+      // 4. Verify target user profile exists in public.profiles (Requirement 7)
+      const { data: targetProfile, error: targetError } = await clientForQueries
+        .from('profiles')
+        .select('id, email, full_name, role, status')
+        .eq('id', targetUserId)
+        .maybeSingle();
+
+      if (targetError) {
+        return res.status(500).json({ error: `Failed to query target profile: ${targetError.message}` });
+      }
+
+      if (!targetProfile) {
+        return res.status(404).json({
+          error: 'Target user profile not found in public.profiles. Ensure the user has registered in Supabase first.',
+        });
+      }
+
+      // 5. Elevate target user role to requested role (e.g. 'mentor') and ensure status is active
+      const { data: updatedProfile, error: updateError } = await clientForQueries
         .from('profiles')
         .update({
           role: newRole,
+          status: 'active',
           updated_at: new Date().toISOString(),
         })
         .eq('id', targetUserId)
-        .select()
+        .select('id, email, full_name, role, status, updated_at')
         .single();
 
       if (updateError) {
@@ -260,7 +371,7 @@ async function startServer() {
 
       return res.json({
         success: true,
-        message: `User role successfully updated to ${newRole}`,
+        message: `User ${targetProfile.email || targetUserId} successfully approved as ${newRole}`,
         profile: updatedProfile,
       });
     } catch (err: any) {

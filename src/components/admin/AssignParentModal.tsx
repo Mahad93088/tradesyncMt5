@@ -86,8 +86,8 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [createDemoDefaultRole, setCreateDemoDefaultRole] = useState<'parent' | 'child'>('parent');
 
   // Verified Mentors & Traders for Super Admin Association (Requirement 4 & 5 & 6)
-  const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string }>>([]);
-  const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string }>>([]);
+  const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: 'mentor'; status: 'active' }>>([]);
+  const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: 'trader'; status: 'active' }>>([]);
   const [selectedMentorProfileId, setSelectedMentorProfileId] = useState<string>('');
   const [selectedTraderProfileId, setSelectedTraderProfileId] = useState<string>('');
   const [isAssociatingMentor, setIsAssociatingMentor] = useState<boolean>(false);
@@ -151,6 +151,18 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       setIsLoadingAccounts(false);
     }
   };
+
+  // Listen for mentor promotions across the platform to auto-refresh verified profiles
+  useEffect(() => {
+    const handleMentorPromoted = () => {
+      loadVerifiedProfiles();
+      loadAccounts();
+    };
+    window.addEventListener('tradesync:mentor-promoted', handleMentorPromoted);
+    return () => {
+      window.removeEventListener('tradesync:mentor-promoted', handleMentorPromoted);
+    };
+  }, [isCloudMode]);
 
   const effectiveParents = internalParents.length > 0 ? internalParents : allParents;
   const effectiveChildren = internalChildren.length > 0 ? internalChildren : allChildren;
@@ -274,27 +286,33 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
 
   // Mentor Verification State: must exist in public.profiles with role = 'mentor' and status = 'active'
   const matchingVerifiedMentor = verifiedMentors.find(
-    (m) => m.id === chosenParent?.userId || toValidUUID(m.id) === toValidUUID(chosenParent?.userId)
+    (m) =>
+      (m.id === chosenParent?.userId || toValidUUID(m.id) === toValidUUID(chosenParent?.userId)) &&
+      m.role === 'mentor' &&
+      m.status === 'active'
   );
 
   const isParentMentorVerified = Boolean(
     chosenParent && (
       isCloudMode
-        ? ((chosenParent.isMentorVerified && !isMockUUID(chosenParent.userId)) || Boolean(matchingVerifiedMentor))
+        ? Boolean(matchingVerifiedMentor && !isMockUUID(matchingVerifiedMentor.id))
         : (chosenParent.isMentorVerified || Boolean(matchingVerifiedMentor) || users.some(u => u.id === chosenParent.userId && u.role === 'mentor' && u.status === 'active'))
     )
   );
 
-  // Trader Verification State: must exist in public.profiles with status = 'active'
+  // Trader Verification State: must exist in public.profiles with role = 'trader' and status = 'active'
   const matchingVerifiedTrader = verifiedTraders.find(
-    (t) => t.id === chosenChild?.userId || toValidUUID(t.id) === toValidUUID(chosenChild?.userId)
+    (t) =>
+      (t.id === chosenChild?.userId || toValidUUID(t.id) === toValidUUID(chosenChild?.userId)) &&
+      t.role === 'trader' &&
+      t.status === 'active'
   );
 
   const isChildTraderVerified = Boolean(
     chosenChild && (
       isCloudMode
-        ? ((chosenChild.traderStatus === 'active' && !isMockUUID(chosenChild.userId)) || Boolean(matchingVerifiedTrader))
-        : (chosenChild.traderStatus === 'active' || Boolean(matchingVerifiedTrader) || users.some(u => u.id === chosenChild.userId && u.status === 'active'))
+        ? Boolean(matchingVerifiedTrader && !isMockUUID(matchingVerifiedTrader.id))
+        : (chosenChild.traderStatus === 'active' || Boolean(matchingVerifiedTrader) || users.some(u => u.id === chosenChild.userId && u.role === 'trader' && u.status === 'active'))
     )
   );
 
@@ -575,17 +593,24 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
       return;
     }
 
-    // In Cloud Mode, reject any mock demo IDs to guarantee foreign keys in public.profiles
+    // In Cloud Mode, strictly enforce real profiles with verified role and active status (Requirements 4, 5, 6)
     if (isCloudMode) {
-      if (isMockUUID(safeMentorId) && !verifiedMentors.some((m) => m.id === safeMentorId)) {
+      const activeMentorProfile = verifiedMentors.find(
+        (m) => (m.id === safeMentorId || toValidUUID(m.id) === safeMentorId) && m.role === 'mentor' && m.status === 'active'
+      );
+      if (!activeMentorProfile || isMockUUID(safeMentorId)) {
         setErrorMessage(
-          'Security error: Target mentor_id is a sandbox mock ID and does not exist in public.profiles. Please associate this Parent account with a verified active mentor profile before assigning.'
+          'Security error: Target mentor_id must be a real active mentor profile in public.profiles (role = "mentor", status = "active"). Please associate this Parent account with a verified active mentor.'
         );
         return;
       }
-      if (isMockUUID(safeTraderId) && !verifiedTraders.some((t) => t.id === safeTraderId)) {
+
+      const activeTraderProfile = verifiedTraders.find(
+        (t) => (t.id === safeTraderId || toValidUUID(t.id) === safeTraderId) && t.role === 'trader' && t.status === 'active'
+      );
+      if (!activeTraderProfile || isMockUUID(safeTraderId)) {
         setErrorMessage(
-          'Security error: Follower trader is a mock ID and does not exist in public.profiles. Please associate with an active trader profile.'
+          'Security error: Target trader_id must be a real active trader profile in public.profiles (role = "trader", status = "active"). Please associate this Child account with an active trader profile.'
         );
         return;
       }

@@ -82,10 +82,17 @@ CREATE TABLE IF NOT EXISTS public.mentor_assignments (
 -- Backward-compatibility column assertions
 ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE SET NULL;
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS child_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE SET NULL;
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS lot_mode TEXT DEFAULT 'parent_lot';
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS lot_multiplier NUMERIC(10, 2) DEFAULT 1.00;
+ALTER TABLE public.mentor_assignments ADD COLUMN IF NOT EXISTS fixed_lot NUMERIC(10, 2) DEFAULT 0.10;
 
 -- Indexes for mentor_assignments
 CREATE INDEX IF NOT EXISTS idx_mentor_assignments_mentor ON public.mentor_assignments(mentor_id);
 CREATE INDEX IF NOT EXISTS idx_mentor_assignments_trader ON public.mentor_assignments(trader_id);
+CREATE INDEX IF NOT EXISTS idx_mentor_assignments_parent_account ON public.mentor_assignments(parent_account_id);
+CREATE INDEX IF NOT EXISTS idx_mentor_assignments_child_account ON public.mentor_assignments(child_account_id);
 
 -- ------------------------------------------------------------------------------
 -- 3. MT5 Accounts Table
@@ -119,11 +126,13 @@ ALTER TABLE public.mt5_accounts ADD COLUMN IF NOT EXISTS is_investor_password BO
 ALTER TABLE public.mt5_accounts ADD COLUMN IF NOT EXISTS auto_trading_enabled BOOLEAN DEFAULT TRUE;
 ALTER TABLE public.mt5_accounts ADD COLUMN IF NOT EXISTS last_sync TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE public.mt5_accounts ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE public.mt5_accounts ADD COLUMN IF NOT EXISTS assigned_parent_id UUID REFERENCES public.mt5_accounts(id) ON DELETE SET NULL;
 
 -- Indexes for mt5_accounts
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_user ON public.mt5_accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_number ON public.mt5_accounts(account_number);
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_role ON public.mt5_accounts(account_role);
+CREATE INDEX IF NOT EXISTS idx_mt5_accounts_assigned_parent ON public.mt5_accounts(assigned_parent_id);
 
 -- ------------------------------------------------------------------------------
 -- 4. Trades Table

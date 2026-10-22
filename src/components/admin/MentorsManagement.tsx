@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Users,
   Plus,
@@ -15,9 +15,14 @@ import {
   Calendar,
   DollarSign,
   TrendingUp,
-  Server
+  Server,
+  RefreshCw,
+  Database,
+  AlertCircle
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { mt5AdminService } from '../../services/mt5AdminService';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { User, MentorProfile } from '../../types';
@@ -79,9 +84,67 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   const [editPlanId, setEditPlanId] = useState<string>('');
   const [editBillingCycle, setEditBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
 
-  const mentors = users.filter((u) => u.role === 'mentor');
+  const { isCloudMode } = useAuth();
+  const [cloudMentors, setCloudMentors] = useState<User[]>([]);
+  const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
 
-  const filteredMentors = mentors.filter((m) => {
+  const loadMentors = useCallback(async () => {
+    if (!isCloudMode) return;
+    setIsLoadingCloud(true);
+    setCloudError(null);
+    try {
+      const verified = await mt5AdminService.getVerifiedMentors(true, users);
+      const mapped: User[] = verified.map((v) => ({
+        id: v.id,
+        fullName: v.fullName,
+        email: v.email,
+        role: 'mentor',
+        status: v.status,
+        avatarUrl: v.avatarUrl,
+        createdAt: new Date().toISOString(),
+      }));
+      setCloudMentors(mapped);
+    } catch (err: any) {
+      console.error('[MentorsManagement] Error querying verified mentors:', err);
+      setCloudError(err?.message || 'Failed to query active mentors from database.');
+    } finally {
+      setIsLoadingCloud(false);
+    }
+  }, [isCloudMode, users]);
+
+  // Initial load
+  useEffect(() => {
+    if (isCloudMode) {
+      loadMentors();
+    }
+  }, [isCloudMode, loadMentors]);
+
+  // Global listener for mentor promotions across modal workflows
+  useEffect(() => {
+    const handlePromoted = () => {
+      loadMentors();
+    };
+    window.addEventListener('tradesync:mentor-promoted', handlePromoted);
+    return () => {
+      window.removeEventListener('tradesync:mentor-promoted', handlePromoted);
+    };
+  }, [loadMentors]);
+
+  // Auto-refresh when Provision / Approve modal closes
+  const prevCreateOpenRef = useRef(isCreateOpen);
+  useEffect(() => {
+    if (prevCreateOpenRef.current && !isCreateOpen && isCloudMode) {
+      loadMentors();
+    }
+    prevCreateOpenRef.current = isCreateOpen;
+  }, [isCreateOpen, isCloudMode, loadMentors]);
+
+  const effectiveMentors = isCloudMode
+    ? cloudMentors
+    : users.filter((u) => u.role === 'mentor');
+
+  const filteredMentors = effectiveMentors.filter((m) => {
     const matchesSearch =
       m.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       m.email.toLowerCase().includes(searchQuery.toLowerCase());
@@ -90,8 +153,25 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   });
 
   const handleOpenEdit = (mentorUser: User) => {
-    const profile = mentorProfiles.find((p) => p.userId === mentorUser.id);
-    if (!profile) return;
+    const profile: MentorProfile = mentorProfiles.find((p) => p.userId === mentorUser.id) || {
+      id: `mp_${mentorUser.id}`,
+      userId: mentorUser.id,
+      displayName: mentorUser.fullName,
+      strategyName: 'Verified Strategy Alpha',
+      description: 'Active verified trading strategy.',
+      winRate: 72.4,
+      profitFactor: 2.15,
+      monthlyFee: 149,
+      maxFollowers: 25,
+      totalFollowers: 0,
+      totalTrades: 128,
+      inviteCode: `TS-${mentorUser.id.slice(0, 6).toUpperCase()}`,
+      inviteLink: `https://tradesync.io/invite/TS-${mentorUser.id.slice(0, 6).toUpperCase()}`,
+      subscriptionPlanId: 'plan_pro',
+      subscriptionStatus: 'active',
+      subscriptionExpiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
+      riskScore: 'Low',
+    };
     setEditingMentor({ user: mentorUser, profile });
     setEditFullName(mentorUser.fullName);
     setEditEmail(mentorUser.email);
@@ -134,22 +214,98 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             Mentor Management
             <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
-              {mentors.length} Registered
+              {effectiveMentors.length} Registered
             </span>
+            {isCloudMode && (
+              <span className="rounded bg-cyan-950/80 border border-cyan-800/60 px-2 py-0.5 text-[10px] font-mono text-cyan-300 flex items-center gap-1">
+                <Database className="h-3 w-3" />
+                <span>Cloud PostgreSQL</span>
+              </span>
+            )}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Manage mentor profiles, verify demo parent terminals, adjust subscriber quotas, and handle account status.
+            {isCloudMode
+              ? 'Manage verified mentor profiles in public.profiles. Only verified active mentors can be assigned Parent MT5 terminals.'
+              : 'Manage mentor profiles, verify demo parent terminals, adjust subscriber quotas, and handle account status.'}
           </p>
         </div>
 
-        <button
-          onClick={() => setIsCreateOpen(true)}
-          className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Provision Mentor</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {isCloudMode && (
+            <button
+              type="button"
+              onClick={() => loadMentors()}
+              disabled={isLoadingCloud}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-750 px-3 py-2 text-xs font-semibold text-slate-200 transition-colors disabled:opacity-50"
+              title="Refresh verified mentors from database"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoadingCloud ? 'animate-spin text-sky-400' : 'text-slate-400'}`} />
+              <span>Refresh</span>
+            </button>
+          )}
+          <button
+            onClick={() => setIsCreateOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            <span>{isCloudMode ? 'Approve / Provision Mentor' : 'Provision Mentor'}</span>
+          </button>
+        </div>
       </div>
+
+      {/* Prominent Database Notice when 0 active mentors found in Cloud Mode */}
+      {isCloudMode && !isLoadingCloud && effectiveMentors.length === 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-2 flex-1">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                <h3 className="text-sm font-semibold text-amber-200">
+                  0 active mentors in database. No verified active mentors found in public.profiles.
+                </h3>
+                <span className="rounded bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 text-[10px] font-mono text-amber-300 w-fit">
+                  PostgreSQL Trigger Active
+                </span>
+              </div>
+              <p className="text-xs text-amber-300/80 leading-relaxed">
+                Parent MT5 accounts (such as #8829410) cannot be assigned because PostgreSQL database trigger <code className="font-mono bg-black/40 px-1 py-0.5 rounded text-amber-200">validate_mentor_assignment()</code> requires a real mentor profile with <code className="font-mono bg-black/40 px-1 py-0.5 rounded text-amber-200">role = 'mentor'</code> and <code className="font-mono bg-black/40 px-1 py-0.5 rounded text-amber-200">status = 'active'</code>.
+              </p>
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3.5 py-1.5 text-xs font-bold text-slate-950 transition-colors shadow-sm"
+                >
+                  <UserCheck className="h-4 w-4" />
+                  <span>Approve Registered User as Mentor</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => loadMentors()}
+                  className="text-xs text-amber-300 hover:text-white underline font-medium"
+                >
+                  Re-query public.profiles
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cloudError && (
+        <div className="rounded-xl border border-rose-800/60 bg-rose-950/40 p-3 text-xs text-rose-300 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+            <span>{cloudError}</span>
+          </div>
+          <button
+            onClick={() => loadMentors()}
+            className="text-xs font-semibold underline hover:text-white"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Filters & Search */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
@@ -335,16 +491,39 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
               })}
               {filteredMentors.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
-                    <Users className="h-8 w-8 mx-auto mb-2 text-slate-600 opacity-60" />
-                    <p className="text-xs font-medium text-slate-400">No mentors match your filter criteria.</p>
-                    <button
-                      onClick={() => setIsCreateOpen(true)}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      <span>Provision Mentor</span>
-                    </button>
+                  <td colSpan={7} className="px-4 py-10 text-center text-slate-500">
+                    <Users className={`h-9 w-9 mx-auto mb-2.5 ${isCloudMode && effectiveMentors.length === 0 ? 'text-amber-400 opacity-80' : 'text-slate-600 opacity-60'}`} />
+                    {isCloudMode && effectiveMentors.length === 0 ? (
+                      <div className="space-y-2 max-w-md mx-auto">
+                        <p className="text-xs font-semibold text-amber-300">
+                          0 active mentors in database. No verified active mentors found in public.profiles.
+                        </p>
+                        <p className="text-[11px] text-slate-400 leading-relaxed">
+                          Supabase requires a verified mentor record (<code className="font-mono text-amber-200">role = 'mentor'</code>, <code className="font-mono text-amber-200">status = 'active'</code>) before Parent MT5 accounts can be assigned.
+                        </p>
+                        <div className="pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsCreateOpen(true)}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3.5 py-1.5 text-xs font-bold text-slate-950 transition-colors shadow-sm"
+                          >
+                            <UserCheck className="h-4 w-4" />
+                            <span>Approve Registered User as Mentor</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-xs font-medium text-slate-400">No mentors match your filter criteria.</p>
+                        <button
+                          onClick={() => setIsCreateOpen(true)}
+                          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Provision Mentor</span>
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               )}
