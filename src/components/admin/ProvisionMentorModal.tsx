@@ -155,20 +155,23 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     }
   };
 
-  // Handler for Approving Registered User (Cloud Mode)
+  // Approval action mode: 'status_only' (updates ONLY status = 'active', preserving role per Requirement 8) or 'mentor'
+  const [approvalMode, setApprovalMode] = useState<'status_only' | 'mentor'>('status_only');
+
+  // Handler for Approving Registered User (Requirement 8)
   const handleApproveSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors({});
 
     if (!selectedCandidateId) {
-      setErrors({ candidate: 'Please select a registered user to approve as Mentor.' });
+      setErrors({ candidate: 'Please select a registered user to approve.' });
       return;
     }
 
     // Anti-self-promotion protection (Requirement 6)
     if (isSelfPromotion) {
       setErrors({
-        candidate: 'Security protection violation: Super Administrators cannot approve their own account as Mentor.',
+        candidate: 'Security protection violation: Administrators cannot approve or promote their own account.',
       });
       return;
     }
@@ -176,35 +179,68 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setIsSubmitting(true);
 
     try {
-      const res = await mt5AdminService.promoteUserToMentor({
-        targetUserId: selectedCandidateId,
-        isCloudMode,
-      });
+      if (approvalMode === 'status_only') {
+        // REQUIREMENT 8: Approval updates ONLY status to 'active' without altering role or granting admin
+        const res = await mt5AdminService.approveUserStatus({
+          targetUserId: selectedCandidateId,
+          isCloudMode,
+        });
 
-      if (res.success) {
-        const targetName = chosenCandidate?.fullName || 'User';
-        const targetEmail = chosenCandidate?.email || '';
-        const msg = `Successfully approved ${targetName} (${targetEmail}) as active Mentor in public.profiles!`;
-        setSuccessMessage(msg);
-        setShowSuccessToast(true);
+        if (res.success && res.profile) {
+          const targetName = res.profile.full_name || chosenCandidate?.fullName || 'User';
+          const targetEmail = res.profile.email || chosenCandidate?.email || '';
+          const currentRole = res.profile.role || chosenCandidate?.role || 'trader';
+          const msg = `Successfully approved ${targetName} (${targetEmail})! Account status is now ACTIVE with role "${currentRole}". Database confirmed update.`;
+          setSuccessMessage(msg);
+          setShowSuccessToast(true);
 
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile || chosenCandidate }));
-        }
-
-        setTimeout(() => {
-          setIsSubmitting(false);
-          if (onSuccess) {
-            onSuccess(res.profile || chosenCandidate);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('tradesync:user-approved', { detail: res.profile }));
           }
-          onClose();
-        }, 1200);
+
+          setTimeout(() => {
+            setIsSubmitting(false);
+            if (onSuccess) {
+              onSuccess(res.profile);
+            }
+            onClose();
+          }, 1200);
+        } else {
+          setErrors({ form: res.error || 'Failed to approve user status.' });
+          setIsSubmitting(false);
+        }
       } else {
-        setErrors({ form: res.error || 'Failed to approve user as mentor.' });
-        setIsSubmitting(false);
+        // Promote to mentor workflow
+        const res = await mt5AdminService.promoteUserToMentor({
+          targetUserId: selectedCandidateId,
+          isCloudMode,
+        });
+
+        if (res.success && res.profile) {
+          const targetName = res.profile.full_name || chosenCandidate?.fullName || 'User';
+          const targetEmail = res.profile.email || chosenCandidate?.email || '';
+          const msg = `Successfully approved ${targetName} (${targetEmail}) as active Mentor in public.profiles! Database confirmed update.`;
+          setSuccessMessage(msg);
+          setShowSuccessToast(true);
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile }));
+          }
+
+          setTimeout(() => {
+            setIsSubmitting(false);
+            if (onSuccess) {
+              onSuccess(res.profile);
+            }
+            onClose();
+          }, 1200);
+        } else {
+          setErrors({ form: res.error || 'Failed to promote user as mentor.' });
+          setIsSubmitting(false);
+        }
       }
     } catch (err: any) {
-      setErrors({ form: err.message || 'Error occurred during mentor approval.' });
+      setErrors({ form: err.message || 'Error occurred during user approval.' });
       setIsSubmitting(false);
     }
   };
@@ -513,36 +549,83 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                   )}
                 </div>
 
-                {/* Strategy Defaults */}
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+                {/* Approval Mode Selector (Requirement 8) */}
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
                   <span className="font-semibold text-slate-300 flex items-center gap-1.5 text-[11px]">
-                    <Activity className="h-3.5 w-3.5 text-sky-400" />
-                    Strategy Profile & Subscription Settings
+                    <Shield className="h-3.5 w-3.5 text-sky-400" />
+                    Approval Type & Permission Policy (Requirement 8)
                   </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setApprovalMode('status_only')}
+                      className={`text-left rounded-lg p-2.5 border transition-all text-xs ${
+                        approvalMode === 'status_only'
+                          ? 'border-sky-500 bg-sky-950/40 text-white shadow-sm'
+                          : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                        <CheckCircle2 className={`h-3.5 w-3.5 ${approvalMode === 'status_only' ? 'text-sky-400' : 'text-slate-500'}`} />
+                        Approve Status Only (Active)
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
+                        Sets status to <strong className="text-emerald-400">active</strong>. Preserves existing role ({chosenCandidate?.role || 'trader'}). Never grants admin.
+                      </p>
+                    </button>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-slate-400 text-[11px] mb-1">Strategy Name</label>
-                      <input
-                        type="text"
-                        placeholder={chosenCandidate ? `${chosenCandidate.fullName}'s Alpha Copy` : 'e.g. Institutional FX'}
-                        value={strategyName}
-                        onChange={(e) => setStrategyName(e.target.value)}
-                        className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:border-sky-500 focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-slate-400 text-[11px] mb-1">Monthly Fee ($)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={monthlyFee}
-                        onChange={(e) => setMonthlyFee(parseFloat(e.target.value) || 0)}
-                        className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
-                      />
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setApprovalMode('mentor')}
+                      className={`text-left rounded-lg p-2.5 border transition-all text-xs ${
+                        approvalMode === 'mentor'
+                          ? 'border-amber-500 bg-amber-950/40 text-white shadow-sm'
+                          : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                        <UserCheck className={`h-3.5 w-3.5 ${approvalMode === 'mentor' ? 'text-amber-400' : 'text-slate-500'}`} />
+                        Approve & Elevate to Mentor
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
+                        Sets status to <strong className="text-emerald-400">active</strong> and elevates role to <strong className="text-amber-400">mentor</strong>.
+                      </p>
+                    </button>
                   </div>
                 </div>
+
+                {/* Strategy Defaults (Shown when elevating to Mentor) */}
+                {approvalMode === 'mentor' && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+                    <span className="font-semibold text-slate-300 flex items-center gap-1.5 text-[11px]">
+                      <Activity className="h-3.5 w-3.5 text-sky-400" />
+                      Strategy Profile & Subscription Settings
+                    </span>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Strategy Name</label>
+                        <input
+                          type="text"
+                          placeholder={chosenCandidate ? `${chosenCandidate.fullName}'s Alpha Copy` : 'e.g. Institutional FX'}
+                          value={strategyName}
+                          onChange={(e) => setStrategyName(e.target.value)}
+                          className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:border-sky-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Monthly Fee ($)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={monthlyFee}
+                          onChange={(e) => setMonthlyFee(parseFloat(e.target.value) || 0)}
+                          className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Quick Register Switcher if users exist but admin wants to add a new one */}
                 {candidates.length > 0 && (
@@ -552,7 +635,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                       onClick={() => setShowQuickRegister(true)}
                       className="text-[11px] text-slate-400 hover:text-sky-400 transition-colors"
                     >
-                      Need to add an unlisted mentor? Register & Approve directly &rarr;
+                      Need to add an unlisted candidate? Register directly &rarr;
                     </button>
                   </div>
                 )}
@@ -570,10 +653,16 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                   <button
                     type="submit"
                     disabled={isSubmitting || isSelfPromotion || !selectedCandidateId}
-                    className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
+                    className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50 ${
+                      approvalMode === 'status_only' ? 'bg-sky-600 hover:bg-sky-500' : 'bg-amber-600 hover:bg-amber-500'
+                    }`}
                   >
                     <UserCheck className="h-4 w-4" />
-                    <span>{isSubmitting ? 'Approving Mentor...' : 'Approve User as Mentor'}</span>
+                    <span>
+                      {isSubmitting
+                        ? (approvalMode === 'status_only' ? 'Approving User...' : 'Elevating Mentor...')
+                        : (approvalMode === 'status_only' ? 'Approve Registered User (Activate)' : 'Approve User as Mentor')}
+                    </span>
                   </button>
                 </div>
               </form>

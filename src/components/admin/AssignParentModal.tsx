@@ -152,15 +152,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     }
   };
 
-  // Listen for mentor promotions across the platform to auto-refresh verified profiles
+  // Listen for mentor promotions and user approvals across the platform to auto-refresh verified profiles
   useEffect(() => {
     const handleMentorPromoted = () => {
       loadVerifiedProfiles();
       loadAccounts();
     };
     window.addEventListener('tradesync:mentor-promoted', handleMentorPromoted);
+    window.addEventListener('tradesync:user-approved', handleMentorPromoted);
     return () => {
       window.removeEventListener('tradesync:mentor-promoted', handleMentorPromoted);
+      window.removeEventListener('tradesync:user-approved', handleMentorPromoted);
     };
   }, [isCloudMode]);
 

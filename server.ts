@@ -262,18 +262,18 @@ async function startServer() {
     }
   });
 
-  // Protected Server-Side Admin Promotion Endpoint
-  // Public signup must never allow users to assign themselves the Admin or Mentor role.
-  // Mentor and Admin accounts must be approved ONLY through this secure, authorized process.
-  app.post('/api/admin/promote-user', async (req: Request, res: Response) => {
+  // Dedicated Approval Endpoint: Updates ONLY status = 'active' while preserving existing role (Requirement 8)
+  // Ensures only authenticated admins can approve registered users and prevents role modification or admin escalation.
+  app.post('/api/admin/approve-user', async (req: Request, res: Response) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Missing or malformed Authorization header' });
+        return res.status(401).json({ success: false, error: 'Missing or malformed Authorization header' });
       }
 
       if (!supabaseUrl) {
         return res.status(503).json({
+          success: false,
           error: 'Supabase URL is not configured.',
           configured: false,
         });
@@ -292,7 +292,129 @@ async function startServer() {
       } = await authClient.auth.getUser(token);
 
       if (authError || !callerUser) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid authentication token' });
+        return res.status(401).json({ success: false, error: 'Unauthorized: Invalid authentication token' });
+      }
+
+      const clientForQueries = serviceRoleKey
+        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        : authClient;
+
+      // 2. Verify caller has active 'admin' role in public.profiles or is authorized project owner
+      const { data: callerProfile, error: profileError } = await clientForQueries
+        .from('profiles')
+        .select('id, email, role, status')
+        .eq('id', callerUser.id)
+        .maybeSingle();
+
+      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
+      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+
+      if (!isVerifiedAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Only verified active administrators can approve registered users',
+        });
+      }
+
+      const { targetUserId } = req.body;
+      if (!targetUserId || !isValidUUID(targetUserId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122).',
+        });
+      }
+
+      // 3. Anti-self-approval protection (Requirement 6)
+      if (targetUserId === callerUser.id) {
+        return res.status(400).json({
+          success: false,
+          error: 'Security constraint violation: Administrators cannot approve their own account.',
+        });
+      }
+
+      // 4. Verify target user profile exists in public.profiles (Requirement 7)
+      const { data: targetProfile, error: targetError } = await clientForQueries
+        .from('profiles')
+        .select('id, email, full_name, role, status')
+        .eq('id', targetUserId)
+        .maybeSingle();
+
+      if (targetError) {
+        return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
+      }
+
+      if (!targetProfile) {
+        return res.status(404).json({
+          success: false,
+          error: 'Target user profile not found in public.profiles. Ensure the user has registered in Supabase first.',
+        });
+      }
+
+      // 5. REQUIREMENT 8: Approval MUST update ONLY the intended user's status to 'active'
+      // Preserves existing role and NEVER grants admin privileges.
+      const { data: updatedProfile, error: updateError } = await clientForQueries
+        .from('profiles')
+        .update({
+          status: 'active',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', targetUserId)
+        .select('id, email, full_name, role, status, updated_at')
+        .single();
+
+      if (updateError) {
+        return res.status(403).json({
+          success: false,
+          error: updateError.message.includes('Security error')
+            ? updateError.message
+            : `Database update denied by RLS policies: ${updateError.message}. Verify caller is active admin in public.profiles.`,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `User ${targetProfile.email || targetUserId} successfully approved with active status. Role (${updatedProfile.role}) preserved.`,
+        profile: updatedProfile,
+      });
+    } catch (err: any) {
+      console.error('Server approval error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal server error during user approval' });
+    }
+  });
+
+  // Protected Server-Side Admin Promotion Endpoint
+  // Public signup must never allow users to assign themselves the Admin or Mentor role.
+  // Mentor and Admin accounts must be approved ONLY through this secure, authorized process.
+  app.post('/api/admin/promote-user', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, error: 'Missing or malformed Authorization header' });
+      }
+
+      if (!supabaseUrl) {
+        return res.status(503).json({
+          success: false,
+          error: 'Supabase URL is not configured.',
+          configured: false,
+        });
+      }
+
+      const token = authHeader.replace('Bearer ', '').trim();
+      const authClient = createClient(supabaseUrl, publishableKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${token}` } },
+      });
+
+      // 1. Authenticate caller using Supabase Auth
+      const {
+        data: { user: callerUser },
+        error: authError,
+      } = await authClient.auth.getUser(token);
+
+      if (authError || !callerUser) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: Invalid authentication token' });
       }
 
       const clientForQueries = serviceRoleKey
@@ -312,6 +434,7 @@ async function startServer() {
 
       if (!isVerifiedAdmin) {
         return res.status(403).json({
+          success: false,
           error: 'Forbidden: Only verified active administrators can approve mentors or modify roles',
         });
       }
@@ -319,6 +442,7 @@ async function startServer() {
       const { targetUserId, newRole } = req.body;
       if (!targetUserId || !isValidUUID(targetUserId)) {
         return res.status(400).json({
+          success: false,
           error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122). Sandbox demo IDs are not allowed in Cloud Mode.',
         });
       }
@@ -326,13 +450,23 @@ async function startServer() {
       // 3. Anti-self-promotion protection (Requirement 6)
       if (targetUserId === callerUser.id) {
         return res.status(400).json({
+          success: false,
           error: 'Security constraint violation: Super Administrators cannot alter or promote their own role.',
         });
       }
 
-      if (!['admin', 'mentor', 'trader'].includes(newRole)) {
+      // Strictly disallow granting admin role via promotion endpoint (Requirement 8)
+      if (newRole === 'admin') {
         return res.status(400).json({
-          error: 'Invalid request: newRole must be admin, mentor, or trader',
+          success: false,
+          error: 'Security constraint violation: Admin privileges cannot be granted through the promotion API.',
+        });
+      }
+
+      if (!['mentor', 'trader'].includes(newRole)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid request: newRole must be mentor or trader',
         });
       }
 
@@ -344,11 +478,12 @@ async function startServer() {
         .maybeSingle();
 
       if (targetError) {
-        return res.status(500).json({ error: `Failed to query target profile: ${targetError.message}` });
+        return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
       }
 
       if (!targetProfile) {
         return res.status(404).json({
+          success: false,
           error: 'Target user profile not found in public.profiles. Ensure the user has registered in Supabase first.',
         });
       }
@@ -366,18 +501,31 @@ async function startServer() {
         .single();
 
       if (updateError) {
-        return res.status(500).json({ error: updateError.message });
+        return res.status(403).json({
+          success: false,
+          error: updateError.message.includes('Security error')
+            ? updateError.message
+            : `Database update denied by RLS policies: ${updateError.message}. Verify caller is active admin in public.profiles.`,
+        });
       }
 
-      return res.json({
+      return res.status(200).json({
         success: true,
-        message: `User ${targetProfile.email || targetUserId} successfully approved as ${newRole}`,
+        message: `User ${targetProfile.email || targetUserId} successfully updated to ${newRole} with active status`,
         profile: updatedProfile,
       });
     } catch (err: any) {
       console.error('Server promotion error:', err);
-      return res.status(500).json({ error: err.message || 'Internal server error during promotion' });
+      return res.status(500).json({ success: false, error: err.message || 'Internal server error during promotion' });
     }
+  });
+
+  // Catch-all 404 for /api routes to prevent falling through to Vite SPA index.html
+  app.all('/api/*', (req: Request, res: Response) => {
+    res.status(404).json({
+      success: false,
+      error: `API route not found: ${req.method} ${req.path}`,
+    });
   });
 
   // Vite Dev Server or Production Static Hosting

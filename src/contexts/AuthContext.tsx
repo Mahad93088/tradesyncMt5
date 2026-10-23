@@ -322,7 +322,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return null;
   };
 
-  // Promote user via server-side secure Express endpoint using service role
+  // Promote user via server-side secure Express endpoint
   const promoteUser = async (targetUserId: string, newRole: UserRole) => {
     // Ensure token is non-expired before making backend call
     const activeSession = await checkAndRefreshSession();
@@ -341,9 +341,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ targetUserId, newRole }),
       });
 
-      const result = await res.json();
-      if (!res.ok) {
-        return { success: false, error: result.error || 'Failed to promote user' };
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      let result: any = null;
+      if (contentType.includes('application/json')) {
+        result = await res.json();
+      } else {
+        const text = await res.text();
+        const titleMatch = text.match(/<title>(.*?)<\/title>/i);
+        const title = titleMatch ? titleMatch[1].trim() : `HTTP ${res.status}`;
+        return {
+          success: false,
+          error: `Server returned non-JSON response (${title}). Please verify administrator authorization.`,
+        };
+      }
+
+      if (!res.ok || !result?.success) {
+        return { success: false, error: result?.error || `HTTP ${res.status}: Failed to promote user` };
       }
 
       return { success: true };

@@ -120,14 +120,16 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     }
   }, [isCloudMode, loadMentors]);
 
-  // Global listener for mentor promotions across modal workflows
+  // Global listener for mentor promotions and user approvals across modal workflows
   useEffect(() => {
     const handlePromoted = () => {
       loadMentors();
     };
     window.addEventListener('tradesync:mentor-promoted', handlePromoted);
+    window.addEventListener('tradesync:user-approved', handlePromoted);
     return () => {
       window.removeEventListener('tradesync:mentor-promoted', handlePromoted);
+      window.removeEventListener('tradesync:user-approved', handlePromoted);
     };
   }, [loadMentors]);
 

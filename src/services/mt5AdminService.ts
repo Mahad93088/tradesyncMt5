@@ -1719,8 +1719,59 @@ export const mt5AdminService = {
   },
 
   /**
-   * Retrieves registered candidate profiles eligible for mentor promotion.
-   * Super Admins select from this list in Mentors Management to approve active mentors.
+   * Helper to safely extract JSON or human-readable error from fetch response.
+   * Defensively handles HTML/plain-text responses (e.g. 403, 502 warmup, or SPA fallback)
+   * preventing "Unexpected token '<', '<!DOCTYPE ...' is not valid JSON" errors.
+   */
+  async safeParseApiResponse(res: Response): Promise<{ ok: boolean; status: number; data?: any; error?: string }> {
+    const status = res.status;
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+
+    if (contentType.includes('application/json')) {
+      try {
+        const json = await res.json();
+        return {
+          ok: res.ok,
+          status,
+          data: json,
+          error: json?.error || (res.ok ? undefined : `HTTP ${status}: Request failed`),
+        };
+      } catch (e: any) {
+        return { ok: false, status, error: `Invalid JSON returned by server (${e.message})` };
+      }
+    }
+
+    // Response is HTML or plain text (e.g., from Nginx proxy, error page, or gateway)
+    try {
+      const text = await res.text();
+      const titleMatch = text.match(/<title>(.*?)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : '';
+      const baseMessage = title
+        ? `Server returned HTTP ${status}: "${title}"`
+        : `Server returned non-JSON HTTP ${status} (${res.statusText || 'Error'})`;
+
+      let actionHint = 'Please check administrator authorization.';
+      if (status === 401) {
+        actionHint = 'Session expired or unauthorized. Please re-authenticate as an administrator.';
+      } else if (status === 403) {
+        actionHint = 'Access forbidden. Administrator privileges are required to approve users.';
+      } else if (status === 502 || status === 503 || status === 504) {
+        actionHint = 'Server is currently initializing. Please retry in a few moments.';
+      }
+
+      return {
+        ok: false,
+        status,
+        error: `${baseMessage}. ${actionHint}`,
+      };
+    } catch {
+      return { ok: false, status, error: `Server returned non-JSON HTTP ${status} (${res.statusText || 'Error'})` };
+    }
+  },
+
+  /**
+   * Retrieves registered candidate profiles eligible for mentor promotion or approval.
+   * Includes registered profiles (status = 'active' or 'pending', role != 'admin').
    */
   async getCandidateUsersForMentor(
     isCloudMode?: boolean,
@@ -1737,28 +1788,26 @@ export const mt5AdminService = {
 
         // Try backend endpoint first
         const apiRes = await fetch('/api/admin/users', { headers });
-        if (apiRes.ok) {
-          const apiData = await apiRes.json();
-          if (Array.isArray(apiData.users) && apiData.users.length > 0) {
-            return apiData.users
-              .filter((u: any) => u.role !== 'mentor' && u.status === 'active')
-              .map((u: any) => ({
-                id: u.id,
-                fullName: u.full_name || u.email.split('@')[0],
-                email: u.email,
-                avatarUrl: u.avatar_url,
-                role: u.role,
-                status: u.status,
-              }));
-          }
+        const parsed = await this.safeParseApiResponse(apiRes);
+
+        if (parsed.ok && parsed.data && Array.isArray(parsed.data.users) && parsed.data.users.length > 0) {
+          return parsed.data.users
+            .filter((u: any) => u.role !== 'admin')
+            .map((u: any) => ({
+              id: u.id,
+              fullName: u.full_name || u.email.split('@')[0],
+              email: u.email,
+              avatarUrl: u.avatar_url,
+              role: u.role || 'trader',
+              status: u.status || 'pending',
+            }));
         }
 
         // Direct Supabase SDK query fallback
         const { data: profs, error: profErr } = await supabase
           .from('profiles')
           .select('id, full_name, email, avatar_url, role, status')
-          .neq('role', 'mentor')
-          .eq('status', 'active');
+          .neq('role', 'admin');
 
         if (!profErr && profs && profs.length > 0) {
           return profs.map((p) => ({
@@ -1779,7 +1828,7 @@ export const mt5AdminService = {
       ? localUsers
       : (typeof localStorage !== 'undefined' ? JSON.parse(localStorage.getItem('tradesync_users') || '[]') : []);
     return sourceUsers
-      .filter((u: User) => u.role !== 'mentor' && u.status === 'active')
+      .filter((u: User) => u.role !== 'admin')
       .map((u: User) => ({
         id: u.id,
         fullName: u.fullName,
@@ -1791,13 +1840,86 @@ export const mt5AdminService = {
   },
 
   /**
+   * Dedicated User Status Approval (Requirement 8):
+   * Approves a registered user by updating ONLY status = 'active'.
+   * Strictly preserves existing role and NEVER grants admin privileges.
+   */
+  async approveUserStatus(params: {
+    targetUserId: string;
+    isCloudMode?: boolean;
+  }): Promise<{ success: boolean; error?: string; profile?: any; message?: string }> {
+    const safeTargetId = toValidUUID(params.targetUserId);
+
+    if (params.isCloudMode && isSupabaseConfigured()) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            success: false,
+            error: sessionCheck.error || 'Authentication required. Please sign in as Super Admin.',
+          };
+        }
+
+        const res = await fetch('/api/admin/approve-user', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({
+            targetUserId: safeTargetId,
+          }),
+        });
+
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to approve user`,
+          };
+        }
+
+        return {
+          success: true,
+          profile: parsed.data.profile,
+          message: parsed.data.message || `User successfully approved with active status`,
+        };
+      } catch (err: any) {
+        return { success: false, error: err.message || 'Network error during user approval' };
+      }
+    }
+
+    // Local / Demo Mode approval
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('tradesync_users');
+        if (stored) {
+          const list: User[] = JSON.parse(stored);
+          const updated = list.map((u) => {
+            if (u.id === params.targetUserId) {
+              return { ...u, status: 'active' as const };
+            }
+            return u;
+          });
+          localStorage.setItem('tradesync_users', JSON.stringify(updated));
+        }
+        return { success: true, message: 'User approved with active status (Demo Mode)' };
+      } catch (e: any) {
+        return { success: false, error: e.message };
+      }
+    }
+
+    return { success: true };
+  },
+
+  /**
    * Promotes an authenticated registered user to active Mentor role via POST /api/admin/promote-user.
    * Enforces Super Admin authorization, anti-self-promotion, and real profile UUID validation.
    */
   async promoteUserToMentor(params: {
     targetUserId: string;
     isCloudMode?: boolean;
-  }): Promise<{ success: boolean; error?: string; profile?: any }> {
+  }): Promise<{ success: boolean; error?: string; profile?: any; message?: string }> {
     const safeTargetId = toValidUUID(params.targetUserId);
 
     if (params.isCloudMode && isSupabaseConfigured()) {
@@ -1822,17 +1944,18 @@ export const mt5AdminService = {
           }),
         });
 
-        const data = await res.json();
-        if (!res.ok || !data.success) {
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
           return {
             success: false,
-            error: data.error || `HTTP ${res.status}: Failed to approve mentor`,
+            error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to promote user to mentor`,
           };
         }
 
         return {
           success: true,
-          profile: data.profile,
+          profile: parsed.data.profile,
+          message: parsed.data.message || `User successfully approved as active mentor`,
         };
       } catch (err: any) {
         return { success: false, error: err.message || 'Network error during mentor promotion' };
