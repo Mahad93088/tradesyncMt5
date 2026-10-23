@@ -92,7 +92,10 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
         setSelectedCandidateId('');
       }
     } catch (err: any) {
-      console.warn('Failed to load candidate users:', err);
+      console.error('[ProvisionMentorModal] Failed to load candidate users:', err);
+      setErrors({ form: err.message || 'Failed to load candidate registered users from database.' });
+      setCandidates([]);
+      setSelectedCandidateId('');
     } finally {
       setIsLoadingCandidates(false);
     }
@@ -495,7 +498,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                       >
                         {candidates.map((cand) => (
                           <option key={cand.id} value={cand.id}>
-                            {cand.fullName} — {cand.email} (Role: {cand.role})
+                            {cand.fullName} — {cand.email} (Role: {cand.role}, Status: {cand.status})
                           </option>
                         ))}
                       </select>
@@ -505,9 +508,18 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                         <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="font-semibold text-white">{chosenCandidate.fullName}</span>
-                            <span className="rounded bg-sky-950 border border-sky-800 px-2 py-0.5 text-[10px] text-sky-300 font-mono">
-                              Current: {chosenCandidate.role}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="rounded bg-sky-950 border border-sky-800 px-2 py-0.5 text-[10px] text-sky-300 font-mono">
+                                Role: {chosenCandidate.role}
+                              </span>
+                              <span className={`rounded border px-2 py-0.5 text-[10px] font-mono ${
+                                chosenCandidate.status === 'active'
+                                  ? 'bg-emerald-950 border-emerald-800 text-emerald-300'
+                                  : 'bg-amber-950 border-amber-800 text-amber-300'
+                              }`}>
+                                Status: {chosenCandidate.status}
+                              </span>
+                            </div>
                           </div>
                           <div className="font-mono text-[11px] text-slate-400 space-y-0.5">
                             <div>Email: <span className="text-slate-200">{chosenCandidate.email}</span></div>
@@ -571,6 +583,9 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                       </div>
                       <p className="text-[10px] text-slate-400 mt-1 leading-normal">
                         Sets status to <strong className="text-emerald-400">active</strong>. Preserves existing role ({chosenCandidate?.role || 'trader'}). Never grants admin.
+                        {chosenCandidate?.status === 'active' && (
+                          <span className="block mt-0.5 text-emerald-400 font-medium">User is already active. To grant Mentor privileges, select "Approve & Elevate to Mentor".</span>
+                        )}
                       </p>
                     </button>
 

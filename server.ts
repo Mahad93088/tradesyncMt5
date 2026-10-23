@@ -234,7 +234,8 @@ async function startServer() {
 
       const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
       const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
 
       if (!isVerifiedAdmin) {
         return res.status(403).json({
@@ -308,7 +309,8 @@ async function startServer() {
 
       const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
       const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
 
       if (!isVerifiedAdmin) {
         return res.status(403).json({
@@ -430,7 +432,8 @@ async function startServer() {
 
       const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
       const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner;
+      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
+      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
 
       if (!isVerifiedAdmin) {
         return res.status(403).json({

@@ -1583,27 +1583,29 @@ export const mt5AdminService = {
 
         // 3. Fallback to authenticated admin endpoint /api/admin/users
         const sessionCheck = await ensureValidSession();
-        const token = sessionCheck.session?.access_token;
+        let token = sessionCheck.session?.access_token;
+        if (!token) {
+          const { data: directSession } = await supabase.auth.getSession();
+          token = directSession?.session?.access_token;
+        }
         if (token) {
           const apiRes = await fetch('/api/admin/users', {
             headers: { Authorization: `Bearer ${token}` },
           });
-          if (apiRes.ok) {
-            const apiData = await apiRes.json();
-            if (Array.isArray(apiData.users)) {
-              const activeMentors = apiData.users
-                .filter((u: any) => u.role === 'mentor' && u.status === 'active')
-                .map((u: any) => ({
-                  id: u.id,
-                  fullName: u.full_name || u.email.split('@')[0],
-                  email: u.email,
-                  avatarUrl: u.avatar_url,
-                  role: 'mentor' as const,
-                  status: 'active' as const,
-                }));
-              if (activeMentors.length > 0) {
-                return activeMentors;
-              }
+          const parsed = await this.safeParseApiResponse(apiRes);
+          if (parsed.ok && Array.isArray(parsed.data?.users)) {
+            const activeMentors = parsed.data.users
+              .filter((u: any) => u.role === 'mentor' && u.status === 'active')
+              .map((u: any) => ({
+                id: u.id,
+                fullName: u.full_name || u.email.split('@')[0],
+                email: u.email,
+                avatarUrl: u.avatar_url,
+                role: 'mentor' as const,
+                status: 'active' as const,
+              }));
+            if (activeMentors.length > 0) {
+              return activeMentors;
             }
           }
         }
@@ -1673,27 +1675,29 @@ export const mt5AdminService = {
 
         // 2. Fallback to authenticated admin endpoint /api/admin/users
         const sessionCheck = await ensureValidSession();
-        const token = sessionCheck.session?.access_token;
+        let token = sessionCheck.session?.access_token;
+        if (!token) {
+          const { data: directSession } = await supabase.auth.getSession();
+          token = directSession?.session?.access_token;
+        }
         if (token) {
           const apiRes = await fetch('/api/admin/users', {
             headers: { Authorization: `Bearer ${token}` },
           });
-          if (apiRes.ok) {
-            const apiData = await apiRes.json();
-            if (Array.isArray(apiData.users)) {
-              const activeTraders = apiData.users
-                .filter((u: any) => (u.role === 'trader' || !u.role) && u.status === 'active')
-                .map((u: any) => ({
-                  id: u.id,
-                  fullName: u.full_name || u.email.split('@')[0],
-                  email: u.email,
-                  avatarUrl: u.avatar_url,
-                  role: 'trader' as const,
-                  status: 'active' as const,
-                }));
-              if (activeTraders.length > 0) {
-                return activeTraders;
-              }
+          const parsed = await this.safeParseApiResponse(apiRes);
+          if (parsed.ok && Array.isArray(parsed.data?.users)) {
+            const activeTraders = parsed.data.users
+              .filter((u: any) => (u.role === 'trader' || !u.role) && u.status === 'active')
+              .map((u: any) => ({
+                id: u.id,
+                fullName: u.full_name || u.email.split('@')[0],
+                email: u.email,
+                avatarUrl: u.avatar_url,
+                role: 'trader' as const,
+                status: 'active' as const,
+              }));
+            if (activeTraders.length > 0) {
+              return activeTraders;
             }
           }
         }
@@ -1771,64 +1775,66 @@ export const mt5AdminService = {
 
   /**
    * Retrieves registered candidate profiles eligible for mentor promotion or approval.
-   * Includes registered profiles (status = 'active' or 'pending', role != 'admin').
+   * Includes registered profiles (status = 'active', 'pending', or 'suspended', role != 'admin').
+   * If a user is already an active mentor (role = 'mentor', status = 'active'), they are
+   * excluded from the candidate approval list because they belong in the MentorsManagement catalog.
    */
   async getCandidateUsersForMentor(
     isCloudMode?: boolean,
     localUsers?: User[]
   ): Promise<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: string; status: string }>> {
     if (isCloudMode && isSupabaseConfigured()) {
-      try {
-        const sessionCheck = await ensureValidSession();
-        const token = sessionCheck.session?.access_token;
-        const headers: Record<string, string> = {};
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-
-        // Try backend endpoint first
-        const apiRes = await fetch('/api/admin/users', { headers });
-        const parsed = await this.safeParseApiResponse(apiRes);
-
-        if (parsed.ok && parsed.data && Array.isArray(parsed.data.users) && parsed.data.users.length > 0) {
-          return parsed.data.users
-            .filter((u: any) => u.role !== 'admin')
-            .map((u: any) => ({
-              id: u.id,
-              fullName: u.full_name || u.email.split('@')[0],
-              email: u.email,
-              avatarUrl: u.avatar_url,
-              role: u.role || 'trader',
-              status: u.status || 'pending',
-            }));
-        }
-
-        // Direct Supabase SDK query fallback
-        const { data: profs, error: profErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, email, avatar_url, role, status')
-          .neq('role', 'admin');
-
-        if (!profErr && profs && profs.length > 0) {
-          return profs.map((p) => ({
-            id: p.id,
-            fullName: p.full_name || p.email.split('@')[0],
-            email: p.email,
-            avatarUrl: p.avatar_url,
-            role: p.role,
-            status: p.status,
-          }));
-        }
-      } catch (err) {
-        console.warn('[mt5AdminService] Could not fetch candidate users from Supabase:', err);
+      // 1. Verify and obtain authenticated administrator session
+      const sessionCheck = await ensureValidSession();
+      let token = sessionCheck.session?.access_token;
+      if (!token) {
+        const { data: directSession } = await supabase.auth.getSession();
+        token = directSession?.session?.access_token;
       }
+
+      if (!token) {
+        throw new Error('Active administrator session required. Please sign in to Supabase Cloud.');
+      }
+
+      const headers: Record<string, string> = {
+        'Authorization': `Bearer ${token}`,
+      };
+
+      // 2. Fetch registered profiles from secure admin directory endpoint
+      const apiRes = await fetch('/api/admin/users', { headers });
+      const parsed = await this.safeParseApiResponse(apiRes);
+
+      if (!parsed.ok) {
+        const errMsg = parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to fetch registered candidate users`;
+        console.error('[mt5AdminService] getCandidateUsersForMentor error:', errMsg);
+        throw new Error(errMsg);
+      }
+
+      if (parsed.data && Array.isArray(parsed.data.users)) {
+        return parsed.data.users
+          // Exclude administrators (cannot be elevated or approved as mentors)
+          // Exclude active mentors (they already appear in the Mentors Management table)
+          .filter((u: any) => u.role !== 'admin' && !(u.role === 'mentor' && u.status === 'active'))
+          .map((u: any) => ({
+            id: u.id,
+            fullName: u.full_name || (u.email ? u.email.split('@')[0] : 'Trader'),
+            email: u.email || '',
+            avatarUrl: u.avatar_url,
+            role: u.role || 'trader',
+            status: u.status || 'active',
+          }));
+      }
+
+      // In Cloud Mode, if no candidates exist, return empty array (never mock demo data)
+      return [];
     }
 
+    // Local / Demo Mode fallback ONLY when explicitly not in Cloud Mode
     const sourceUsers = localUsers && localUsers.length > 0
       ? localUsers
       : (typeof localStorage !== 'undefined' ? JSON.parse(localStorage.getItem('tradesync_users') || '[]') : []);
     return sourceUsers
-      .filter((u: User) => u.role !== 'admin')
+      .filter((u: User) => u.role !== 'admin' && !(u.role === 'mentor' && u.status === 'active'))
       .map((u: User) => ({
         id: u.id,
         fullName: u.fullName,
