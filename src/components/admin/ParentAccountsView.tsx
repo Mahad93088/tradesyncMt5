@@ -16,7 +16,8 @@ import {
   ShieldCheck,
   UserCheck,
   Sparkles,
-  AlertCircle
+  AlertCircle,
+  X
 } from 'lucide-react';
 import { StatusBadge } from '../common/StatusBadge';
 import { ParentAccountItem, ChildAccountItem, mt5AdminService } from '../../services/mt5AdminService';
@@ -43,6 +44,10 @@ export const ParentAccountsView: React.FC = () => {
   const [selectedParentForAssign, setSelectedParentForAssign] = useState<ParentAccountItem | null>(null);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState(false);
+
+  // Toast & notification state
+  const [successToast, setSuccessToast] = useState<string | null>(null);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
 
   // Seeding state
   const [isSeeding, setIsSeeding] = useState(false);
@@ -129,6 +134,10 @@ export const ParentAccountsView: React.FC = () => {
       // Refresh list
       await fetchAccounts();
 
+      setSuccessToast(`Successfully unlinked child account #${childAccountId} from parent stream.`);
+      setErrorToast(null);
+      setTimeout(() => setSuccessToast(null), 5000);
+
       // If details modal was open, refresh its data
       if (selectedAccountForDetails) {
         const updated = parents.find((p) => p.id === selectedAccountForDetails.id);
@@ -136,6 +145,8 @@ export const ParentAccountsView: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Failed to unlink child:', err);
+      setErrorToast(err.message || 'Failed to unlink child account.');
+      setTimeout(() => setErrorToast(null), 5000);
     }
   };
 
@@ -213,6 +224,37 @@ export const ParentAccountsView: React.FC = () => {
         <div className="rounded-lg border border-emerald-800 bg-emerald-950/60 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
           <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
           <span>{seedNotice}</span>
+        </div>
+      )}
+
+      {/* Persistent Action Toasts */}
+      {successToast && (
+        <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/80 p-3.5 text-xs text-emerald-300 flex items-center justify-between gap-3 shadow-lg animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+            <span className="font-medium">{successToast}</span>
+          </div>
+          <button
+            onClick={() => setSuccessToast(null)}
+            className="text-slate-400 hover:text-slate-200 p-1 rounded-lg transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {errorToast && (
+        <div className="rounded-xl border border-rose-500/40 bg-rose-950/80 p-3.5 text-xs text-rose-300 flex items-center justify-between gap-3 shadow-lg animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+            <span className="font-medium">{errorToast}</span>
+          </div>
+          <button
+            onClick={() => setErrorToast(null)}
+            className="text-slate-400 hover:text-slate-200 p-1 rounded-lg transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
       )}
 
@@ -482,7 +524,12 @@ export const ParentAccountsView: React.FC = () => {
         type="parent"
         allParents={parents}
         allChildren={children}
-        onAssignmentSuccess={async () => {
+        onAssignmentSuccess={async (msg?: string) => {
+          if (msg) {
+            setSuccessToast(msg);
+            setErrorToast(null);
+            setTimeout(() => setSuccessToast(null), 6000);
+          }
           await fetchAccounts();
         }}
       />

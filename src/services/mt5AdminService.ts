@@ -1119,8 +1119,9 @@ export const mt5AdminService = {
             .eq('id', safeMentorId)
             .maybeSingle();
 
-          if (mentorCheckErr && isJwtExpiredError(mentorCheckErr)) {
-            throw mentorCheckErr;
+          if (mentorCheckErr) {
+            if (isJwtExpiredError(mentorCheckErr)) throw mentorCheckErr;
+            throw new Error(`Database error verifying mentor profile: ${mentorCheckErr.message}`);
           }
 
           if (!mentorProfile) {
@@ -1151,8 +1152,9 @@ export const mt5AdminService = {
             .eq('id', safeTraderId)
             .maybeSingle();
 
-          if (traderCheckErr && isJwtExpiredError(traderCheckErr)) {
-            throw traderCheckErr;
+          if (traderCheckErr) {
+            if (isJwtExpiredError(traderCheckErr)) throw traderCheckErr;
+            throw new Error(`Database error verifying trader profile: ${traderCheckErr.message}`);
           }
 
           if (!traderProfile) {
@@ -1171,18 +1173,26 @@ export const mt5AdminService = {
 
           // 3. Ensure Parent MT5 Account exists and is assigned to the verified mentor in public.mt5_accounts
           if (safeParentAccId && isValidUUID(safeParentAccId)) {
-            const { data: pAcc } = await supabase
+            const { data: pAcc, error: pAccErr } = await supabase
               .from('mt5_accounts')
               .select('id')
               .eq('id', safeParentAccId)
               .maybeSingle();
+
+            if (pAccErr) {
+              if (isJwtExpiredError(pAccErr)) throw pAccErr;
+              throw new Error(`Database error querying parent MT5 account: ${pAccErr.message}`);
+            }
 
             if (pAcc) {
               const { error: pErr } = await supabase
                 .from('mt5_accounts')
                 .update({ account_role: 'parent', user_id: safeMentorId })
                 .eq('id', safeParentAccId);
-              if (pErr && isJwtExpiredError(pErr)) throw pErr;
+              if (pErr) {
+                if (isJwtExpiredError(pErr)) throw pErr;
+                throw new Error(`Database error updating parent MT5 account: ${pErr.message}`);
+              }
             } else {
               // Account record does not exist in Supabase yet (e.g. demo parent); insert it
               const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
@@ -1190,7 +1200,7 @@ export const mt5AdminService = {
               const localAcc = list.find((a) => a.id === params.parentAccountId || toValidUUID(a.id) === safeParentAccId) ||
                 STANDARD_DEMO_ACCOUNTS.find((i) => i.account.id === params.parentAccountId || toValidUUID(i.account.id) === safeParentAccId)?.account;
 
-              await supabase.from('mt5_accounts').upsert([{
+              const { error: pUpsertErr } = await supabase.from('mt5_accounts').upsert([{
                 id: safeParentAccId,
                 user_id: safeMentorId,
                 account_number: localAcc?.accountNumber || '8829410',
@@ -1209,30 +1219,39 @@ export const mt5AdminService = {
                 is_investor_password: true,
                 auto_trading_enabled: true,
               }], { onConflict: 'id' });
+
+              if (pUpsertErr) {
+                if (isJwtExpiredError(pUpsertErr)) throw pUpsertErr;
+                throw new Error(`Database error saving parent MT5 account: ${pUpsertErr.message}`);
+              }
             }
           }
 
           // 4. Ensure Child MT5 Account exists and is assigned to the active trader in public.mt5_accounts
           if (safeChildAccId && isValidUUID(safeChildAccId)) {
-            const { data: cAcc } = await supabase
+            const { data: cAcc, error: cAccErr } = await supabase
               .from('mt5_accounts')
               .select('id')
               .eq('id', safeChildAccId)
               .maybeSingle();
 
+            if (cAccErr) {
+              if (isJwtExpiredError(cAccErr)) throw cAccErr;
+              throw new Error(`Database error querying child MT5 account: ${cAccErr.message}`);
+            }
+
             if (cAcc) {
-              const updateData: Record<string, any> = {
-                account_role: 'child',
-                user_id: safeTraderId,
-              };
-              if (safeParentAccId && isValidUUID(safeParentAccId)) {
-                updateData.assigned_parent_id = safeParentAccId;
-              }
               const { error: cErr } = await supabase
                 .from('mt5_accounts')
-                .update(updateData)
+                .update({
+                  account_role: 'child',
+                  user_id: safeTraderId,
+                })
                 .eq('id', safeChildAccId);
-              if (cErr && isJwtExpiredError(cErr)) throw cErr;
+              if (cErr) {
+                if (isJwtExpiredError(cErr)) throw cErr;
+                throw new Error(`Database error updating child MT5 account: ${cErr.message}`);
+              }
             } else {
               // Account record does not exist in Supabase yet; insert it
               const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
@@ -1240,7 +1259,7 @@ export const mt5AdminService = {
               const localAcc = list.find((a) => a.id === params.childAccountId || toValidUUID(a.id) === safeChildAccId) ||
                 STANDARD_DEMO_ACCOUNTS.find((i) => i.account.id === params.childAccountId || toValidUUID(i.account.id) === safeChildAccId)?.account;
 
-              await supabase.from('mt5_accounts').upsert([{
+              const { error: cUpsertErr } = await supabase.from('mt5_accounts').upsert([{
                 id: safeChildAccId,
                 user_id: safeTraderId,
                 account_number: localAcc?.accountNumber || '7729103',
@@ -1259,6 +1278,11 @@ export const mt5AdminService = {
                 is_investor_password: true,
                 auto_trading_enabled: true,
               }], { onConflict: 'id' });
+
+              if (cUpsertErr) {
+                if (isJwtExpiredError(cUpsertErr)) throw cUpsertErr;
+                throw new Error(`Database error saving child MT5 account: ${cUpsertErr.message}`);
+              }
             }
           }
 
@@ -1269,8 +1293,9 @@ export const mt5AdminService = {
             .eq('trader_id', safeTraderId)
             .maybeSingle();
 
-          if (existingErr && isJwtExpiredError(existingErr)) {
-            throw existingErr;
+          if (existingErr) {
+            if (isJwtExpiredError(existingErr)) throw existingErr;
+            throw new Error(`Database error checking existing assignment: ${existingErr.message}`);
           }
 
           // Prepare detailed assignment data recording parent and child account linkages
@@ -1292,6 +1317,8 @@ export const mt5AdminService = {
             assignmentPayload.lot_multiplier = params.lotSettings.multiplier || 1.0;
             assignmentPayload.fixed_lot = params.lotSettings.fixedLot || 0.1;
           }
+
+          let finalAssignmentId = '';
 
           if (existing) {
             // Update existing assignment with parent and child account linkages
@@ -1318,9 +1345,12 @@ export const mt5AdminService = {
 
             if (updateRes.error) {
               if (isJwtExpiredError(updateRes.error)) throw updateRes.error;
-              throw updateRes.error;
+              throw new Error(`Database error updating mentor assignment: ${updateRes.error.message}`);
             }
-            return { success: true, assignmentId: updateRes.data.id };
+            if (!updateRes.data?.id) {
+              throw new Error('Database update did not return an assignment ID.');
+            }
+            finalAssignmentId = updateRes.data.id;
           } else {
             // Create fresh assignment in public.mentor_assignments with account linkages
             let insertRes = await supabase
@@ -1345,10 +1375,29 @@ export const mt5AdminService = {
 
             if (insertRes.error) {
               if (isJwtExpiredError(insertRes.error)) throw insertRes.error;
-              throw insertRes.error;
+              throw new Error(`Database error creating mentor assignment: ${insertRes.error.message}`);
             }
-            return { success: true, assignmentId: insertRes.data.id };
+            if (!insertRes.data?.id) {
+              throw new Error('Database insert did not return an assignment ID.');
+            }
+            finalAssignmentId = insertRes.data.id;
           }
+
+          // 6. Direct confirmation of persisted assignment record in Supabase
+          const { data: verifiedRecord, error: verifyErr } = await supabase
+            .from('mentor_assignments')
+            .select('id, mentor_id, trader_id, status')
+            .eq('id', finalAssignmentId)
+            .maybeSingle();
+
+          if (verifyErr) {
+            console.warn('[mt5AdminService] Notice during assignment verification read:', verifyErr.message);
+          }
+          if (!verifiedRecord || verifiedRecord.status !== 'active') {
+            throw new Error(`Assignment record verification failed in Supabase for ID "${finalAssignmentId}".`);
+          }
+
+          return { success: true, assignmentId: finalAssignmentId };
         });
       } catch (err: any) {
         console.error('[mt5AdminService] Assignment failed in Supabase:', err);
@@ -1392,7 +1441,7 @@ export const mt5AdminService = {
 
             if (error) {
               if (isJwtExpiredError(error)) throw error;
-              throw error;
+              throw new Error(`Database error unlinking assignment: ${error.message}`);
             }
           } else if (isValidUUID(params.traderId)) {
             const { error } = await supabase
@@ -1402,16 +1451,30 @@ export const mt5AdminService = {
 
             if (error) {
               if (isJwtExpiredError(error)) throw error;
-              throw error;
+              throw new Error(`Database error unlinking trader: ${error.message}`);
             }
           }
+
+          // Also clear assigned_parent_id on child MT5 account if column exists
+          if (params.traderId && isValidUUID(params.traderId)) {
+            try {
+              await supabase
+                .from('mt5_accounts')
+                .update({ assigned_parent_id: null } as any)
+                .eq('user_id', params.traderId)
+                .eq('account_role', 'child');
+            } catch (ignore) {
+              // Ignore if column assigned_parent_id is not in mt5_accounts schema
+            }
+          }
+
           return { success: true };
         });
       } catch (err: any) {
         const isExpired = isJwtExpiredError(err) || err.needsReauth || err instanceof SessionExpiredError;
         return {
           success: false,
-          error: isExpired ? 'Your session has expired. Please sign in again.' : err.message,
+          error: isExpired ? 'Your session has expired. Please sign in again.' : (err.message || 'Error unlinking account.'),
           needsReauth: isExpired,
         };
       }

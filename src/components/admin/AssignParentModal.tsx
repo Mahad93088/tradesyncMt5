@@ -42,7 +42,7 @@ interface AssignParentModalProps {
   type: 'parent' | 'child'; // Whether the target is a parent (assigning a child to it) or a child (assigning to a parent)
   allParents: ParentAccountItem[];
   allChildren: ChildAccountItem[];
-  onAssignmentSuccess: () => void;
+  onAssignmentSuccess: (successMessage?: string) => void;
 }
 
 export const AssignParentModal: React.FC<AssignParentModalProps> = ({
@@ -68,6 +68,8 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [copyMode, setCopyMode] = useState<'multiplier' | 'fixed'>('multiplier');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showSuccessToast, setShowSuccessToast] = useState<boolean>(false);
+  const [successToastMessage, setSuccessToastMessage] = useState<string>('');
 
   // Authentication & Session recovery states
   const [isSessionExpired, setIsSessionExpired] = useState<boolean>(false);
@@ -173,6 +175,8 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     setErrorMessage(null);
+    setShowSuccessToast(false);
+    setSuccessToastMessage('');
     setIsSessionExpired(false);
     setShowInlineSignIn(false);
     setSessionRefreshedSuccess(false);
@@ -638,23 +642,31 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
     }
 
     setIsSubmitting(true);
+    setErrorMessage(null);
+    setShowSuccessToast(false);
 
     try {
       // If mentor was associated via selection, ensure mt5_accounts record is linked first
       if (finalMentorId !== chosenParent.userId) {
-        await mt5AdminService.associateParentAccountMentor({
+        const mentorAssocRes = await mt5AdminService.associateParentAccountMentor({
           parentAccountId: chosenParent.id,
           mentorProfileId: finalMentorId,
           isCloudMode,
         });
+        if (!mentorAssocRes.success) {
+          throw new Error(mentorAssocRes.error || 'Failed to associate parent MT5 account with mentor profile.');
+        }
       }
 
       if (finalTraderId !== chosenChild.userId) {
-        await mt5AdminService.associateChildAccountTrader({
+        const traderAssocRes = await mt5AdminService.associateChildAccountTrader({
           childAccountId: chosenChild.id,
           traderProfileId: finalTraderId,
           isCloudMode,
         });
+        if (!traderAssocRes.success) {
+          throw new Error(traderAssocRes.error || 'Failed to associate child MT5 account with trader profile.');
+        }
       }
 
       // 1. Execute database mutation via mt5AdminService using real UUIDs and active session
@@ -732,15 +744,26 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         details: `Assigned Child #${chosenChild.accountNumber} (${chosenChild.traderName}) to Parent #${chosenParent.accountNumber} (${chosenParent.mentorName}). Sizing: ${copyMode} (${copyMode === 'multiplier' ? lotMultiplier + 'x' : fixedLot + ' lots'}). Persistence: Supabase mentor_assignments [${res.assignmentId || 'synced'}].`,
       });
 
-      onAssignmentSuccess();
-      onClose();
+      const successMsg = `Successfully assigned Parent MT5 #${chosenParent.accountNumber} (${chosenParent.mentorName}) to Child #${chosenChild.accountNumber} (${chosenChild.traderName}) with ${copyMode === 'multiplier' ? lotMultiplier.toFixed(2) + 'x multiplier' : fixedLot.toFixed(2) + ' lots fixed'} sizing.`;
+
+      setShowSuccessToast(true);
+      setSuccessToastMessage(successMsg);
+
+      // Trigger immediate refresh on parent views with success notification
+      onAssignmentSuccess(successMsg);
+
+      // Keep success feedback visible briefly before closing
+      setTimeout(() => {
+        setIsSubmitting(false);
+        setShowSuccessToast(false);
+        onClose();
+      }, 1200);
     } catch (err: any) {
       if (isJwtExpiredError(err)) {
         setIsSessionExpired(true);
         setShowInlineSignIn(true);
       }
       setErrorMessage(err.message || 'An unexpected error occurred during assignment.');
-    } finally {
       setIsSubmitting(false);
     }
   };
@@ -815,6 +838,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
               <div className="rounded-lg border border-emerald-800 bg-emerald-950/50 p-3 flex items-center gap-2 text-xs text-emerald-300 animate-in fade-in">
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
                 <span>{seedSuccessNotice}</span>
+              </div>
+            )}
+
+            {showSuccessToast && (
+              <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/80 p-3.5 text-xs text-emerald-300 flex items-start gap-2.5 shadow-lg animate-in fade-in slide-in-from-top-1">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
+                <div className="space-y-0.5">
+                  <span className="font-semibold block text-emerald-200">Assignment Persisted Successfully</span>
+                  <span className="text-[11px] leading-relaxed block text-emerald-300/90">{successToastMessage}</span>
+                </div>
               </div>
             )}
 
@@ -1426,6 +1459,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 type="submit"
                 disabled={
                   isSubmitting ||
+                  showSuccessToast ||
                   !hasAccounts ||
                   isSelfAssignment ||
                   (!isParentMentorVerified && !selectedMentorProfileId) ||
@@ -1436,10 +1470,15 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 {isSubmitting ? (
                   <>
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    <span>Saving Link...</span>
+                    <span>Assigning & Saving...</span>
+                  </>
+                ) : showSuccessToast ? (
+                  <>
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" />
+                    <span>Assignment Saved</span>
                   </>
                 ) : (
-                  <span>Confirm Assignment</span>
+                  <span>Assign & Save</span>
                 )}
               </button>
             </div>
