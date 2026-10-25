@@ -1804,6 +1804,11 @@ export const mt5AdminService = {
       const apiRes = await fetch('/api/admin/users', { headers });
       const parsed = await this.safeParseApiResponse(apiRes);
 
+      const contentType = apiRes.headers.get('content-type') || 'unknown';
+      console.log(
+        `[mt5AdminService:candidates] GET /api/admin/users => HTTP ${apiRes.status}, Content-Type: ${contentType}, ok: ${parsed.ok}`
+      );
+
       if (!parsed.ok) {
         const errMsg = parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to fetch registered candidate users`;
         console.error('[mt5AdminService] getCandidateUsersForMentor error:', errMsg);
@@ -1811,7 +1816,21 @@ export const mt5AdminService = {
       }
 
       if (parsed.data && Array.isArray(parsed.data.users)) {
-        return parsed.data.users
+        const rawUsers = parsed.data.users;
+        console.log(`[mt5AdminService:candidates] Total users returned by /api/admin/users: ${rawUsers.length}`);
+
+        rawUsers.forEach((u: any, i: number) => {
+          const isExcludedAdmin = u.role === 'admin';
+          const isExcludedActiveMentor = u.role === 'mentor' && u.status === 'active';
+          const isEligible = !isExcludedAdmin && !isExcludedActiveMentor;
+          console.log(
+            `[mt5AdminService:candidates] User #${i + 1}: id=${u.id}, email=${u.email}, role=${u.role}, status=${u.status} => eligible=${isEligible} (reason: ${
+              isExcludedAdmin ? 'excluded: is admin' : isExcludedActiveMentor ? 'excluded: is active mentor' : 'eligible candidate'
+            })`
+          );
+        });
+
+        const candidates = rawUsers
           // Exclude administrators (cannot be elevated or approved as mentors)
           // Exclude active mentors (they already appear in the Mentors Management table)
           .filter((u: any) => u.role !== 'admin' && !(u.role === 'mentor' && u.status === 'active'))
@@ -1823,8 +1842,12 @@ export const mt5AdminService = {
             role: u.role || 'trader',
             status: u.status || 'active',
           }));
+
+        console.log(`[mt5AdminService:candidates] Eligible candidates passing filter: ${candidates.length}`);
+        return candidates;
       }
 
+      console.warn('[mt5AdminService:candidates] parsed.data.users is not an array or missing.');
       // In Cloud Mode, if no candidates exist, return empty array (never mock demo data)
       return [];
     }

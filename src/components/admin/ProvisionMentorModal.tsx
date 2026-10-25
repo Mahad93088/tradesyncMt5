@@ -81,15 +81,24 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setIsLoadingCandidates(true);
     setErrors({});
     try {
+      console.log(`[ProvisionMentorModal] Loading candidates: isCloudMode=${Boolean(isCloudMode)}, currentAdminEmail=${currentAuthUser?.email}`);
       const list = await mt5AdminService.getCandidateUsersForMentor(isCloudMode, users);
       setCandidates(list);
+
+      console.log(`[ProvisionMentorModal] Candidates loaded count: ${list.length}`);
+      list.forEach((c, idx) => {
+        const isSelf = Boolean(currentAuthUser?.id && c.id === currentAuthUser.id);
+        console.log(`[ProvisionMentorModal] Dropdown candidate #${idx + 1}: id=${c.id}, email=${c.email}, role=${c.role}, status=${c.status}, isSelfPromotion=${isSelf}`);
+      });
 
       // Default selection to first eligible candidate who is not the current admin
       const eligible = list.find((c) => c.id !== currentAuthUser?.id) || list[0];
       if (eligible) {
         setSelectedCandidateId(eligible.id);
+        console.log(`[ProvisionMentorModal] Default selected candidate: ${eligible.email} (${eligible.id})`);
       } else {
         setSelectedCandidateId('');
+        console.log('[ProvisionMentorModal] No candidate available to select.');
       }
     } catch (err: any) {
       console.error('[ProvisionMentorModal] Failed to load candidate users:', err);

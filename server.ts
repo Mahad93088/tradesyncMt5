@@ -197,6 +197,47 @@ async function startServer() {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid.trim());
   };
 
+  // In-memory diagnostic record of the last GET /api/admin/users evaluation
+  let lastAdminUsersDiagnostic: {
+    timestamp: string;
+    httpStatus: number;
+    contentType: string;
+    caller: {
+      id: string;
+      email: string;
+      roleInDb?: string;
+      statusInDb?: string;
+      isOwner: boolean;
+      isVerifiedAdmin: boolean;
+    };
+    clientMode: 'service_role' | 'authenticated_jwt';
+    postgrestError: string | null;
+    rawCountFromDb: number;
+    users: Array<{
+      id: string;
+      email: string;
+      fullName?: string;
+      role: string;
+      status: string;
+      createdAt?: string;
+    }>;
+  } | null = null;
+
+  // Diagnostic endpoint to inspect the actual GET /api/admin/users evaluation
+  app.get('/api/admin/diagnostic/users', (_req: Request, res: Response) => {
+    res.json({
+      status: 'ok',
+      hasDiagnostic: Boolean(lastAdminUsersDiagnostic),
+      lastEvaluation: lastAdminUsersDiagnostic,
+      config: {
+        supabaseConfigured: Boolean(supabaseUrl && publishableKey),
+        hasPublishableKey: Boolean(publishableKey),
+        hasServiceRole: Boolean(serviceRoleKey),
+        url: supabaseUrl ? 'configured' : 'missing',
+      },
+    });
+  });
+
   // Directory of Registered Users for Authorized Super Admin Approval
   app.get('/api/admin/users', async (req: Request, res: Response) => {
     try {
@@ -226,7 +267,7 @@ async function startServer() {
         : authClient;
 
       // 2. Verify caller has admin privileges
-      const { data: callerProfile } = await clientForQueries
+      const { data: callerProfile, error: profileErr } = await clientForQueries
         .from('profiles')
         .select('id, email, role, status')
         .eq('id', callerUser.id)
@@ -250,8 +291,61 @@ async function startServer() {
         .order('created_at', { ascending: false });
 
       if (listError) {
+        console.error('[AdminAPI] GET /api/admin/users PostgREST error:', listError.message);
+        lastAdminUsersDiagnostic = {
+          timestamp: new Date().toISOString(),
+          httpStatus: 500,
+          contentType: 'application/json',
+          caller: {
+            id: callerUser.id,
+            email: callerEmail,
+            roleInDb: callerProfile?.role,
+            statusInDb: callerProfile?.status,
+            isOwner,
+            isVerifiedAdmin,
+          },
+          clientMode: serviceRoleKey ? 'service_role' : 'authenticated_jwt',
+          postgrestError: listError.message,
+          rawCountFromDb: 0,
+          users: [],
+        };
         return res.status(500).json({ error: listError.message });
       }
+
+      const sanitizedUsers = (profiles || []).map((p: any) => ({
+        id: p.id,
+        email: p.email || '',
+        fullName: p.full_name || '',
+        role: p.role || 'trader',
+        status: p.status || 'active',
+        createdAt: p.created_at,
+      }));
+
+      // Safe diagnostic logging (no passwords, tokens, or keys logged)
+      console.log(
+        `[AdminAPI] GET /api/admin/users => caller=${callerEmail}, roleInDb=${callerProfile?.role ?? 'none'}, statusInDb=${callerProfile?.status ?? 'none'}, isOwner=${isOwner}, queryMode=${serviceRoleKey ? 'service_role' : 'authenticated_jwt'}, dbCount=${sanitizedUsers.length}`
+      );
+      sanitizedUsers.forEach((u: any, idx: number) => {
+        console.log(`[AdminAPI] Profile #${idx + 1}: id=${u.id}, email=${u.email}, role=${u.role}, status=${u.status}`);
+      });
+
+      lastAdminUsersDiagnostic = {
+        timestamp: new Date().toISOString(),
+        httpStatus: 200,
+        contentType: 'application/json',
+        caller: {
+          id: callerUser.id,
+          email: callerEmail,
+          roleInDb: callerProfile?.role,
+          statusInDb: callerProfile?.status,
+          isOwner,
+          isVerifiedAdmin,
+        },
+        clientMode: serviceRoleKey ? 'service_role' : 'authenticated_jwt',
+        postgrestError: null,
+        rawCountFromDb: sanitizedUsers.length,
+        users: sanitizedUsers,
+      };
 
       return res.json({
         success: true,
