@@ -1755,7 +1755,9 @@ export const mt5AdminService = {
         : `Server returned non-JSON HTTP ${status} (${res.statusText || 'Error'})`;
 
       let actionHint = 'Please check administrator authorization.';
-      if (status === 401) {
+      if (status === 404) {
+        actionHint = 'The requested endpoint was not found on this deployment. Please verify backend routing (Vercel Serverless Function /api).';
+      } else if (status === 401) {
         actionHint = 'Session expired or unauthorized. Please re-authenticate as an administrator.';
       } else if (status === 403) {
         actionHint = 'Access forbidden. Administrator privileges are required to approve users.';
@@ -1810,6 +1812,29 @@ export const mt5AdminService = {
       );
 
       if (!parsed.ok) {
+        // Deployment resilience: If /api/admin/users returned 404 (e.g. static hosting on Vercel), fall back to direct Supabase query
+        if (parsed.status === 404) {
+          console.warn('[mt5AdminService] /api/admin/users returned 404. Attempting direct Supabase query via authenticated session...');
+          const { data: directProfiles, error: directErr } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, avatar_url, role, status, created_at')
+            .order('created_at', { ascending: false });
+
+          if (!directErr && Array.isArray(directProfiles)) {
+            console.log(`[mt5AdminService:candidates] Direct Supabase profiles count: ${directProfiles.length}`);
+            return directProfiles
+              .filter((u: any) => u.role !== 'admin' && !(u.role === 'mentor' && u.status === 'active'))
+              .map((u: any) => ({
+                id: u.id,
+                fullName: u.full_name || (u.email ? u.email.split('@')[0] : 'Trader'),
+                email: u.email || '',
+                avatarUrl: u.avatar_url,
+                role: u.role || 'trader',
+                status: u.status || 'active',
+              }));
+          }
+        }
+
         const errMsg = parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to fetch registered candidate users`;
         console.error('[mt5AdminService] getCandidateUsersForMentor error:', errMsg);
         throw new Error(errMsg);
@@ -1902,6 +1927,33 @@ export const mt5AdminService = {
 
         const parsed = await this.safeParseApiResponse(res);
         if (!parsed.ok || !parsed.data?.success) {
+          // Deployment resilience: If /api/admin/approve-user returned 404 (e.g. Vercel static routing without serverless), fall back to direct Supabase update
+          if (parsed.status === 404) {
+            console.warn('[mt5AdminService] /api/admin/approve-user returned 404. Attempting direct Supabase update via authenticated admin session...');
+            const { data: directProfile, error: directErr } = await supabase
+              .from('profiles')
+              .update({
+                status: 'active',
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', safeTargetId)
+              .select('id, email, full_name, role, status, updated_at')
+              .single();
+
+            if (!directErr && directProfile) {
+              return {
+                success: true,
+                profile: directProfile,
+                message: `User ${directProfile.email || safeTargetId} successfully approved with active status (direct Supabase sync).`,
+              };
+            } else if (directErr) {
+              return {
+                success: false,
+                error: `Direct database update failed (${directErr.message}). Verify active administrator privileges in public.profiles.`,
+              };
+            }
+          }
+
           return {
             success: false,
             error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to approve user`,
@@ -1975,6 +2027,34 @@ export const mt5AdminService = {
 
         const parsed = await this.safeParseApiResponse(res);
         if (!parsed.ok || !parsed.data?.success) {
+          // Deployment resilience: If /api/admin/promote-user returned 404 (e.g. Vercel static routing without serverless), fall back to direct Supabase update
+          if (parsed.status === 404) {
+            console.warn('[mt5AdminService] /api/admin/promote-user returned 404. Attempting direct Supabase update via authenticated admin session...');
+            const { data: directProfile, error: directErr } = await supabase
+              .from('profiles')
+              .update({
+                role: 'mentor',
+                status: 'active',
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', safeTargetId)
+              .select('id, email, full_name, role, status, updated_at')
+              .single();
+
+            if (!directErr && directProfile) {
+              return {
+                success: true,
+                profile: directProfile,
+                message: `User ${directProfile.email || safeTargetId} successfully promoted to mentor (direct Supabase sync).`,
+              };
+            } else if (directErr) {
+              return {
+                success: false,
+                error: `Direct database promotion failed (${directErr.message}). Verify active administrator privileges in public.profiles.`,
+              };
+            }
+          }
+
           return {
             success: false,
             error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to promote user to mentor`,
