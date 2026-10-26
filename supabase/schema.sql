@@ -843,11 +843,30 @@ CREATE TABLE IF NOT EXISTS public.bridge_instructions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Backward-compatibility column assertions if table pre-existed
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS child_ticket BIGINT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS open_price NUMERIC(15, 5);
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS sl NUMERIC(15, 5);
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS tp NUMERIC(15, 5);
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS magic_number BIGINT DEFAULT 888999;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS comment TEXT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_bridge_instructions_child_status 
     ON public.bridge_instructions(child_account_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_bridge_instructions_idempotency 
     ON public.bridge_instructions(idempotency_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bridge_instructions_idempotency_unique 
+    ON public.bridge_instructions(idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_bridge_instructions_parent_ticket 
+    ON public.bridge_instructions(parent_ticket);
+
+CREATE INDEX IF NOT EXISTS idx_bridge_instructions_lease 
+    ON public.bridge_instructions(status, lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS public.trade_mappings (
     id TEXT PRIMARY KEY,
@@ -859,7 +878,7 @@ CREATE TABLE IF NOT EXISTS public.trade_mappings (
     order_type TEXT NOT NULL,
     parent_lots NUMERIC(10, 2) NOT NULL,
     child_lots NUMERIC(10, 2) NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING',
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'EXECUTED', 'FAILED', 'REJECTED', 'CLOSED')),
     latency_ms INT DEFAULT 0,
     error_message TEXT,
     retry_count INT NOT NULL DEFAULT 0,
@@ -868,11 +887,26 @@ CREATE TABLE IF NOT EXISTS public.trade_mappings (
     UNIQUE(parent_trade_ticket, child_account_id)
 );
 
+-- Backward-compatibility column assertions if table pre-existed
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS child_trade_ticket BIGINT;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS child_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS latency_ms INT DEFAULT 0;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_mappings_parent_child_unique 
+    ON public.trade_mappings(parent_trade_ticket, child_account_id);
+
 CREATE INDEX IF NOT EXISTS idx_trade_mappings_parent_ticket 
     ON public.trade_mappings(parent_trade_ticket);
 
 CREATE INDEX IF NOT EXISTS idx_trade_mappings_child_account 
     ON public.trade_mappings(child_account_id);
+
+CREATE INDEX IF NOT EXISTS idx_trade_mappings_parent_account 
+    ON public.trade_mappings(parent_account_id);
 
 CREATE TABLE IF NOT EXISTS public.bridge_sync_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -884,10 +918,102 @@ CREATE TABLE IF NOT EXISTS public.bridge_sync_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Backward-compatibility column assertions if table pre-existed
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS ticket BIGINT;
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS latency_ms INT;
+
 CREATE INDEX IF NOT EXISTS idx_bridge_sync_logs_created 
     ON public.bridge_sync_logs(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bridge_sync_logs_level 
+    ON public.bridge_sync_logs(level);
+
+-- Helper function to validate service_role or admin without depending on flawed current_user checks
+CREATE OR REPLACE FUNCTION public.is_service_role_or_admin()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+  jwt_role TEXT;
+BEGIN
+  BEGIN
+    jwt_role := COALESCE(current_setting('request.jwt.claim.role', true), '');
+  EXCEPTION WHEN OTHERS THEN
+    jwt_role := '';
+  END;
+
+  IF current_user IN ('postgres', 'service_role') 
+     OR session_user IN ('postgres', 'service_role') 
+     OR jwt_role = 'service_role' THEN
+    RETURN TRUE;
+  END IF;
+
+  RETURN public.is_admin();
+END;
+$$;
 
 ALTER TABLE public.bridge_instructions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trade_mappings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.bridge_sync_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Service role and admin full access to bridge_instructions" ON public.bridge_instructions;
+CREATE POLICY "Service role and admin full access to bridge_instructions" 
+    ON public.bridge_instructions FOR ALL 
+    USING (public.is_service_role_or_admin())
+    WITH CHECK (public.is_service_role_or_admin());
+
+DROP POLICY IF EXISTS "Account owners can view their bridge_instructions" ON public.bridge_instructions;
+CREATE POLICY "Account owners can view their bridge_instructions" 
+    ON public.bridge_instructions FOR SELECT 
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.mt5_accounts a 
+            WHERE (a.id = child_account_id OR a.id = parent_account_id) 
+              AND a.user_id = auth.uid()
+        )
+        OR public.is_service_role_or_admin()
+    );
+
+DROP POLICY IF EXISTS "Service role and admin full access to trade_mappings" ON public.trade_mappings;
+CREATE POLICY "Service role and admin full access to trade_mappings" 
+    ON public.trade_mappings FOR ALL 
+    USING (public.is_service_role_or_admin())
+    WITH CHECK (public.is_service_role_or_admin());
+
+DROP POLICY IF EXISTS "Users can view their trade mappings" ON public.trade_mappings;
+CREATE POLICY "Users can view their trade mappings" 
+    ON public.trade_mappings FOR SELECT 
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.mt5_accounts a 
+            WHERE (a.id = child_account_id OR a.id = parent_account_id) 
+              AND a.user_id = auth.uid()
+        )
+        OR public.is_service_role_or_admin()
+    );
+
+DROP POLICY IF EXISTS "Service role and admin full access to bridge_sync_logs" ON public.bridge_sync_logs;
+CREATE POLICY "Service role and admin full access to bridge_sync_logs" 
+    ON public.bridge_sync_logs FOR ALL 
+    USING (public.is_service_role_or_admin())
+    WITH CHECK (public.is_service_role_or_admin());
+
+GRANT ALL ON TABLE 
+    public.bridge_instructions,
+    public.trade_mappings,
+    public.bridge_sync_logs
+TO service_role, postgres;
+
+GRANT SELECT ON TABLE 
+    public.bridge_instructions,
+    public.trade_mappings
+TO authenticated;
+
+REVOKE ALL ON TABLE public.bridge_sync_logs FROM anon, authenticated;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.bridge_instructions, public.trade_mappings FROM anon, authenticated;
+REVOKE ALL ON TABLE public.bridge_instructions, public.trade_mappings FROM anon;
+GRANT EXECUTE ON FUNCTION public.is_service_role_or_admin() TO anon, authenticated, service_role, postgres;
 

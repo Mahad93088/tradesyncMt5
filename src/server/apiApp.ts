@@ -647,12 +647,57 @@ export function createApiApp() {
     const dbClient = getBridgeDbClient();
     const mappings = await bridgeStore.getTradeMappings(dbClient);
 
+    let dbOperational = false;
+    let dbLatencyMs: number | null = null;
+    let dbError: string | null = null;
+    const tableVerification = {
+      bridgeInstructions: false,
+      tradeMappings: false,
+      bridgeSyncLogs: false,
+      mt5Accounts: false,
+    };
+
+    if (dbClient) {
+      const pingStart = Date.now();
+      try {
+        const [instRes, mapRes, logRes, accRes] = await Promise.all([
+          dbClient.from('bridge_instructions').select('id').limit(1),
+          dbClient.from('trade_mappings').select('id').limit(1),
+          dbClient.from('bridge_sync_logs').select('id').limit(1),
+          dbClient.from('mt5_accounts').select('id, terminal_token_hash').limit(1),
+        ]);
+
+        dbLatencyMs = Date.now() - pingStart;
+        tableVerification.bridgeInstructions = !instRes.error;
+        tableVerification.tradeMappings = !mapRes.error;
+        tableVerification.bridgeSyncLogs = !logRes.error;
+        tableVerification.mt5Accounts = !accRes.error;
+
+        // Authoritative persistence confirmed only if core bridge tables are queryable
+        if (!instRes.error && !mapRes.error) {
+          dbOperational = true;
+        } else {
+          dbError = instRes.error?.message || mapRes.error?.message || 'Database schema tables not found';
+        }
+      } catch (err: any) {
+        dbError = err.message || 'Database ping exception';
+      }
+    }
+
     res.json({
       status: 'ok',
       service: 'TradeSync MT5 Bridge Server',
       version: '1.0.0',
       timestamp: new Date().toISOString(),
-      databasePersistence: Boolean(dbClient),
+      databasePersistence: dbOperational,
+      databaseDiagnostics: {
+        configured: Boolean(supabaseUrl),
+        hasServiceRole: Boolean(serviceRoleKey),
+        connected: dbOperational,
+        latencyMs: dbLatencyMs,
+        tablesVerified: tableVerification,
+        error: dbError,
+      },
       authenticatedTerminal: authResult.terminal
         ? {
             accountId: authResult.terminal.accountId,
@@ -761,29 +806,101 @@ export function createApiApp() {
 
     if (dbClient) {
       try {
-        const { data: assignments } = await dbClient
+        // 1. Authoritative check on Parent MT5 account & profile
+        const { data: parentAcc, error: parentAccErr } = await dbClient
+          .from('mt5_accounts')
+          .select('id, user_id, account_role, connection_status')
+          .eq('id', auth.terminal.accountId)
+          .maybeSingle();
+
+        if (parentAccErr || !parentAcc || parentAcc.account_role !== 'parent') {
+          return res.status(403).json({
+            success: false,
+            error: 'Forbidden: Authenticated terminal is not a registered Parent/Mentor account in database.',
+          });
+        }
+
+        const { data: mentorProfile } = await dbClient
+          .from('profiles')
+          .select('id, role, status')
+          .eq('id', parentAcc.user_id)
+          .maybeSingle();
+
+        if (!mentorProfile || mentorProfile.status !== 'active') {
+          return res.status(403).json({
+            success: false,
+            error: `Forbidden: Mentor account profile is ${mentorProfile?.status || 'inactive'}. Broadcasting disabled.`,
+          });
+        }
+
+        // 2. Query active mentor assignments specifically paired with this parent account
+        const { data: assignments, error: assignErr } = await dbClient
           .from('mentor_assignments')
-          .select('child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
+          .select('id, mentor_id, trader_id, child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
           .eq('parent_account_id', auth.terminal.accountId)
           .eq('status', 'active');
 
+        if (assignErr) {
+          console.error('[Bridge] Error querying active assignments:', assignErr.message);
+        }
+
         if (assignments && assignments.length > 0) {
-          assignedChildren = assignments
-            .filter((a) => a.child_account_id)
-            .map((a) => ({
+          for (const a of assignments) {
+            if (!a.child_account_id) continue;
+
+            // 3. Verify Child account exists and is assigned role 'child'
+            const { data: childAcc } = await dbClient
+              .from('mt5_accounts')
+              .select('id, user_id, account_role, connection_status')
+              .eq('id', a.child_account_id)
+              .maybeSingle();
+
+            if (!childAcc || childAcc.account_role !== 'child') {
+              bridgeStore.addSyncLog(
+                {
+                  eventType: 'ASSIGNMENT_REJECTED',
+                  level: 'warn',
+                  details: `Skipped copy for child account ${a.child_account_id}: not found or role is not child`,
+                  ticket: parentTicketNum,
+                },
+                dbClient
+              );
+              continue;
+            }
+
+            // 4. Verify Trader user profile is active and not suspended
+            const { data: traderProf } = await dbClient
+              .from('profiles')
+              .select('id, status')
+              .eq('id', childAcc.user_id)
+              .maybeSingle();
+
+            if (!traderProf || traderProf.status !== 'active') {
+              bridgeStore.addSyncLog(
+                {
+                  eventType: 'TRADER_INACTIVE_SKIPPED',
+                  level: 'warn',
+                  details: `Skipped copy for child ${a.child_account_id}: trader profile is ${traderProf?.status || 'unknown'}.`,
+                  ticket: parentTicketNum,
+                },
+                dbClient
+              );
+              continue;
+            }
+
+            assignedChildren.push({
               childAccountId: a.child_account_id,
               lotMode: a.lot_mode === 'fixed_lot' || a.lot_mode === 'multiplier' ? 'custom_lot' : 'parent_lot',
               lotMultiplier: Number(a.lot_multiplier) || 1.0,
               fixedLot: Number(a.fixed_lot) || 0.1,
-            }));
+            });
+          }
         }
       } catch (dbErr: any) {
         console.warn('[Bridge] Supabase assignments query notice:', dbErr.message);
       }
-    }
-
-    // Default fallback to registered demo child terminal if no database pairing exists
-    if (assignedChildren.length === 0) {
+    } else if (process.env.NODE_ENV !== 'production') {
+      // Local development test fallback only when database is offline
       assignedChildren = [
         {
           childAccountId: 'acc_child_1',
@@ -792,6 +909,26 @@ export function createApiApp() {
           fixedLot: 0.1,
         },
       ];
+    }
+
+    if (assignedChildren.length === 0) {
+      bridgeStore.addSyncLog(
+        {
+          eventType: 'NO_ACTIVE_CHILDREN',
+          level: 'info',
+          details: `Parent trade #${parentTicketNum} received, but no active, verified child accounts are currently assigned to parent ${auth.terminal.accountId}.`,
+          ticket: parentTicketNum,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({
+        success: true,
+        parentTicket: parentTicketNum,
+        childInstructionsQueued: 0,
+        message: 'No active, verified child account assignments found for this parent account.',
+        instructions: [],
+      });
     }
 
     const queuedInstructions = [];
@@ -816,12 +953,15 @@ export function createApiApp() {
       });
 
       if (!sizing.valid) {
-        bridgeStore.addSyncLog({
-          eventType: 'RISK_ENGINE_REJECTED',
-          level: 'warn',
-          details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
-          ticket: parentTicketNum,
-        }, dbClient);
+        bridgeStore.addSyncLog(
+          {
+            eventType: 'RISK_ENGINE_REJECTED',
+            level: 'warn',
+            details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
+            ticket: parentTicketNum,
+          },
+          dbClient
+        );
         continue;
       }
 
@@ -872,8 +1012,9 @@ export function createApiApp() {
     if (!auth.terminal) {
       return res.status(auth.status || 401).json({ success: false, error: auth.error });
     }
+    const terminal = auth.terminal;
 
-    if (auth.terminal.accountRole !== 'parent') {
+    if (terminal.accountRole !== 'parent') {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade closures.' });
     }
 
@@ -884,7 +1025,9 @@ export function createApiApp() {
 
     const parentTicketNum = Number(ticket);
     const dbClient = getBridgeDbClient();
-    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter((m) => m.parentTradeTicket === parentTicketNum);
+    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
+      (m) => m.parentTradeTicket === parentTicketNum && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
+    );
 
     const queuedClose = [];
     for (const map of mappings) {
@@ -894,7 +1037,7 @@ export function createApiApp() {
           idempotencyKey,
           action: 'CLOSE',
           childAccountId: map.childAccountId,
-          parentAccountId: auth.terminal.accountId,
+          parentAccountId: terminal.accountId,
           parentTicket: parentTicketNum,
           childTicket: map.childTradeTicket > 0 ? map.childTradeTicket : undefined,
           symbol: map.symbol,
@@ -931,6 +1074,11 @@ export function createApiApp() {
     if (!auth.terminal) {
       return res.status(auth.status || 401).json({ success: false, error: auth.error });
     }
+    const terminal = auth.terminal;
+
+    if (terminal.accountRole !== 'parent') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade modifications.' });
+    }
 
     const { ticket, sl, tp } = req.body;
     if (!ticket) {
@@ -939,7 +1087,9 @@ export function createApiApp() {
 
     const parentTicketNum = Number(ticket);
     const dbClient = getBridgeDbClient();
-    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter((m) => m.parentTradeTicket === parentTicketNum);
+    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
+      (m) => m.parentTradeTicket === parentTicketNum && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
+    );
 
     for (const map of mappings) {
       const idempotencyKey = `${parentTicketNum}_${map.childAccountId}_MODIFY_${sl}_${tp}`;

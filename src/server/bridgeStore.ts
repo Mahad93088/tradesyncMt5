@@ -221,6 +221,18 @@ export class BridgeStore {
           .maybeSingle();
 
         if (acc && !error) {
+          // Verify user profile is active and not suspended
+          const { data: profile } = await supabaseClient
+            .from('profiles')
+            .select('id, status, role')
+            .eq('id', acc.user_id)
+            .maybeSingle();
+
+          if (profile && profile.status !== 'active') {
+            console.warn(`[BridgeStore] Terminal rejected: owner user ${acc.user_id} is ${profile.status}.`);
+            return null;
+          }
+
           const registered: RegisteredTerminal = {
             tokenHash: hash,
             rawTokenPrefix: token.substring(0, 12) + '...',
@@ -417,37 +429,76 @@ export class BridgeStore {
           .limit(10);
 
         if (pendingRows && pendingRows.length > 0) {
-          const ids = pendingRows.map((r) => r.id);
-          // Set lease lock
-          await supabaseClient
-            .from('bridge_instructions')
-            .update({
-              status: 'IN_FLIGHT',
-              lease_expires_at: leaseTimeIso,
-            })
-            .in('id', ids);
+          const deliverableInstructions: BridgeInstruction[] = [];
 
-          return pendingRows.map((r) => ({
-            instructionId: r.id,
-            idempotencyKey: r.idempotency_key,
-            action: r.action,
-            childAccountId: r.child_account_id,
-            parentAccountId: r.parent_account_id,
-            parentTicket: Number(r.parent_ticket),
-            childTicket: r.child_ticket ? Number(r.child_ticket) : undefined,
-            symbol: r.symbol,
-            orderType: r.order_type,
-            lots: Number(r.lots),
-            openPrice: r.open_price ? Number(r.open_price) : undefined,
-            sl: r.sl ? Number(r.sl) : undefined,
-            tp: r.tp ? Number(r.tp) : undefined,
-            magicNumber: Number(r.magic_number) || 888999,
-            comment: r.comment || '',
-            createdAt: r.created_at,
-            status: 'IN_FLIGHT',
-            leaseExpiresAt: now + 15000,
-            retryCount: Number(r.retry_count) || 0,
-          }));
+          for (const r of pendingRows) {
+            const currentRetries = Number(r.retry_count) || 0;
+            const isExpiredLease = r.status === 'IN_FLIGHT';
+
+            // Guard against infinite retries if terminal repeatedly crashes
+            if (isExpiredLease && currentRetries >= 5) {
+              await supabaseClient
+                .from('bridge_instructions')
+                .update({ status: 'FAILED' })
+                .eq('id', r.id);
+
+              await supabaseClient
+                .from('trade_mappings')
+                .update({
+                  status: 'FAILED',
+                  error_message: 'Max retries (5) exceeded without broker ACK',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('parent_trade_ticket', r.parent_ticket)
+                .eq('child_account_id', r.child_account_id);
+
+              this.addSyncLog(
+                {
+                  eventType: 'INSTRUCTION_MAX_RETRIES_EXCEEDED',
+                  level: 'error',
+                  details: `Instruction ${r.id} for ticket #${r.parent_ticket} exceeded 5 retries without receiver ACK. Marked as FAILED.`,
+                  ticket: Number(r.parent_ticket),
+                },
+                supabaseClient
+              );
+              continue;
+            }
+
+            const nextRetryCount = isExpiredLease ? currentRetries + 1 : currentRetries;
+
+            await supabaseClient
+              .from('bridge_instructions')
+              .update({
+                status: 'IN_FLIGHT',
+                lease_expires_at: leaseTimeIso,
+                retry_count: nextRetryCount,
+              })
+              .eq('id', r.id);
+
+            deliverableInstructions.push({
+              instructionId: r.id,
+              idempotencyKey: r.idempotency_key,
+              action: r.action,
+              childAccountId: r.child_account_id,
+              parentAccountId: r.parent_account_id,
+              parentTicket: Number(r.parent_ticket),
+              childTicket: r.child_ticket ? Number(r.child_ticket) : undefined,
+              symbol: r.symbol,
+              orderType: r.order_type,
+              lots: Number(r.lots),
+              openPrice: r.open_price ? Number(r.open_price) : undefined,
+              sl: r.sl ? Number(r.sl) : undefined,
+              tp: r.tp ? Number(r.tp) : undefined,
+              magicNumber: Number(r.magic_number) || 888999,
+              comment: r.comment || '',
+              createdAt: r.created_at,
+              status: 'IN_FLIGHT',
+              leaseExpiresAt: now + 15000,
+              retryCount: nextRetryCount,
+            });
+          }
+
+          return deliverableInstructions;
         }
       } catch (err: any) {
         console.warn('[BridgeStore] Supabase pending instructions poll exception:', err.message);
@@ -463,6 +514,10 @@ export class BridgeStore {
       const isLeaseExpired = inst.status === 'IN_FLIGHT' && inst.leaseExpiresAt && inst.leaseExpiresAt < now;
 
       if (isQueued || isLeaseExpired) {
+        if (isLeaseExpired && inst.retryCount >= 5) {
+          inst.status = 'FAILED';
+          continue;
+        }
         inst.status = 'IN_FLIGHT';
         inst.leaseExpiresAt = now + 15000;
         if (isLeaseExpired) {
