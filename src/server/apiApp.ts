@@ -2,6 +2,8 @@ import express, { type Request, type Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import path from 'path';
 import dotenv from 'dotenv';
+import { RiskEngine } from './riskEngine.ts';
+import { BridgeStore, RegisteredTerminal } from './bridgeStore.ts';
 
 dotenv.config();
 
@@ -529,6 +531,466 @@ export function createApiApp() {
       console.error('Server promotion error:', err);
       return res.status(500).json({ success: false, error: err.message || 'Internal server error during promotion' });
     }
+  });
+
+  // ==============================================================================
+  // MT5 Expert Advisor Bridge Architecture Endpoints (Phase 1)
+  // ==============================================================================
+  const bridgeStore = BridgeStore.getInstance();
+
+  /**
+   * Terminal Authentication Middleware / Helper
+   * Validates device/terminal token against server-side registered credentials.
+   * Resolves the authoritative accountId and role. Does not trust raw account numbers.
+   */
+  const authenticateTerminal = (req: Request): { terminal: RegisteredTerminal | null; error?: string; status?: number } => {
+    const rawToken = (
+      req.headers['x-terminal-token'] ||
+      (typeof req.headers['authorization'] === 'string' && req.headers['authorization'].startsWith('Bearer ts_')
+        ? req.headers['authorization'].replace(/^Bearer\s+/i, '')
+        : undefined) ||
+      (typeof req.query.token === 'string' ? req.query.token : undefined)
+    )?.toString().trim();
+
+    if (!rawToken) {
+      return {
+        terminal: null,
+        error: 'Unauthorized: Missing terminal token in X-Terminal-Token header.',
+        status: 401,
+      };
+    }
+
+    const terminal = bridgeStore.authenticateTerminal(rawToken);
+    if (!terminal) {
+      return {
+        terminal: null,
+        error: 'Unauthorized: Invalid or unverified terminal authentication token.',
+        status: 401,
+      };
+    }
+
+    // Verify claimed account number against authoritative terminal registration
+    const claimedAccountNumber = (req.body?.account_number || req.headers['x-account-number'])?.toString().trim();
+    if (claimedAccountNumber && claimedAccountNumber !== terminal.accountNumber) {
+      return {
+        terminal: null,
+        error: `Security violation: Claimed account number (${claimedAccountNumber}) does not match authenticated terminal record (${terminal.accountNumber}).`,
+        status: 403,
+      };
+    }
+
+    return { terminal };
+  };
+
+  /**
+   * 1. Bridge Status & Terminal Health Check
+   * GET /api/v1/bridge/status
+   */
+  registerRoute('get', '/api/v1/bridge/status', (req: Request, res: Response) => {
+    const authResult = authenticateTerminal(req);
+    res.json({
+      status: 'ok',
+      service: 'TradeSync MT5 Bridge Server',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+      authenticatedTerminal: authResult.terminal
+        ? {
+            accountId: authResult.terminal.accountId,
+            accountRole: authResult.terminal.accountRole,
+            accountNumber: authResult.terminal.accountNumber,
+            brokerServer: authResult.terminal.brokerServer,
+          }
+        : null,
+      activeTradeMappingsCount: bridgeStore.getTradeMappings().length,
+    });
+  });
+
+  /**
+   * 2. Provision or Refresh Terminal Authentication Token
+   * POST /api/v1/bridge/terminals/token
+   */
+  registerRoute('post', '/api/v1/bridge/terminals/token', async (req: Request, res: Response) => {
+    try {
+      const { accountId, accountNumber, brokerServer, brokerName, accountRole = 'child' } = req.body;
+
+      if (!accountId || !accountNumber) {
+        return res.status(400).json({ success: false, error: 'Missing accountId or accountNumber in body' });
+      }
+
+      const rawToken = BridgeStore.generateSecureToken(accountRole === 'parent' ? 'ts_parent' : 'ts_child');
+      const terminal = bridgeStore.registerTerminal(rawToken, {
+        accountId,
+        userId: 'system_authorized',
+        accountRole: accountRole === 'parent' ? 'parent' : 'child',
+        accountNumber: String(accountNumber),
+        brokerServer: brokerServer || 'MetaQuotes-Demo',
+        brokerName: brokerName || 'MetaTrader Broker',
+      });
+
+      return res.status(200).json({
+        success: true,
+        terminalToken: rawToken,
+        tokenPrefix: terminal.rawTokenPrefix,
+        accountId: terminal.accountId,
+        accountRole: terminal.accountRole,
+        accountNumber: terminal.accountNumber,
+        instructions: `Paste this token into the '${terminal.accountRole === 'parent' ? 'InpTerminalToken' : 'InpTerminalToken'}' parameter in your MT5 Expert Advisor.`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Token generation failed' });
+    }
+  });
+
+  /**
+   * 3. Parent Trade Open Event (Broadcaster EA hook)
+   * POST /api/v1/bridge/events/trade-open
+   */
+  registerRoute('post', '/api/v1/bridge/events/trade-open', async (req: Request, res: Response) => {
+    const auth = authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+    }
+
+    if (auth.terminal.accountRole !== 'parent') {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Only verified Parent/Mentor terminals may broadcast trade events.',
+      });
+    }
+
+    const {
+      ticket,
+      symbol,
+      type,
+      lots,
+      openPrice,
+      sl,
+      tp,
+      magicNumber = 0,
+      comment = 'TradeSync Master',
+    } = req.body;
+
+    if (!ticket || !symbol || !type || !lots) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required trade parameters: ticket, symbol, type, lots',
+      });
+    }
+
+    const parentTicketNum = Number(ticket);
+    const parentLotsNum = Number(lots);
+
+    // Resolve assigned active child accounts
+    interface ChildCandidate {
+      childAccountId: string;
+      lotMode: 'parent_lot' | 'custom_lot';
+      lotMultiplier: number;
+      fixedLot: number;
+    }
+
+    let assignedChildren: ChildCandidate[] = [];
+
+    // Check Supabase if configured
+    if (supabaseUrl && serviceRoleKey) {
+      try {
+        const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+          auth: { autoRefreshToken: false, persistSession: false },
+        });
+
+        const { data: assignments } = await adminClient
+          .from('mentor_assignments')
+          .select('child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
+          .eq('parent_account_id', auth.terminal.accountId)
+          .eq('status', 'active');
+
+        if (assignments && assignments.length > 0) {
+          assignedChildren = assignments
+            .filter((a) => a.child_account_id)
+            .map((a) => ({
+              childAccountId: a.child_account_id,
+              lotMode: a.lot_mode === 'fixed_lot' || a.lot_mode === 'multiplier' ? 'custom_lot' : 'parent_lot',
+              lotMultiplier: Number(a.lot_multiplier) || 1.0,
+              fixedLot: Number(a.fixed_lot) || 0.1,
+            }));
+        }
+      } catch (dbErr) {
+        console.warn('[Bridge] Supabase lookup error, falling back to registered store:', dbErr);
+      }
+    }
+
+    // Default fallback to registered demo child terminal if no database pairing exists
+    if (assignedChildren.length === 0) {
+      assignedChildren = [
+        {
+          childAccountId: 'acc_child_1',
+          lotMode: 'parent_lot',
+          lotMultiplier: 1.0,
+          fixedLot: 0.1,
+        },
+      ];
+    }
+
+    const queuedInstructions = [];
+
+    for (const child of assignedChildren) {
+      // Server-side calculation of child lots via RiskEngine
+      const sizing = RiskEngine.calculateChildLots({
+        parentSymbol: symbol,
+        parentLots: parentLotsNum,
+        lotSettings: {
+          mode: child.lotMode,
+          customType: child.lotMultiplier !== 1.0 ? 'multiplier' : 'fixed',
+          fixedLot: child.fixedLot,
+          multiplier: child.lotMultiplier,
+          riskPercent: 1.0,
+          maxLotCap: 50.0,
+          minLotClamp: 0.01,
+          maxDrawdownProtectionPercent: 20.0,
+          copyPendingOrders: true,
+          syncSlTp: true,
+          slippageMaxPips: 30,
+        },
+      });
+
+      if (!sizing.valid) {
+        bridgeStore.addSyncLog({
+          eventType: 'RISK_ENGINE_REJECTED',
+          level: 'warn',
+          details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
+          ticket: parentTicketNum,
+        });
+        continue;
+      }
+
+      // Idempotent queueing
+      const idempotencyKey = `${parentTicketNum}_${child.childAccountId}_OPEN`;
+      const { instruction, isDuplicate } = bridgeStore.queueInstruction({
+        idempotencyKey,
+        action: 'OPEN',
+        childAccountId: child.childAccountId,
+        parentAccountId: auth.terminal.accountId,
+        parentTicket: parentTicketNum,
+        symbol: sizing.childSymbol,
+        orderType: type,
+        lots: sizing.childLots,
+        openPrice: openPrice ? Number(openPrice) : undefined,
+        sl: sl ? Number(sl) : undefined,
+        tp: tp ? Number(tp) : undefined,
+        magicNumber: Number(magicNumber) || 888999,
+        comment: `${comment} (M#${parentTicketNum})`,
+      });
+
+      queuedInstructions.push({
+        instructionId: instruction.instructionId,
+        childAccountId: instruction.childAccountId,
+        symbol: instruction.symbol,
+        lots: instruction.lots,
+        isDuplicate,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      parentTicket: parentTicketNum,
+      childInstructionsQueued: queuedInstructions.length,
+      instructions: queuedInstructions,
+    });
+  });
+
+  /**
+   * 4. Parent Trade Close Event (Broadcaster EA hook)
+   * POST /api/v1/bridge/events/trade-close
+   */
+  registerRoute('post', '/api/v1/bridge/events/trade-close', (req: Request, res: Response) => {
+    const auth = authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+    }
+
+    if (auth.terminal.accountRole !== 'parent') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade closures.' });
+    }
+
+    const { ticket } = req.body;
+    if (!ticket) {
+      return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
+    }
+
+    const parentTicketNum = Number(ticket);
+    const mappings = bridgeStore.getTradeMappings().filter((m) => m.parentTradeTicket === parentTicketNum);
+
+    const queuedClose = [];
+    for (const map of mappings) {
+      const idempotencyKey = `${parentTicketNum}_${map.childAccountId}_CLOSE`;
+      const { instruction, isDuplicate } = bridgeStore.queueInstruction({
+        idempotencyKey,
+        action: 'CLOSE',
+        childAccountId: map.childAccountId,
+        parentAccountId: auth.terminal.accountId,
+        parentTicket: parentTicketNum,
+        childTicket: map.childTradeTicket > 0 ? map.childTradeTicket : undefined,
+        symbol: map.symbol,
+        orderType: map.orderType,
+        lots: map.childLots,
+        magicNumber: 888999,
+        comment: `Close Parent #${parentTicketNum}`,
+      });
+
+      queuedClose.push({
+        instructionId: instruction.instructionId,
+        childAccountId: instruction.childAccountId,
+        childTicket: instruction.childTicket,
+        isDuplicate,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      parentTicket: parentTicketNum,
+      closeInstructionsQueued: queuedClose.length,
+      instructions: queuedClose,
+    });
+  });
+
+  /**
+   * 5. Parent Trade Modify Event (Broadcaster EA hook)
+   * POST /api/v1/bridge/events/trade-modify
+   */
+  registerRoute('post', '/api/v1/bridge/events/trade-modify', (req: Request, res: Response) => {
+    const auth = authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+    }
+
+    const { ticket, sl, tp } = req.body;
+    if (!ticket) {
+      return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
+    }
+
+    const parentTicketNum = Number(ticket);
+    const mappings = bridgeStore.getTradeMappings().filter((m) => m.parentTradeTicket === parentTicketNum);
+
+    for (const map of mappings) {
+      const idempotencyKey = `${parentTicketNum}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
+      bridgeStore.queueInstruction({
+        idempotencyKey,
+        action: 'MODIFY',
+        childAccountId: map.childAccountId,
+        parentAccountId: auth.terminal.accountId,
+        parentTicket: parentTicketNum,
+        childTicket: map.childTradeTicket > 0 ? map.childTradeTicket : undefined,
+        symbol: map.symbol,
+        orderType: map.orderType,
+        lots: map.childLots,
+        sl: sl ? Number(sl) : undefined,
+        tp: tp ? Number(tp) : undefined,
+        magicNumber: 888999,
+        comment: `Modify Parent #${parentTicketNum}`,
+      });
+    }
+
+    return res.status(200).json({ success: true, parentTicket: parentTicketNum, modifiedCount: mappings.length });
+  });
+
+  /**
+   * 6. Child Pending Instructions Polling (Receiver EA hook)
+   * GET /api/v1/bridge/instructions/pending
+   */
+  registerRoute('get', '/api/v1/bridge/instructions/pending', (req: Request, res: Response) => {
+    const auth = authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+    }
+
+    if (auth.terminal.accountRole !== 'child') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only Child terminals may poll copy instructions.' });
+    }
+
+    const pending = bridgeStore.pollPendingInstructions(auth.terminal.accountId);
+    return res.status(200).json({
+      success: true,
+      count: pending.length,
+      instructions: pending,
+    });
+  });
+
+  /**
+   * 7. Child Execution Acknowledgment & Broker Results (Receiver EA hook)
+   * POST /api/v1/bridge/instructions/ack
+   */
+  registerRoute('post', '/api/v1/bridge/instructions/ack', (req: Request, res: Response) => {
+    const auth = authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+    }
+
+    if (auth.terminal.accountRole !== 'child') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only Child terminals may acknowledge execution.' });
+    }
+
+    const {
+      instructionId,
+      status,
+      childTicket,
+      fillPrice,
+      brokerErrorCode,
+      brokerErrorMessage,
+      executionLatencyMs,
+    } = req.body;
+
+    if (!instructionId || !status) {
+      return res.status(400).json({ success: false, error: 'Missing instructionId or status' });
+    }
+
+    const ackResult = bridgeStore.acknowledgeInstruction(auth.terminal.accountId, {
+      instructionId,
+      status,
+      childTicket: childTicket ? Number(childTicket) : undefined,
+      fillPrice: fillPrice ? Number(fillPrice) : undefined,
+      brokerErrorCode: brokerErrorCode ? Number(brokerErrorCode) : undefined,
+      brokerErrorMessage,
+      executionLatencyMs: executionLatencyMs ? Number(executionLatencyMs) : undefined,
+    });
+
+    if (!ackResult.success) {
+      return res.status(404).json({ success: false, error: ackResult.error });
+    }
+
+    return res.status(200).json({ success: true, acknowledged: true });
+  });
+
+  /**
+   * 8. Bridge Diagnostic Mappings & Real Logs
+   * GET /api/v1/bridge/mappings
+   */
+  registerRoute('get', '/api/v1/bridge/mappings', (_req: Request, res: Response) => {
+    return res.status(200).json({
+      success: true,
+      tradeMappings: bridgeStore.getTradeMappings(),
+      syncLogs: bridgeStore.getSyncLogs().slice(0, 50),
+    });
+  });
+
+  /**
+   * 9. Download MQL5 Broadcaster Source File
+   * GET /api/mql5/download/broadcaster
+   */
+  registerRoute('get', '/api/mql5/download/broadcaster', (_req: Request, res: Response) => {
+    const filePath = path.resolve(process.cwd(), 'public', 'mql5', 'TradeSync_Broadcaster.mq5');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="TradeSync_Broadcaster.mq5"');
+    res.sendFile(filePath);
+  });
+
+  /**
+   * 10. Download MQL5 Receiver Source File
+   * GET /api/mql5/download/receiver
+   */
+  registerRoute('get', '/api/mql5/download/receiver', (_req: Request, res: Response) => {
+    const filePath = path.resolve(process.cwd(), 'public', 'mql5', 'TradeSync_Receiver.mq5');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="TradeSync_Receiver.mq5"');
+    res.sendFile(filePath);
   });
 
   return app;

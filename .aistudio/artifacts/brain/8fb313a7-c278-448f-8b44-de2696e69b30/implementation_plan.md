@@ -1,181 +1,102 @@
-# Implementation Plan - Phase 1: Supabase Backend Integration & Role-Based Security
+# TradeSync MT5: Option A (MQL5 Expert Advisor Bridge) Implementation Plan
 
-Integrate Supabase for persistent cloud data storage and authentication while securing the platform with strict database-enforced Row-Level Security (RLS), preventing unauthorized privilege escalation, and preserving all existing local demo simulator capabilities.
-
----
-
-## 1. Architecture & Security Foundation
-
-### A. Environment Configuration & Connection
-- **Environment Variables**:
-  - `VITE_SUPABASE_URL`: Public Supabase Project URL
-  - `VITE_SUPABASE_ANON_KEY`: Public Client Anonymous Key
-  - `SUPABASE_SERVICE_ROLE_KEY`: Server-side only (Express API proxy), never exposed to client bundles
-- **Dual-Mode Fallback Architecture**:
-  - If `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are configured, the app runs in **Cloud Mode** (real Supabase Auth & PostgreSQL).
-  - If keys are missing or invalid, the app gracefully falls back to **Local Demo Mode** (existing `localStorage` and simulated accounts/trades), displaying an informative connection banner so functionality is never broken.
-
-### B. Strict Role-Based Security & Privilege Separation
-1. **Public Signup Security (Zero Self-Assigned Admin)**:
-   - Public registration (`auth.signUp`) is strictly restricted to assigning the `'trader'` role (or an unprivileged default).
-   - A PostgreSQL trigger on `auth.users` handles profile creation (`handle_new_user()`). Any role specified in client metadata during signup is discarded or overridden to `'trader'`.
-   - The `role` column in the `public.profiles` table is strictly protected: users cannot update their own `role` under any circumstances.
-2. **Server-Side Admin Provisioning & Promotion**:
-   - Admin accounts can **never** be created through public registration.
-   - Admin promotion is only possible through:
-     - An authenticated server-side endpoint (`/api/admin/promote-user`) that verifies the caller is already an authorized Admin and uses the server-side `SUPABASE_SERVICE_ROLE_KEY`.
-     - Direct administrator execution via the Supabase SQL Editor / CLI.
-3. **Database-Level Row-Level Security (RLS) Enforcement**:
-   - Permissions are enforced directly inside PostgreSQL via RLS policies on all tables, never relying solely on frontend UI guards.
-   - **`public.profiles`**:
-     - *SELECT*: Users can view their own profile; Mentors can view profiles of traders assigned to them; Admins can view all profiles.
-     - *UPDATE*: Users can only update non-privilege fields (e.g., `full_name`, `avatar_url`, preferences). Users cannot modify their `role`.
-   - **`public.mentor_assignments`**:
-     - *SELECT*: Admins view all; Mentors view their assigned traders; Traders view their assigned mentor.
-     - *INSERT / UPDATE / DELETE*: Restricted strictly to Admins (or authorized server-side service role). Mentors and traders cannot alter mentorship pairings.
-   - **`public.mt5_accounts`**:
-     - *SELECT*: Traders can view their own accounts (`user_id = auth.uid()`); Mentors can view accounts belonging to their assigned traders (read-only); Admins can view all.
-     - *INSERT / UPDATE / DELETE*: Traders can manage their own accounts; Mentors have read-only access (cannot modify trader accounts).
-   - **`public.trades`**:
-     - *SELECT*: Traders view their own trades (`user_id = auth.uid()`); Mentors view trades of their assigned traders; Admins view all.
-     - *INSERT / UPDATE*: Only the owning Trader can insert or update trades for their account. Mentors have strictly read-only access to review trade logs and cannot execute or delete trades.
-   - **`public.trade_feedback` & `public.mentor_reviews`**:
-     - *INSERT*: Assigned Mentors and Admins can post feedback on trades belonging to assigned traders.
-     - *SELECT*: Visible to the trade owner, the author mentor, and admins.
-   - **`public.risk_rules` & `public.trading_plans`**:
-     - *SELECT*: Traders view their own; assigned Mentors view assigned traders' rules; Admins view all.
-     - *INSERT / UPDATE*: Traders manage their personal rules; Mentors can leave recommendations; Admins can enforce firm-wide risk guardrails.
-
-### C. MT5 Credential & Secret Protection
-- Real MT5 passwords are never stored in plaintext.
-- Read-only investor passwords or hashed/masked tokens are used where applicable.
-- The Supabase client service-role key is never exposed to the frontend bundle; all privileged operations run through the backend server.
+## Overview
+TradeSync MT5 is transitioning from simulated client-side trading to real-time MT5 trade copying using **Option A: The MQL5 Expert Advisor Bridge Architecture**. This document details the Phase 1 backend implementation, deployment architecture, technical blockers, security enforcement, and the step-by-step Phase 3 demo verification procedure.
 
 ---
 
-## 2. Database Schema (PostgreSQL via Supabase)
+## 1. Architectural Foundation & Deployment Blockers
 
-1. **`profiles`**
-   - `id`: UUID (Primary Key, references `auth.users(id)` on delete cascade)
-   - `email`: TEXT NOT NULL
-   - `full_name`: TEXT
-   - `avatar_url`: TEXT
-   - `role`: TEXT NOT NULL DEFAULT 'trader' CHECK (role IN ('admin', 'mentor', 'trader'))
-   - `status`: TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'pending'))
-   - `created_at`: TIMESTAMPTZ DEFAULT now()
-   - `updated_at`: TIMESTAMPTZ DEFAULT now()
+### A. Deployment Architecture
+- **Web & API Host**: Express 4 mounted with Vite middleware in local dev (`tsx server.ts`) and serverless handler (`api/index.ts`).
+- **Bridge API Router**: `/api/v1/bridge/*` (dual-registered with and without `/api` prefix for seamless Vercel and Node.js reverse proxy compatibility).
+- **Database & Persistence**: Supabase PostgreSQL (`profiles`, `mentor_assignments`, `mt5_accounts`, `trades`) with server-authoritative lease locking and in-memory queueing for millisecond-latency order routing.
 
-2. **`mentor_assignments`**
-   - `id`: UUID PRIMARY KEY DEFAULT gen_random_uuid()
-   - `mentor_id`: UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
-   - `trader_id`: UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
-   - `assigned_at`: TIMESTAMPTZ DEFAULT now()
-   - `status`: TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive'))
-   - UNIQUE (mentor_id, trader_id)
-
-3. **`mt5_accounts`**
-   - `id`: UUID PRIMARY KEY DEFAULT gen_random_uuid()
-   - `user_id`: UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
-   - `account_number`: TEXT NOT NULL
-   - `broker_server`: TEXT NOT NULL
-   - `broker_name`: TEXT NOT NULL
-   - `account_type`: TEXT NOT NULL CHECK (account_type IN ('demo', 'live'))
-   - `balance`: NUMERIC(15, 2) NOT NULL DEFAULT 0.00
-   - `equity`: NUMERIC(15, 2) NOT NULL DEFAULT 0.00
-   - `margin`: NUMERIC(15, 2) NOT NULL DEFAULT 0.00
-   - `free_margin`: NUMERIC(15, 2) NOT NULL DEFAULT 0.00
-   - `currency`: TEXT NOT NULL DEFAULT 'USD'
-   - `leverage`: INTEGER NOT NULL DEFAULT 100
-   - `status`: TEXT NOT NULL DEFAULT 'connected'
-   - `last_sync`: TIMESTAMPTZ DEFAULT now()
-
-4. **`trades`**
-   - `id`: UUID PRIMARY KEY DEFAULT gen_random_uuid()
-   - `account_id`: UUID NOT NULL REFERENCES mt5_accounts(id) ON DELETE CASCADE
-   - `user_id`: UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
-   - `ticket`: TEXT NOT NULL
-   - `symbol`: TEXT NOT NULL
-   - `type`: TEXT NOT NULL CHECK (type IN ('BUY', 'SELL'))
-   - `volume`: NUMERIC(10, 2) NOT NULL
-   - `open_price`: NUMERIC(15, 5) NOT NULL
-   - `close_price`: NUMERIC(15, 5)
-   - `sl`: NUMERIC(15, 5)
-   - `tp`: NUMERIC(15, 5)
-   - `profit`: NUMERIC(15, 2) DEFAULT 0.00
-   - `pips`: NUMERIC(10, 1) DEFAULT 0.0
-   - `status`: TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED', 'PENDING'))
-   - `open_time`: TIMESTAMPTZ NOT NULL DEFAULT now()
-   - `close_time`: TIMESTAMPTZ
-   - `commission`: NUMERIC(10, 2) DEFAULT 0.00
-   - `swap`: NUMERIC(10, 2) DEFAULT 0.00
-   - `notes`: TEXT
-
-5. **`trade_feedback`**
-   - `id`: UUID PRIMARY KEY DEFAULT gen_random_uuid()
-   - `trade_id`: UUID NOT NULL REFERENCES trades(id) ON DELETE CASCADE
-   - `author_id`: UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
-   - `content`: TEXT NOT NULL
-   - `grade`: TEXT CHECK (grade IN ('A+', 'A', 'B', 'C', 'D', 'F'))
-   - `created_at`: TIMESTAMPTZ DEFAULT now()
+### B. Deployment & Execution Blockers Identified
+1. **MT5 WebRequest URL Allowlist Requirement**:
+   - *Blocker*: MetaTrader 5 blocks all outbound HTTP/HTTPS requests by default with MQL5 error `4014`.
+   - *Resolution*: Before running the EAs, the user must navigate in MetaTrader 5 to `Tools → Options → Expert Advisors`, enable **"Allow WebRequest for listed URL"**, and add the backend domain (or `http://localhost:3000` / public HTTPS URL).
+2. **Indicator vs. Expert Advisor Restrictions**:
+   - *Blocker*: MQL5 `WebRequest()` cannot be executed inside custom indicators or services without DLL imports.
+   - *Resolution*: EAs are compiled strictly as Expert Advisors (`.mq5`) attached to a single live chart per terminal.
+3. **Broker Symbol Normalization (Prefixes / Suffixes)**:
+   - *Blocker*: Parent broker may list `EURUSD` while child broker lists `EURUSD.r` or `EURUSD_i`.
+   - *Resolution*: Pure server-side `RiskEngine.adjustSymbol()` applies configured `symbolPrefix` and `symbolSuffix` dynamically per child link.
+4. **Broker Execution Limits**:
+   - *Blocker*: Different brokers enforce different `SYMBOL_VOLUME_MIN`, `SYMBOL_VOLUME_MAX`, and `SYMBOL_VOLUME_STEP`.
+   - *Resolution*: Server-side `RiskEngine.calculateChildLots()` clamps and rounds to step, while `TradeSync_Receiver.mq5` verifies against broker specifications before issuing `OrderSend()`.
+5. **Stateful Polling across Ephemeral Serverless Instances**:
+   - *Blocker*: Pure in-memory queues on serverless environments (Vercel) lose state between cold starts.
+   - *Resolution*: Terminal tokens and pairings resolve to PostgreSQL `mentor_assignments`, and instructions carry cryptographic idempotency keys (`${parentTicket}_${childAccountId}_${action}`).
 
 ---
 
-## 3. Implementation Steps
+## 2. Phase 1 Implementation Summary (Completed)
 
-### Step 1: Install Dependencies
-- Install `@supabase/supabase-js`.
-- Verify TypeScript types build cleanly.
-
-### Step 2: Supabase Client & Context Implementation
-- Create `src/lib/supabase.ts` with singleton client and configuration helpers.
-- Create `src/contexts/AuthContext.tsx`:
-  - Manage session state, profile data, active role, and authentication status.
-  - Implement `signUp`, `signIn`, `signOut`, and password reset.
-  - In `signUp`, strictly constrain registration to the Trader role.
-  - Expose fallback demo auth when Supabase is not configured, maintaining seamless demo access.
-
-### Step 3: Database Migration Script & Setup Documentation
-- Provide a SQL migration file (`supabase/migrations/01_init_schema.sql` and `supabase/schema.sql`) containing:
-  - Table definitions and indices.
-  - Function `handle_new_user()` executing on `AFTER INSERT ON auth.users` (strictly setting role = 'trader').
-  - Trigger preventing users from self-updating their `role` column in `profiles`.
-  - Comprehensive RLS policies for `profiles`, `mentor_assignments`, `mt5_accounts`, `trades`, and `trade_feedback`.
-  - Helper functions `is_admin()`, `is_mentor_of(trader_id)`.
-
-### Step 4: Server-Side Secure Admin Promotion Endpoint
-- In `server.ts`, create a protected endpoint:
-  - `POST /api/admin/promote-user`:
-    - Validates caller's Bearer JWT using Supabase.
-    - Confirms caller has `role = 'admin'`.
-    - Updates target user's role to `'admin'` or `'mentor'` using the server-side `SUPABASE_SERVICE_ROLE_KEY`.
-
-### Step 5: Data Layer Transition & Dual-Mode Services
-- Create modular data services (`src/services/accountService.ts`, `src/services/tradeService.ts`, `src/services/mentorService.ts`):
-  - Check whether active session is Cloud Mode (Supabase) or Demo Mode.
-  - In Cloud Mode: execute Supabase queries respecting RLS.
-  - In Demo Mode: read/write to current reactive in-memory / `localStorage` stores.
-- Provide a one-click "Migrate Local Data to Cloud" utility so users with existing local demo data can sync their portfolio to their new Supabase account after signing up.
-
-### Step 6: UI Enhancements & Connection Status
-- Add an intuitive Auth Modal (Sign In / Sign Up / Forgot Password / Demo Switcher).
-- Display a clean status pill in the header showing connection mode (e.g., `Supabase Connected` vs `Local Demo Mode`).
-- Update Role Switcher so it dynamically respects real logged-in permissions (hiding Admin/Mentor switches when in Cloud Mode unless the user possesses those real roles).
+1. **Server-Side Risk & Lot Sizing Engine (`src/server/riskEngine.ts`)**:
+   - Implements lot modes: `parent_lot`, `fixed`, `multiplier`, `equity_ratio`, and `risk_percent`.
+   - Implements drawdown protection guard (`maxDrawdownProtectionPercent`).
+   - Implements symbol prefix/suffix normalization.
+   - Clamps to broker step size and min/max limits.
+2. **Terminal Authentication & Idempotent Bridge Store (`src/server/bridgeStore.ts`)**:
+   - Cryptographic terminal token generation (`ts_parent_...`, `ts_child_...`) with SHA-256 token hashing.
+   - Server-side account resolution: never trusts client-supplied account numbers without verified cryptographic token match.
+   - Idempotency key tracking: prevents duplicate execution on network retransmissions.
+   - Leased polling queue: handles dropped connections and retries.
+   - Real-time audit and broker error code logging.
+3. **Authenticated Bridge Endpoints (`src/server/apiApp.ts`)**:
+   - `GET /api/v1/bridge/status`: Health check & terminal diagnostics.
+   - `POST /api/v1/bridge/terminals/token`: Secure token provisioning.
+   - `POST /api/v1/bridge/events/trade-open`: Parent Broadcaster event ingest -> queues child instructions.
+   - `POST /api/v1/bridge/events/trade-close`: Parent Broadcaster close ingest -> queues child close instructions with mapped tickets.
+   - `POST /api/v1/bridge/events/trade-modify`: Parent Broadcaster SL/TP modify ingest.
+   - `GET /api/v1/bridge/instructions/pending`: Child Receiver polling endpoint.
+   - `POST /api/v1/bridge/instructions/ack`: Child Receiver execution acknowledgement (fill price, broker retcode, latency).
+   - `GET /api/v1/bridge/mappings`: Diagnostic inspect of active trade mappings and sync logs.
+   - `GET /api/mql5/download/broadcaster`: Direct download for `TradeSync_Broadcaster.mq5`.
+   - `GET /api/mql5/download/receiver`: Direct download for `TradeSync_Receiver.mq5`.
+4. **MQL5 Source Files Created**:
+   - `/public/mql5/TradeSync_Broadcaster.mq5`: Attached to parent chart; monitors `OnTradeTransaction`; dispatches authenticated HTTP POST events.
+   - `/public/mql5/TradeSync_Receiver.mq5`: Attached to child chart; millisecond timer polls `/api/v1/bridge/instructions/pending`; executes via `CTrade::Buy/Sell/PositionClose`; posts ACKs back.
+5. **Dashboard Integration**:
+   - Added MQL5 Bridge Download & Terminal Token Management Card in `ConnectionsView.tsx`.
 
 ---
 
-## 4. Scope Exclusions (Deferred to Future Phases)
-- **MetaApi Cloud Trade Copier / Webhook Execution**: Deferred to Phase 2. Phase 1 focuses exclusively on data persistence, real authentication, and RLS security.
-- **Automated Live MT5 Terminal Heartbeat**: Deferred to Phase 2.
+## 3. Phase 3 Safe Demo Testing Guide (Step-by-Step)
 
----
+> **SAFETY MANDATE**: Test exclusively with demo broker accounts (e.g. MetaQuotes-Demo). Never attach EAs to live real-money accounts during testing.
 
-## 5. Verification & Testing Checklist
-- [ ] **Build Validation**: Execute `npm run build` / `compile_applet` to confirm 0 compilation errors.
-- [ ] **Public Signup Security**: Test public registration with manipulated metadata; verify database trigger assigns `'trader'` role and blocks self-assignment of `'admin'`.
-- [ ] **Role-Level Security Verification**:
-  - Trader cannot read another trader's trades or MT5 accounts.
-  - Trader cannot modify their own `role` or assign themselves a mentor.
-  - Mentor can view assigned traders' trades and accounts, but cannot alter trades.
-  - Mentor cannot view unassigned traders.
-  - Admin has full visibility across all traders and mentor assignments.
-- [ ] **Demo Mode Resilience**: Unset Supabase keys and verify existing mock trading, charts, and trade execution operate normally without console errors.
+### Step 1: MT5 WebRequest Configuration
+1. Open both Parent MT5 and Child MT5 terminals.
+2. Go to **Tools → Options → Expert Advisors**.
+3. Check **"Allow Algo Trading"** and **"Allow WebRequest for listed URL"**.
+4. Add: `http://localhost:3000` (or your public TradeSync bridge domain).
+5. Click **OK**.
+
+### Step 2: EA Compilation & Installation
+1. Download `TradeSync_Broadcaster.mq5` from `/api/mql5/download/broadcaster` (or click button in Admin Connections tab).
+2. Download `TradeSync_Receiver.mq5` from `/api/mql5/download/receiver`.
+3. In MetaTrader 5, press `F4` to open **MetaEditor**.
+4. Save the files into `MQL5\Experts\TradeSync\`.
+5. Press `F7` (Compile) on each file. Verify **0 errors, 0 warnings**.
+
+### Step 3: Terminal Token Setup
+1. In TradeSync Admin Panel → **Connections**, locate the Parent Demo Account (`#88991100`) and Child Demo Account (`#22334455`).
+2. Copy the Parent Terminal Token (`ts_parent_demo_token_889911`) and Child Terminal Token (`ts_child_demo_token_223344`).
+3. Attach `TradeSync_Broadcaster` to any chart on the Parent MT5 terminal. Set `InpTerminalToken = ts_parent_demo_token_889911` and `InpServerUrl = http://localhost:3000`.
+4. Attach `TradeSync_Receiver` to any chart on the Child MT5 terminal. Set `InpTerminalToken = ts_child_demo_token_223344` and `InpServerUrl = http://localhost:3000`.
+
+### Step 4: Verification Sequence
+1. **Open Market Order on Parent**:
+   - In Parent MT5, open a `0.10 lot BUY EURUSD` order.
+   - Check Parent MT5 Experts tab: `[TradeSync Broadcaster] Parent OPEN detected`.
+   - Check Child MT5 Experts tab: `[TradeSync Receiver] EXECUTED: BUY EURUSD on child ticket`.
+   - Check TradeSync Dashboard: Trade Mapping shows `EXECUTED` with exact millisecond latency.
+2. **Modify SL/TP on Parent**:
+   - Adjust Stop Loss on the Parent trade.
+   - Verify Child trade SL updates automatically.
+3. **Close Parent Position**:
+   - Close the trade on Parent MT5.
+   - Check Child MT5 Experts tab: `[TradeSync Receiver] CLOSED child position`.
+   - Verify trade status changes to `CLOSED` on TradeSync dashboard.
