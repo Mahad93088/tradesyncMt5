@@ -148,6 +148,7 @@ export interface Trade {
 }
 
 export type MappingExecutionStatus =
+  | 'PENDING'
   | 'EXECUTED'
   | 'FAILED'
   | 'REJECTED_MARGIN'
