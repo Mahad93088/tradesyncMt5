@@ -87,11 +87,13 @@ export function createApiApp() {
 
   const supabaseUrl = normalizeSupabaseUrl(effectiveServerUrl);
   const publishableKey = effectivePublishableKey;
-  const serviceRoleKey = cleanEnvValue(
+  const rawServiceRoleKey = cleanEnvValue(
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
     process.env.SUPABASE_SERVICE_KEY ||
     process.env.SERVICE_ROLE_KEY
   );
+  const serviceRoleKey = !isPlaceholderValue(rawServiceRoleKey) ? rawServiceRoleKey : '';
 
   // In-memory diagnostic record of the last GET /api/admin/users evaluation
   let lastAdminUsersDiagnostic: {
