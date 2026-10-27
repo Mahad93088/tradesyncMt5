@@ -10,7 +10,8 @@
 -- 6. Canonical Supabase service_role & admin RLS security model (avoids flawed current_user checks).
 -- 7. Safe to rerun: IF NOT EXISTS, OR REPLACE, DROP POLICY IF EXISTS, and non-destructive DDL.
 -- 8. Restricted grants: PostgREST anonymous visitors cannot access or manipulate bridge data.
--- 9. Complete backward-compatibility assertions for pre-existing tables and columns.
+-- 9. Comprehensive backward-compatibility assertions for pre-existing tables and columns.
+-- 10. Complete status constraint supporting all broker execution codes (REJECTED_MARGIN, etc.).
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
@@ -55,21 +56,28 @@ CREATE TABLE IF NOT EXISTS public.bridge_instructions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- Backward-compatibility column assertions if table pre-existed
+-- Comprehensive backward-compatibility assertions if table pre-existed
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS action TEXT DEFAULT 'OPEN';
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS child_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS parent_ticket BIGINT;
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS child_ticket BIGINT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS symbol TEXT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS order_type TEXT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS lots NUMERIC(10, 2);
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS open_price NUMERIC(15, 5);
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS sl NUMERIC(15, 5);
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS tp NUMERIC(15, 5);
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS magic_number BIGINT DEFAULT 888999;
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS comment TEXT;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'QUEUED';
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
 ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+ALTER TABLE public.bridge_instructions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 
 CREATE INDEX IF NOT EXISTS idx_bridge_instructions_child_status 
     ON public.bridge_instructions(child_account_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_bridge_instructions_idempotency 
-    ON public.bridge_instructions(idempotency_key);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bridge_instructions_idempotency_unique 
     ON public.bridge_instructions(idempotency_key);
@@ -93,7 +101,7 @@ CREATE TABLE IF NOT EXISTS public.trade_mappings (
     order_type TEXT NOT NULL,
     parent_lots NUMERIC(10, 2) NOT NULL,
     child_lots NUMERIC(10, 2) NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'EXECUTED', 'FAILED', 'REJECTED', 'CLOSED')),
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'EXECUTED', 'FAILED', 'REJECTED', 'REJECTED_MARGIN', 'REJECTED_OFF_QUOTES', 'SLIPPAGE_EXCEEDED', 'RETRIED', 'SKIPPED_LOT_LIMIT', 'CLOSED')),
     latency_ms INT DEFAULT 0,
     error_message TEXT,
     retry_count INT NOT NULL DEFAULT 0,
@@ -102,14 +110,27 @@ CREATE TABLE IF NOT EXISTS public.trade_mappings (
     UNIQUE(parent_trade_ticket, child_account_id)
 );
 
--- Backward-compatibility column assertions if table pre-existed
+-- Comprehensive backward-compatibility assertions if table pre-existed
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS parent_trade_ticket BIGINT;
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS child_trade_ticket BIGINT;
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS child_account_id UUID REFERENCES public.mt5_accounts(id) ON DELETE CASCADE;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS symbol TEXT;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS order_type TEXT;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS parent_lots NUMERIC(10, 2);
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS child_lots NUMERIC(10, 2);
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS latency_ms INT DEFAULT 0;
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS error_message TEXT;
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS open_time TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 ALTER TABLE public.trade_mappings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
+
+-- Update status constraint to ensure compatibility with all broker execution codes
+ALTER TABLE public.trade_mappings DROP CONSTRAINT IF EXISTS trade_mappings_status_check;
+ALTER TABLE public.trade_mappings 
+    ADD CONSTRAINT trade_mappings_status_check 
+    CHECK (status IN ('PENDING', 'EXECUTED', 'FAILED', 'REJECTED', 'REJECTED_MARGIN', 'REJECTED_OFF_QUOTES', 'SLIPPAGE_EXCEEDED', 'RETRIED', 'SKIPPED_LOT_LIMIT', 'CLOSED'));
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_mappings_parent_child_unique 
     ON public.trade_mappings(parent_trade_ticket, child_account_id);
@@ -136,9 +157,13 @@ CREATE TABLE IF NOT EXISTS public.bridge_sync_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- Backward-compatibility column assertions if table pre-existed
+-- Comprehensive backward-compatibility assertions if table pre-existed
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS event_type TEXT;
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS level TEXT DEFAULT 'info';
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS details TEXT;
 ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS ticket BIGINT;
 ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS latency_ms INT;
+ALTER TABLE public.bridge_sync_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 
 CREATE INDEX IF NOT EXISTS idx_bridge_sync_logs_created 
     ON public.bridge_sync_logs(created_at DESC);
