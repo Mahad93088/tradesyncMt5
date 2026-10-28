@@ -20,7 +20,8 @@ import {
   Plus,
   Sparkles,
   AlertCircle,
-  X
+  X,
+  Key
 } from 'lucide-react';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -28,6 +29,7 @@ import { ParentAccountItem, ChildAccountItem, mt5AdminService } from '../../serv
 import { AccountDetailsModal } from './AccountDetailsModal';
 import { AssignParentModal } from './AssignParentModal';
 import { CreateDemoAccountModal } from './CreateDemoAccountModal';
+import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
 
@@ -49,6 +51,7 @@ export const ChildAccountsView: React.FC = () => {
   const [selectedChildForAssign, setSelectedChildForAssign] = useState<ChildAccountItem | null>(null);
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState(false);
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
 
   // Toast & notification state
   const [successToast, setSuccessToast] = useState<string | null>(null);
@@ -233,11 +236,19 @@ export const ChildAccountsView: React.FC = () => {
           </button>
 
           <button
+            onClick={() => setIsRegisterModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Key className="h-3.5 w-3.5" />
+            <span>Register Child (XM / Custom)</span>
+          </button>
+
+          <button
             onClick={() => setIsCreateDemoModalOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+            className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-300 border border-slate-700 shadow-sm transition-colors"
           >
             <Plus className="h-3.5 w-3.5" />
-            <span>New Demo Child</span>
+            <span>Sandbox Demo</span>
           </button>
 
           <button
@@ -643,6 +654,16 @@ export const ChildAccountsView: React.FC = () => {
       <CreateDemoAccountModal
         isOpen={isCreateDemoModalOpen}
         onClose={() => setIsCreateDemoModalOpen(false)}
+        defaultRole="child"
+        onSuccess={async () => {
+          await fetchAccounts();
+        }}
+      />
+
+      {/* Register MT5 Child Account Modal */}
+      <RegisterMT5AccountModal
+        isOpen={isRegisterModalOpen}
+        onClose={() => setIsRegisterModalOpen(false)}
         defaultRole="child"
         onSuccess={async () => {
           await fetchAccounts();

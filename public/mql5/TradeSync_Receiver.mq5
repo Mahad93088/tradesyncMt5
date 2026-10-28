@@ -14,10 +14,10 @@
 
 //--- Input Parameters
 input group "=== TradeSync Bridge Configuration ==="
-input string   InpServerUrl         = "http://localhost:3000";         // TradeSync Bridge Base URL (no trailing slash)
-input string   InpTerminalToken     = "ts_child_demo_token_223344";    // Child Terminal Secret Token (from TradeSync)
-input int      InpPollingIntervalMs = 500;                             // Polling interval in milliseconds
-input int      InpRequestTimeoutMs  = 3000;                            // WebRequest timeout (ms)
+input string   InpServerUrl         = "https://your-tradesync-app.vercel.app"; // TradeSync Bridge Base URL (no trailing slash)
+input string   InpTerminalToken     = "PASTE_CHILD_TERMINAL_TOKEN_HERE";       // Child Terminal Secret Token (from TradeSync Dashboard)
+input int      InpPollingIntervalMs = 500;                                     // Polling interval in milliseconds
+input int      InpRequestTimeoutMs  = 3000;                                    // WebRequest timeout (ms)
 
 input group "=== Order Execution & Safety ==="
 input ulong    InpMagicNumber       = 888999;                          // Magic number for copied child trades
@@ -34,11 +34,48 @@ bool     g_IsPollInFlight = false;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   PrintFormat("[TradeSync Receiver] Initializing on child account %I64u (%s)...",
+   PrintFormat("[TradeSync Receiver] Initializing on child account %I64u (%s) on server '%s'...",
                AccountInfoInteger(ACCOUNT_LOGIN),
-               AccountInfoString(ACCOUNT_COMPANY));
+               AccountInfoString(ACCOUNT_COMPANY),
+               AccountInfoString(ACCOUNT_SERVER));
 
-   // Validate Algo Trading button state
+   // 1. Strict Server URL Validation
+   string cleanUrl = InpServerUrl;
+   StringTrimLeft(cleanUrl);
+   StringTrimRight(cleanUrl);
+   if(StringLen(cleanUrl) == 0 || cleanUrl == "https://your-tradesync-app.vercel.app" || cleanUrl == "http://localhost:3000")
+   {
+      Print("==========================================================================");
+      Print("[TradeSync Receiver] CONFIGURATION ERROR: Invalid InpServerUrl!");
+      Print("[TradeSync Receiver] Please set InpServerUrl to your deployed TradeSync domain (e.g. https://your-app.vercel.app).");
+      Print("[TradeSync Receiver] Also verify Tools -> Options -> Expert Advisors -> 'Allow WebRequest for listed URL' includes this URL.");
+      Print("==========================================================================");
+      if(cleanUrl == "https://your-tradesync-app.vercel.app" || StringLen(cleanUrl) == 0)
+      {
+         return(INIT_PARAMETERS_INCORRECT);
+      }
+   }
+
+   // 2. Strict Terminal Secret Token Validation
+   string cleanToken = InpTerminalToken;
+   StringTrimLeft(cleanToken);
+   StringTrimRight(cleanToken);
+   if(StringLen(cleanToken) == 0 ||
+      cleanToken == "PASTE_CHILD_TERMINAL_TOKEN_HERE" ||
+      cleanToken == "ts_child_demo_token_223344")
+   {
+      Print("==========================================================================");
+      Print("[TradeSync Receiver] CONFIGURATION ERROR: Missing or placeholder Terminal Token!");
+      Print("[TradeSync Receiver] 1. Open your TradeSync MT5 Admin Dashboard.");
+      Print("[TradeSync Receiver] 2. Navigate to 'MT5 Connections' or 'Child Accounts'.");
+      Print("[TradeSync Receiver] 3. Register your Child account (Broker: XM, Server: xmglobal_mt5 2, Login: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ").");
+      Print("[TradeSync Receiver] 4. Copy the generated secret token (starts with ts_child_...).");
+      Print("[TradeSync Receiver] 5. Paste it into the InpTerminalToken input parameter of this EA.");
+      Print("==========================================================================");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   // 3. Validate Algo Trading button state
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
    {
       Print("[TradeSync Receiver] CRITICAL: Algo Trading is disabled in MT5 terminal. Orders will fail until Algo Trading is enabled!");

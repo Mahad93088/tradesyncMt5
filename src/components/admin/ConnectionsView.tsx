@@ -14,11 +14,15 @@ import {
   Download,
   Key,
   Copy,
-  Check
+  Check,
+  Plus,
+  ShieldCheck,
+  X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
 import { MT5Account } from '../../types';
 
 export const ConnectionsView: React.FC = () => {
@@ -32,12 +36,20 @@ export const ConnectionsView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterState, setFilterState] = useState<string>('all');
   const [filterRole, setFilterRole] = useState<string>('all');
-  const [generatedTokens, setGeneratedTokens] = useState<Record<string, string>>({
-    acc_parent_1: 'ts_parent_demo_token_889911',
-    acc_child_1: 'ts_child_demo_token_223344',
-  });
+  const [generatedTokens, setGeneratedTokens] = useState<Record<string, string>>({});
   const [copiedTokenAccId, setCopiedTokenAccId] = useState<string | null>(null);
   const [isGeneratingToken, setIsGeneratingToken] = useState<string | null>(null);
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
+
+  // One-time Token presentation modal state (e.g. on token generation/rotation)
+  const [tokenModalData, setTokenModalData] = useState<{
+    account: MT5Account;
+    terminalToken: string;
+  } | null>(null);
+  const [copiedModalToken, setCopiedModalToken] = useState(false);
+  const [copiedModalUrl, setCopiedModalUrl] = useState(false);
+
+  const serverOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://tradesync-mt5.vercel.app';
 
   const handleGenerateToken = async (account: MT5Account) => {
     setIsGeneratingToken(account.id);
@@ -56,6 +68,10 @@ export const ConnectionsView: React.FC = () => {
       const data = await res.json();
       if (data.success && data.terminalToken) {
         setGeneratedTokens((prev) => ({ ...prev, [account.id]: data.terminalToken }));
+        setTokenModalData({
+          account,
+          terminalToken: data.terminalToken,
+        });
       }
     } catch (err) {
       console.error('Failed to generate token:', err);
@@ -99,15 +115,23 @@ export const ConnectionsView: React.FC = () => {
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-            Demo Account Connection Records
+            MT5 Terminal Connections & Bridge Status
             <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
               {mt5Accounts.length} Total
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Audit connection logs, inspect terminal status records, and review error diagnostics.
+            Audit connection logs, inspect terminal status records, and generate authentication tokens.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => setIsRegisterModalOpen(true)}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs shadow-lg shadow-cyan-950/50 transition-all shrink-0"
+        >
+          <Plus className="h-4 w-4" />
+          <span>Register MT5 Account</span>
+        </button>
       </div>
 
       {/* Safety Notice */}
@@ -115,7 +139,7 @@ export const ConnectionsView: React.FC = () => {
         <div className="flex items-center gap-2">
           <Info className="h-4 w-4 text-sky-400 shrink-0" />
           <span>
-            <strong>Demo Bridge Safety Rule:</strong> All dashboard metrics represent demo simulator data until actual MT5 Expert Advisors are attached and verified on demo broker accounts.
+            <strong>Connection Lifecycle:</strong> Newly registered accounts start as <em>Awaiting EA Connection</em>. The moment your MT5 Expert Advisor initializes and sends an authenticated WebRequest, the status automatically flips to <em>Connected (EA Active)</em>.
           </span>
         </div>
         <span className="font-mono text-[10px] text-cyan-400 border border-cyan-800/80 bg-cyan-950/60 px-2 py-0.5 rounded">Option A Active</span>
@@ -143,7 +167,7 @@ export const ConnectionsView: React.FC = () => {
             <a
               href="/api/mql5/download/broadcaster"
               download="TradeSync_Broadcaster.mq5"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium text-xs shadow-md transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs shadow-md transition-all"
             >
               <Download className="h-3.5 w-3.5" />
               Broadcaster (Parent EA)
@@ -167,7 +191,7 @@ export const ConnectionsView: React.FC = () => {
             </span>
             <p className="text-slate-400 text-[11px] leading-relaxed">
               In your MetaTrader 5 terminal, navigate to: <code className="text-cyan-300 bg-slate-900 px-1 py-0.5 rounded font-mono">Tools → Options → Expert Advisors</code>.
-              Check <strong>"Allow WebRequest for listed URL"</strong> and add your server domain or <code className="text-cyan-300 font-mono">http://localhost:3000</code>.
+              Check <strong>"Allow WebRequest for listed URL"</strong> and add: <code className="text-cyan-300 font-mono bg-slate-900 px-1 py-0.5 rounded">{serverOrigin}</code>.
             </p>
           </div>
 
@@ -176,7 +200,7 @@ export const ConnectionsView: React.FC = () => {
               <Key className="h-3.5 w-3.5 text-amber-400" /> Terminal Authentication Tokens
             </span>
             <p className="text-slate-400 text-[11px] leading-relaxed">
-              Each EA requires its unique secret terminal token. The server validates tokens cryptographically and rejects unverified account requests.
+              Each EA requires its unique secret terminal token. The server validates tokens cryptographically (SHA-256) and rejects unverified account requests.
             </p>
           </div>
         </div>
@@ -185,54 +209,69 @@ export const ConnectionsView: React.FC = () => {
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden">
           <div className="px-3 py-2 bg-slate-900/80 border-b border-slate-800 text-[11px] font-semibold text-slate-300 flex items-center justify-between">
             <span>Registered Account Terminal Tokens</span>
-            <span className="text-[10px] text-slate-500 font-mono">Server-Authoritative Hashing</span>
+            <span className="text-[10px] text-slate-500 font-mono">Server-Authoritative Hashing (SHA-256)</span>
           </div>
-          <div className="divide-y divide-slate-800/60">
-            {mt5Accounts.slice(0, 3).map((acc) => {
-              const token = generatedTokens[acc.id];
-              const isCopied = copiedTokenAccId === acc.id;
-              return (
-                <div key={acc.id} className="p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
-                      acc.accountRole === 'parent' ? 'bg-amber-950 text-amber-300 border border-amber-800/80' : 'bg-sky-950 text-sky-300 border border-sky-800/80'
-                    }`}>
-                      {acc.accountRole}
-                    </span>
-                    <span className="font-mono text-slate-200 font-medium">#{acc.accountNumber}</span>
-                    <span className="text-slate-500 text-[11px]">({acc.broker})</span>
-                  </div>
+          <div className="divide-y divide-slate-800/60 max-h-72 overflow-y-auto">
+            {mt5Accounts.length === 0 ? (
+              <div className="p-4 text-center text-xs text-slate-500">
+                No MT5 accounts registered yet. Click &quot;Register MT5 Account&quot; to add your XM demo accounts.
+              </div>
+            ) : (
+              mt5Accounts.map((acc) => {
+                const token = generatedTokens[acc.id];
+                const isCopied = copiedTokenAccId === acc.id;
+                const isConnected = acc.connectionStatus === 'connected';
 
-                  <div className="flex items-center gap-2">
-                    {token ? (
-                      <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-750 px-2 py-1 rounded">
-                        <code className="font-mono text-[11px] text-cyan-300 max-w-[180px] sm:max-w-[240px] truncate">
-                          {token}
-                        </code>
+                return (
+                  <div key={acc.id} className="p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs hover:bg-slate-900/40 transition-colors">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
+                        acc.accountRole === 'parent' ? 'bg-amber-950 text-amber-300 border border-amber-800/80' : 'bg-sky-950 text-sky-300 border border-sky-800/80'
+                      }`}>
+                        {acc.accountRole}
+                      </span>
+                      <span className="font-mono text-slate-200 font-medium">#{acc.accountNumber}</span>
+                      <span className="text-slate-400 text-[11px]">({acc.broker} - <span className="font-mono text-slate-300">{acc.server}</span>)</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono uppercase ${
+                        isConnected
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/80'
+                          : 'bg-slate-800 text-slate-400 border border-slate-700'
+                      }`}>
+                        {isConnected ? 'EA Online' : 'Awaiting EA'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {token ? (
+                        <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-750 px-2 py-1 rounded">
+                          <code className="font-mono text-[11px] text-cyan-300 max-w-[160px] sm:max-w-[200px] truncate">
+                            {token}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => copyToken(acc.id, token)}
+                            className="text-slate-400 hover:text-white p-0.5"
+                            title="Copy token to clipboard"
+                          >
+                            {isCopied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => copyToken(acc.id, token)}
-                          className="text-slate-400 hover:text-white p-0.5"
-                          title="Copy token to clipboard"
+                          onClick={() => handleGenerateToken(acc)}
+                          disabled={isGeneratingToken === acc.id}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] border border-slate-700 transition-colors"
                         >
-                          {isCopied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                          <Key className="h-3 w-3 text-amber-400" />
+                          {isGeneratingToken === acc.id ? 'Provisioning...' : 'Rotate Token'}
                         </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => handleGenerateToken(acc)}
-                        disabled={isGeneratingToken === acc.id}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] border border-slate-700"
-                      >
-                        <Key className="h-3 w-3 text-amber-400" />
-                        {isGeneratingToken === acc.id ? 'Generating...' : 'Generate Token'}
-                      </button>
-                    )}
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
       </div>
@@ -427,7 +466,7 @@ export const ConnectionsView: React.FC = () => {
             }
           }
         }}
-        title={confirmData.action === 'disconnect' ? 'Disconnect Demo Terminal' : 'Reconnect Demo Terminal'}
+        title={confirmData.action === 'disconnect' ? 'Disconnect Terminal' : 'Reconnect Terminal'}
         description={
           confirmData.action === 'disconnect'
             ? `Are you sure you want to disconnect terminal #${confirmData.account?.accountNumber}? Trade copying will be paused until reconnected.`
@@ -436,6 +475,101 @@ export const ConnectionsView: React.FC = () => {
         confirmLabel={confirmData.action === 'disconnect' ? 'Disconnect Terminal' : 'Reconnect Terminal'}
         variant={confirmData.action === 'disconnect' ? 'danger' : 'primary'}
       />
+
+      {/* Account Registration Modal */}
+      <RegisterMT5AccountModal
+        isOpen={isRegisterModalOpen}
+        onClose={() => setIsRegisterModalOpen(false)}
+        defaultRole="parent"
+        onSuccess={() => {}}
+      />
+
+      {/* Token Rotation Display Modal */}
+      {tokenModalData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl p-5 space-y-4 my-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-lg bg-amber-950 border border-amber-800 text-amber-400">
+                  <Key className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Terminal Token Rotated</h3>
+                  <p className="text-xs text-slate-400">
+                    Account #{tokenModalData.account.accountNumber} ({tokenModalData.account.broker})
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTokenModalData(null)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-amber-800/60 bg-amber-950/30 p-3 text-xs text-amber-200 space-y-1">
+              <span className="font-semibold block flex items-center gap-1.5">
+                <ShieldCheck className="h-4 w-4 text-amber-400" /> Save This Secret Token Now
+              </span>
+              <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                Previous EA sessions will be invalidated. Paste this token into your Expert Advisor&apos;s <code className="font-mono bg-slate-900 px-1 py-0.5 rounded">InpTerminalToken</code> parameter.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">New Secret Terminal Token</label>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 rounded-lg bg-slate-950 border border-slate-750 px-3 py-2 font-mono text-xs text-cyan-300 select-all break-all">
+                  {tokenModalData.terminalToken}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(tokenModalData.terminalToken);
+                    setCopiedModalToken(true);
+                    setTimeout(() => setCopiedModalToken(false), 2000);
+                  }}
+                  className="px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium text-xs transition-all shrink-0"
+                >
+                  {copiedModalToken ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">Allowed WebRequest URL</label>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 rounded-lg bg-slate-950 border border-slate-750 px-3 py-1.5 font-mono text-xs text-slate-300 truncate">
+                  {serverOrigin}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(serverOrigin);
+                    setCopiedModalUrl(true);
+                    setTimeout(() => setCopiedModalUrl(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs transition-all shrink-0"
+                >
+                  {copiedModalUrl ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setTokenModalData(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition-all"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

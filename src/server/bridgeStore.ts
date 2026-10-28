@@ -160,6 +160,7 @@ export class BridgeStore {
             terminal_token_hash: hash,
             terminal_token_prefix: prefix,
             terminal_token_created_at: new Date().toISOString(),
+            connection_status: 'disconnected',
           })
           .eq('id', account.accountId);
 
@@ -184,7 +185,7 @@ export class BridgeStore {
       brokerName: account.brokerName,
       lastSeenAt: new Date().toISOString(),
       pingMs: 15,
-      status: 'connected',
+      status: 'disconnected', // Initial state is disconnected until authenticating EA arrives
       isDurableDb: isDurable,
     };
 
@@ -196,6 +197,7 @@ export class BridgeStore {
   /**
    * Authenticate incoming request via terminal token
    * Checks process cache first, then resolves from Supabase mt5_accounts
+   * Flips connection_status to 'connected' in database upon genuine authentication.
    */
   public async authenticateTerminal(
     token?: string,
@@ -208,6 +210,19 @@ export class BridgeStore {
     const cached = this.terminalsByHash.get(hash);
     if (cached) {
       cached.lastSeenAt = new Date().toISOString();
+      cached.status = 'connected';
+      if (supabaseClient) {
+        // Asynchronously update connection status in durable database
+        Promise.resolve(
+          supabaseClient
+            .from('mt5_accounts')
+            .update({
+              connection_status: 'connected',
+              last_sync: new Date().toISOString(),
+            })
+            .eq('id', cached.accountId)
+        ).catch((err: any) => console.warn('[BridgeStore] Sync update error:', err.message));
+      }
       return cached;
     }
 
@@ -233,6 +248,15 @@ export class BridgeStore {
             return null;
           }
 
+          // Authoritative EA request received: flip connection_status to connected
+          await supabaseClient
+            .from('mt5_accounts')
+            .update({
+              connection_status: 'connected',
+              last_sync: new Date().toISOString(),
+            })
+            .eq('id', acc.id);
+
           const registered: RegisteredTerminal = {
             tokenHash: hash,
             rawTokenPrefix: token.substring(0, 12) + '...',
@@ -244,7 +268,7 @@ export class BridgeStore {
             brokerName: acc.broker_name || 'MetaTrader 5',
             lastSeenAt: new Date().toISOString(),
             pingMs: 12,
-            status: acc.connection_status === 'error' ? 'disconnected' : 'connected',
+            status: 'connected',
             isDurableDb: true,
           };
           this.terminalsByHash.set(hash, registered);

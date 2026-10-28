@@ -12,13 +12,13 @@
 
 //--- Input Parameters
 input group "=== TradeSync Bridge Configuration ==="
-input string   InpServerUrl       = "http://localhost:3000";         // TradeSync Bridge Base URL (no trailing slash)
-input string   InpTerminalToken   = "ts_parent_demo_token_889911";   // Parent Terminal Secret Token (from TradeSync)
-input int      InpRequestTimeoutMs = 3000;                            // WebRequest Timeout (ms)
+input string   InpServerUrl       = "https://your-tradesync-app.vercel.app"; // TradeSync Bridge Base URL (no trailing slash)
+input string   InpTerminalToken   = "PASTE_PARENT_TERMINAL_TOKEN_HERE";       // Parent Terminal Secret Token (from TradeSync Dashboard)
+input int      InpRequestTimeoutMs = 3000;                                   // WebRequest Timeout (ms)
 input group "=== Filters & Safety ==="
-input ulong    InpMagicFilter     = 0;                               // Filter Magic Number (0 = copy all parent trades)
-input bool     InpSyncSLTP        = true;                            // Broadcast Stop Loss & Take Profit modifications
-input bool     InpVerboseLogs     = true;                            // Output detailed logs to MT5 Experts tab
+input ulong    InpMagicFilter     = 0;                                       // Filter Magic Number (0 = copy all parent trades)
+input bool     InpSyncSLTP        = true;                                    // Broadcast Stop Loss & Take Profit modifications
+input bool     InpVerboseLogs     = true;                                    // Output detailed logs to MT5 Experts tab
 
 //--- Internal State
 ulong    g_ProcessedDeals[];
@@ -30,14 +30,51 @@ datetime g_LastHeartbeat = 0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   PrintFormat("[TradeSync Broadcaster] Initializing on account %I64u (%s)...",
+   PrintFormat("[TradeSync Broadcaster] Initializing on account %I64u (%s) on server '%s'...",
                AccountInfoInteger(ACCOUNT_LOGIN),
-               AccountInfoString(ACCOUNT_COMPANY));
+               AccountInfoString(ACCOUNT_COMPANY),
+               AccountInfoString(ACCOUNT_SERVER));
 
-   // Ensure WebRequest is allowed
+   // 1. Strict Server URL Validation
+   string cleanUrl = InpServerUrl;
+   StringTrimLeft(cleanUrl);
+   StringTrimRight(cleanUrl);
+   if(StringLen(cleanUrl) == 0 || cleanUrl == "https://your-tradesync-app.vercel.app" || cleanUrl == "http://localhost:3000")
+   {
+      Print("==========================================================================");
+      Print("[TradeSync Broadcaster] CONFIGURATION ERROR: Invalid InpServerUrl!");
+      Print("[TradeSync Broadcaster] Please set InpServerUrl to your deployed TradeSync domain (e.g. https://your-app.vercel.app).");
+      Print("[TradeSync Broadcaster] Also verify Tools -> Options -> Expert Advisors -> 'Allow WebRequest for listed URL' includes this URL.");
+      Print("==========================================================================");
+      if(cleanUrl == "https://your-tradesync-app.vercel.app" || StringLen(cleanUrl) == 0)
+      {
+         return(INIT_PARAMETERS_INCORRECT);
+      }
+   }
+
+   // 2. Strict Terminal Secret Token Validation
+   string cleanToken = InpTerminalToken;
+   StringTrimLeft(cleanToken);
+   StringTrimRight(cleanToken);
+   if(StringLen(cleanToken) == 0 ||
+      cleanToken == "PASTE_PARENT_TERMINAL_TOKEN_HERE" ||
+      cleanToken == "ts_parent_demo_token_889911")
+   {
+      Print("==========================================================================");
+      Print("[TradeSync Broadcaster] CONFIGURATION ERROR: Missing or placeholder Terminal Token!");
+      Print("[TradeSync Broadcaster] 1. Open your TradeSync MT5 Admin Dashboard.");
+      Print("[TradeSync Broadcaster] 2. Navigate to 'MT5 Connections' or 'Parent Accounts'.");
+      Print("[TradeSync Broadcaster] 3. Register your Parent account (Broker: XM, Server: xmglobal_mt5 7, Login: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ").");
+      Print("[TradeSync Broadcaster] 4. Copy the generated secret token (starts with ts_parent_...).");
+      Print("[TradeSync Broadcaster] 5. Paste it into the InpTerminalToken input parameter of this EA.");
+      Print("==========================================================================");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   // 3. Ensure Algo Trading is allowed
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
    {
-      Print("[TradeSync Broadcaster] WARNING: Algo Trading is disabled in MT5 terminal. Please enable 'Algo Trading' button.");
+      Print("[TradeSync Broadcaster] WARNING: Algo Trading is disabled in MT5 terminal. Please enable 'Algo Trading' button in toolbar.");
    }
 
    ArrayResize(g_ProcessedDeals, 1024);

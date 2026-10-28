@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { RiskEngine } from './riskEngine.ts';
 import { BridgeStore, RegisteredTerminal } from './bridgeStore.ts';
@@ -618,6 +619,20 @@ export function createApiApp() {
       };
     }
 
+    // Ensure authoritative database record is marked connected and synced
+    if (dbClient && terminal.accountId) {
+      Promise.resolve(
+        dbClient
+          .from('mt5_accounts')
+          .update({
+            connection_status: 'connected',
+            last_sync: new Date().toISOString(),
+            error_message: null,
+          })
+          .eq('id', terminal.accountId)
+      ).catch((e: any) => console.warn('[Bridge] Sync status update notice:', e.message));
+    }
+
     return { terminal };
   };
 
@@ -726,17 +741,43 @@ export function createApiApp() {
       }
 
       const dbClient = getBridgeDbClient();
-      const rawToken = BridgeStore.generateSecureToken(accountRole === 'parent' ? 'ts_parent' : 'ts_child');
+      let targetRole: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
+      let targetUserId = 'system_authorized';
+      let targetBrokerServer = brokerServer || 'MetaQuotes-Demo';
+      let targetBrokerName = brokerName || 'MetaTrader Broker';
+      let targetAccountNumber = String(accountNumber);
+
+      if (dbClient) {
+        try {
+          const { data: dbAcc } = await dbClient
+            .from('mt5_accounts')
+            .select('id, user_id, account_role, account_number, broker_server, broker_name')
+            .eq('id', accountId)
+            .maybeSingle();
+
+          if (dbAcc) {
+            targetRole = dbAcc.account_role === 'parent' ? 'parent' : 'child';
+            targetUserId = dbAcc.user_id;
+            targetAccountNumber = dbAcc.account_number;
+            targetBrokerServer = dbAcc.broker_server;
+            targetBrokerName = dbAcc.broker_name || targetBrokerName;
+          }
+        } catch (e: any) {
+          console.warn('[TerminalToken] DB lookup notice:', e.message);
+        }
+      }
+
+      const rawToken = BridgeStore.generateSecureToken(targetRole === 'parent' ? 'ts_parent' : 'ts_child');
 
       const terminal = await bridgeStore.registerTerminal(
         rawToken,
         {
           accountId,
-          userId: 'system_authorized',
-          accountRole: accountRole === 'parent' ? 'parent' : 'child',
-          accountNumber: String(accountNumber),
-          brokerServer: brokerServer || 'MetaQuotes-Demo',
-          brokerName: brokerName || 'MetaTrader Broker',
+          userId: targetUserId,
+          accountRole: targetRole,
+          accountNumber: targetAccountNumber,
+          brokerServer: targetBrokerServer,
+          brokerName: targetBrokerName,
         },
         dbClient
       );
@@ -748,11 +789,238 @@ export function createApiApp() {
         accountId: terminal.accountId,
         accountRole: terminal.accountRole,
         accountNumber: terminal.accountNumber,
+        brokerServer: targetBrokerServer,
+        brokerName: targetBrokerName,
         isDurableDb: terminal.isDurableDb,
         instructions: `Paste this token into the 'InpTerminalToken' parameter in your MT5 Expert Advisor.`,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Token generation failed' });
+    }
+  });
+
+  /**
+   * 2b. Admin MT5 Account Registration Endpoint
+   * POST /api/v1/admin/accounts/register
+   * Registers arbitrary broker/server accounts (e.g. XM servers 'xmglobal_mt5 7' and 'xmglobal_mt5 2').
+   * Persists record in Supabase mt5_accounts with connection_status = 'disconnected'.
+   * Generates cryptographically secure terminal token, stores SHA-256 hash, and returns plaintext token once.
+   */
+  registerRoute('post', '/api/v1/admin/accounts/register', async (req: Request, res: Response) => {
+    try {
+      const {
+        accountRole = 'parent',
+        brokerName = 'XM',
+        brokerServer,
+        accountNumber,
+        accountType = 'demo',
+        balance = 10000,
+        equity = 10000,
+        currency = 'USD',
+        leverage = 100,
+        userId,
+        parentAccountId,
+        lotSettings,
+      } = req.body;
+
+      if (!accountNumber || !String(accountNumber).trim()) {
+        return res.status(400).json({ success: false, error: 'Account number is required' });
+      }
+
+      if (!brokerServer || !String(brokerServer).trim()) {
+        return res.status(400).json({ success: false, error: 'MT5 Broker Server name is required (e.g. xmglobal_mt5 7)' });
+      }
+
+      const role: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
+      const cleanAccNumber = String(accountNumber).trim();
+      const cleanBrokerServer = String(brokerServer).trim();
+      const cleanBrokerName = String(brokerName || 'XM').trim();
+      const dbClient = getBridgeDbClient();
+
+      let targetUserId = userId && isValidUUID(userId) ? userId : null;
+
+      // If no valid userId provided, resolve or find an existing active profile
+      if (!targetUserId && dbClient) {
+        try {
+          const profileQuery = dbClient
+            .from('profiles')
+            .select('id, role')
+            .eq('status', 'active');
+
+          if (role === 'parent') {
+            profileQuery.in('role', ['mentor', 'admin']);
+          } else {
+            profileQuery.in('role', ['trader', 'user', 'admin']);
+          }
+
+          const { data: matchedProfiles } = await profileQuery.limit(1);
+          if (matchedProfiles && matchedProfiles.length > 0) {
+            targetUserId = matchedProfiles[0].id;
+          } else {
+            const { data: anyProfile } = await dbClient.from('profiles').select('id').limit(1);
+            if (anyProfile && anyProfile.length > 0) {
+              targetUserId = anyProfile[0].id;
+            }
+          }
+        } catch (e: any) {
+          console.warn('[RegisterAccount] Profile lookup notice:', e.message);
+        }
+      }
+
+      if (!targetUserId) {
+        targetUserId = role === 'parent' ? '00000000-0000-4000-a000-000000000001' : '00000000-0000-4000-a000-000000000011';
+      }
+
+      // Generate secure terminal token
+      const rawToken = BridgeStore.generateSecureToken(role === 'parent' ? 'ts_parent' : 'ts_child');
+      const tokenHash = BridgeStore.hashToken(rawToken);
+      const tokenPrefix = rawToken.substring(0, 12) + '...';
+
+      let accountId = crypto.randomUUID();
+      let isPersistedInDb = false;
+
+      if (dbClient) {
+        try {
+          const { data: existingAcc } = await dbClient
+            .from('mt5_accounts')
+            .select('id, user_id')
+            .eq('account_number', cleanAccNumber)
+            .eq('broker_server', cleanBrokerServer)
+            .maybeSingle();
+
+          if (existingAcc) {
+            accountId = existingAcc.id;
+            const { error: updateErr } = await dbClient
+              .from('mt5_accounts')
+              .update({
+                broker_name: cleanBrokerName,
+                account_role: role,
+                account_type: accountType,
+                balance: Number(balance) || 10000,
+                equity: Number(equity || balance) || 10000,
+                currency: currency || 'USD',
+                leverage: Number(leverage) || 100,
+                connection_status: 'disconnected', // Initial state is disconnected until EA authenticates
+                terminal_token_hash: tokenHash,
+                terminal_token_prefix: tokenPrefix,
+                terminal_token_created_at: new Date().toISOString(),
+                assigned_parent_id: role === 'child' && parentAccountId ? parentAccountId : null,
+              })
+              .eq('id', accountId);
+
+            if (!updateErr) isPersistedInDb = true;
+          } else {
+            const { error: insertErr } = await dbClient
+              .from('mt5_accounts')
+              .insert([{
+                id: accountId,
+                user_id: targetUserId,
+                account_number: cleanAccNumber,
+                broker_server: cleanBrokerServer,
+                broker_name: cleanBrokerName,
+                account_role: role,
+                account_type: accountType,
+                balance: Number(balance) || 10000,
+                equity: Number(equity || balance) || 10000,
+                margin: 0,
+                free_margin: Number(balance) || 10000,
+                currency: currency || 'USD',
+                leverage: Number(leverage) || 100,
+                connection_status: 'disconnected', // Awaiting EA connection
+                terminal_token_hash: tokenHash,
+                terminal_token_prefix: tokenPrefix,
+                terminal_token_created_at: new Date().toISOString(),
+                assigned_parent_id: role === 'child' && parentAccountId ? parentAccountId : null,
+                is_investor_password: true,
+                auto_trading_enabled: true,
+              }]);
+
+            if (!insertErr) isPersistedInDb = true;
+          }
+
+          // If child account and parentAccountId provided, establish link in mentor_assignments
+          if (role === 'child' && parentAccountId && isValidUUID(parentAccountId)) {
+            try {
+              const { data: parentAcc } = await dbClient
+                .from('mt5_accounts')
+                .select('id, user_id')
+                .eq('id', parentAccountId)
+                .maybeSingle();
+
+              if (parentAcc) {
+                const { error: assignErr } = await dbClient
+                  .from('mentor_assignments')
+                  .upsert([{
+                    mentor_id: parentAcc.user_id,
+                    trader_id: targetUserId,
+                    parent_account_id: parentAccountId,
+                    child_account_id: accountId,
+                    status: 'active',
+                    lot_copy_mode: lotSettings?.copyMode || 'parent_lot',
+                    lot_multiplier: Number(lotSettings?.multiplier) || 1.0,
+                    fixed_lot: Number(lotSettings?.fixedLot) || 0.1,
+                    assigned_at: new Date().toISOString(),
+                  }], { onConflict: 'mentor_id,trader_id' });
+
+                if (assignErr) {
+                  console.warn('[RegisterAccount] Mentor assignment notice:', assignErr.message);
+                }
+              }
+            } catch (linkErr: any) {
+              console.warn('[RegisterAccount] Parent link error:', linkErr.message);
+            }
+          }
+        } catch (dbErr: any) {
+          console.warn('[RegisterAccount] Supabase write notice:', dbErr.message);
+        }
+      }
+
+      // Register in memory bridgeStore
+      await bridgeStore.registerTerminal(
+        rawToken,
+        {
+          accountId,
+          userId: targetUserId,
+          accountRole: role,
+          accountNumber: cleanAccNumber,
+          brokerServer: cleanBrokerServer,
+          brokerName: cleanBrokerName,
+        },
+        dbClient
+      );
+
+      const serverHost = `${req.protocol}://${req.get('host')}`;
+
+      return res.status(200).json({
+        success: true,
+        account: {
+          id: accountId,
+          userId: targetUserId,
+          accountNumber: cleanAccNumber,
+          brokerName: cleanBrokerName,
+          brokerServer: cleanBrokerServer,
+          accountRole: role,
+          accountType,
+          balance: Number(balance) || 10000,
+          equity: Number(equity || balance) || 10000,
+          currency,
+          leverage: Number(leverage) || 100,
+          connectionStatus: 'disconnected',
+          isDurableDb: isPersistedInDb,
+        },
+        terminalToken: rawToken, // Displayed strictly once!
+        tokenPrefix,
+        instructions: {
+          serverUrl: serverHost,
+          eaFileName: role === 'parent' ? 'TradeSync_Broadcaster.mq5' : 'TradeSync_Receiver.mq5',
+          eaDownloadUrl: role === 'parent' ? '/api/mql5/download/broadcaster' : '/api/mql5/download/receiver',
+          serverParam: cleanBrokerServer,
+          tokenParam: rawToken,
+        },
+      });
+    } catch (err: any) {
+      console.error('[AdminAPI] Account registration error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Account registration failed' });
     }
   });
 
