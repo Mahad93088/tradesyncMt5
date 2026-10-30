@@ -26,10 +26,13 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 ALTER TABLE public.mt5_accounts
     ADD COLUMN IF NOT EXISTS terminal_token_hash TEXT,
     ADD COLUMN IF NOT EXISTS terminal_token_prefix TEXT,
-    ADD COLUMN IF NOT EXISTS terminal_token_created_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS terminal_token_created_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS assigned_parent_id UUID REFERENCES public.mt5_accounts(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_mt5_accounts_token_hash 
     ON public.mt5_accounts(terminal_token_hash);
+CREATE INDEX IF NOT EXISTS idx_mt5_accounts_assigned_parent
+    ON public.mt5_accounts(assigned_parent_id);
 
 -- ------------------------------------------------------------------------------
 -- 3. Durable Bridge Instructions Queue (Cross-Instance / Serverless Safe)

@@ -560,11 +560,19 @@ export function createApiApp() {
   /**
    * Helper to resolve authoritative Supabase client for bridge persistence
    */
-  const getBridgeDbClient = () => {
+  const getBridgeDbClient = (req?: Request) => {
     if (!supabaseUrl) return undefined;
     if (serviceRoleKey) {
       return createClient(supabaseUrl, serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false },
+      });
+    }
+    const authHeader = req?.headers?.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ') && !authHeader.startsWith('Bearer ts_')) {
+      const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+      return createClient(supabaseUrl, publishableKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${token}` } },
       });
     }
     if (publishableKey) {
@@ -835,7 +843,7 @@ export function createApiApp() {
       const cleanAccNumber = String(accountNumber).trim();
       const cleanBrokerServer = String(brokerServer).trim();
       const cleanBrokerName = String(brokerName || 'XM').trim();
-      const dbClient = getBridgeDbClient();
+      const dbClient = getBridgeDbClient(req);
 
       let targetUserId = userId && isValidUUID(userId) ? userId : null;
 
@@ -860,6 +868,11 @@ export function createApiApp() {
             const { data: anyProfile } = await dbClient.from('profiles').select('id').limit(1);
             if (anyProfile && anyProfile.length > 0) {
               targetUserId = anyProfile[0].id;
+            } else {
+              const { data: dirProfiles } = await dbClient.from('mentor_directory').select('id').limit(1);
+              if (dirProfiles && dirProfiles.length > 0) {
+                targetUserId = dirProfiles[0].id;
+              }
             }
           }
         } catch (e: any) {
@@ -868,7 +881,7 @@ export function createApiApp() {
       }
 
       if (!targetUserId) {
-        targetUserId = role === 'parent' ? '00000000-0000-4000-a000-000000000001' : '00000000-0000-4000-a000-000000000011';
+        targetUserId = role === 'parent' ? '54325d98-ec0c-4821-a9ef-e7a514f51c43' : '00000000-0000-4000-a000-000000000011';
       }
 
       // Generate secure terminal token
@@ -878,6 +891,7 @@ export function createApiApp() {
 
       let accountId = crypto.randomUUID();
       let isPersistedInDb = false;
+      let dbError: string | null = null;
 
       if (dbClient) {
         try {
@@ -888,54 +902,89 @@ export function createApiApp() {
             .eq('broker_server', cleanBrokerServer)
             .maybeSingle();
 
+          const accountPayload: Record<string, any> = {
+            id: accountId,
+            user_id: targetUserId,
+            account_number: cleanAccNumber,
+            broker_server: cleanBrokerServer,
+            broker_name: cleanBrokerName,
+            account_role: role,
+            account_type: accountType,
+            balance: Number(balance) || 10000,
+            equity: Number(equity || balance) || 10000,
+            margin: 0,
+            free_margin: Number(balance) || 10000,
+            currency: currency || 'USD',
+            leverage: Number(leverage) || 100,
+            connection_status: 'disconnected', // Awaiting EA connection
+            is_investor_password: true,
+            auto_trading_enabled: true,
+          };
+
           if (existingAcc) {
             accountId = existingAcc.id;
-            const { error: updateErr } = await dbClient
+            const updatePayload: Record<string, any> = {
+              broker_name: cleanBrokerName,
+              account_role: role,
+              account_type: accountType,
+              balance: Number(balance) || 10000,
+              equity: Number(equity || balance) || 10000,
+              currency: currency || 'USD',
+              leverage: Number(leverage) || 100,
+              connection_status: 'disconnected',
+            };
+
+            // Attempt update with terminal token
+            let { error: updateErr } = await dbClient
               .from('mt5_accounts')
               .update({
-                broker_name: cleanBrokerName,
-                account_role: role,
-                account_type: accountType,
-                balance: Number(balance) || 10000,
-                equity: Number(equity || balance) || 10000,
-                currency: currency || 'USD',
-                leverage: Number(leverage) || 100,
-                connection_status: 'disconnected', // Initial state is disconnected until EA authenticates
+                ...updatePayload,
                 terminal_token_hash: tokenHash,
                 terminal_token_prefix: tokenPrefix,
                 terminal_token_created_at: new Date().toISOString(),
-                assigned_parent_id: role === 'child' && parentAccountId ? parentAccountId : null,
               })
               .eq('id', accountId);
 
-            if (!updateErr) isPersistedInDb = true;
+            if (updateErr && updateErr.message.includes('terminal_token')) {
+              // Retry without terminal token columns if migration 03 not yet applied
+              const retry = await dbClient
+                .from('mt5_accounts')
+                .update(updatePayload)
+                .eq('id', accountId);
+              updateErr = retry.error;
+            }
+
+            if (!updateErr) {
+              isPersistedInDb = true;
+            } else {
+              dbError = updateErr.message;
+              console.warn('[RegisterAccount] Supabase update notice:', updateErr.message);
+            }
           } else {
-            const { error: insertErr } = await dbClient
+            // Attempt insert with token columns
+            let { error: insertErr } = await dbClient
               .from('mt5_accounts')
               .insert([{
-                id: accountId,
-                user_id: targetUserId,
-                account_number: cleanAccNumber,
-                broker_server: cleanBrokerServer,
-                broker_name: cleanBrokerName,
-                account_role: role,
-                account_type: accountType,
-                balance: Number(balance) || 10000,
-                equity: Number(equity || balance) || 10000,
-                margin: 0,
-                free_margin: Number(balance) || 10000,
-                currency: currency || 'USD',
-                leverage: Number(leverage) || 100,
-                connection_status: 'disconnected', // Awaiting EA connection
+                ...accountPayload,
                 terminal_token_hash: tokenHash,
                 terminal_token_prefix: tokenPrefix,
                 terminal_token_created_at: new Date().toISOString(),
-                assigned_parent_id: role === 'child' && parentAccountId ? parentAccountId : null,
-                is_investor_password: true,
-                auto_trading_enabled: true,
               }]);
 
-            if (!insertErr) isPersistedInDb = true;
+            if (insertErr && insertErr.message.includes('terminal_token')) {
+              // Retry without terminal_token columns if migration 03 not yet run
+              const retry = await dbClient
+                .from('mt5_accounts')
+                .insert([accountPayload]);
+              insertErr = retry.error;
+            }
+
+            if (!insertErr) {
+              isPersistedInDb = true;
+            } else {
+              dbError = insertErr.message;
+              console.warn('[RegisterAccount] Supabase insert notice:', insertErr.message);
+            }
           }
 
           // If child account and parentAccountId provided, establish link in mentor_assignments
@@ -970,8 +1019,9 @@ export function createApiApp() {
               console.warn('[RegisterAccount] Parent link error:', linkErr.message);
             }
           }
-        } catch (dbErr: any) {
-          console.warn('[RegisterAccount] Supabase write notice:', dbErr.message);
+        } catch (err: any) {
+          dbError = err.message;
+          console.warn('[RegisterAccount] Supabase write exception:', err.message);
         }
       }
 
@@ -1007,6 +1057,7 @@ export function createApiApp() {
           leverage: Number(leverage) || 100,
           connectionStatus: 'disconnected',
           isDurableDb: isPersistedInDb,
+          dbError: isPersistedInDb ? null : dbError,
         },
         terminalToken: rawToken, // Displayed strictly once!
         tokenPrefix,
@@ -1021,6 +1072,48 @@ export function createApiApp() {
     } catch (err: any) {
       console.error('[AdminAPI] Account registration error:', err);
       return res.status(500).json({ success: false, error: err.message || 'Account registration failed' });
+    }
+  });
+
+  /**
+   * 2c. Authoritative Admin MT5 Accounts Retrieval Endpoint
+   * GET /api/v1/admin/accounts
+   * Returns all registered MT5 accounts directly from Supabase public.mt5_accounts
+   * (including parent and child XM accounts) along with active mentor_assignments and profiles.
+   */
+  registerRoute('get', '/api/v1/admin/accounts', async (_req: Request, res: Response) => {
+    try {
+      const dbClient = getBridgeDbClient();
+      if (!dbClient) {
+        return res.status(200).json({
+          success: true,
+          source: 'memory_cache',
+          accounts: [],
+          assignments: [],
+          profiles: [],
+        });
+      }
+
+      const [accResult, assignResult, profilesResult] = await Promise.all([
+        dbClient.from('mt5_accounts').select('*').order('created_at', { ascending: false }),
+        dbClient.from('mentor_assignments').select('*').eq('status', 'active'),
+        dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status'),
+      ]);
+
+      if (accResult.error) {
+        return res.status(500).json({ success: false, error: accResult.error.message });
+      }
+
+      return res.status(200).json({
+        success: true,
+        source: 'supabase',
+        accounts: accResult.data || [],
+        assignments: assignResult.data || [],
+        profiles: profilesResult.data || [],
+      });
+    } catch (err: any) {
+      console.error('[AdminAPI] Failed to get accounts:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to get accounts' });
     }
   });
 

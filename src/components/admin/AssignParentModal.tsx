@@ -34,6 +34,8 @@ import { useApp } from '../../context/AppContext';
 import { ParentChildLink } from '../../types';
 import { ensureValidSession, isJwtExpiredError } from '../../lib/sessionManager';
 import { CreateDemoAccountModal } from './CreateDemoAccountModal';
+import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
+import { Key } from 'lucide-react';
 
 interface AssignParentModalProps {
   isOpen: boolean;
@@ -86,6 +88,8 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   const [seedSuccessNotice, setSeedSuccessNotice] = useState<string | null>(null);
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState<boolean>(false);
   const [createDemoDefaultRole, setCreateDemoDefaultRole] = useState<'parent' | 'child'>('parent');
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState<boolean>(false);
+  const [registerModalRole, setRegisterModalRole] = useState<'parent' | 'child'>('parent');
 
   // Verified Mentors & Traders for Super Admin Association (Requirement 4 & 5 & 6)
   const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: 'mentor'; status: 'active' }>>([]);
@@ -1086,6 +1090,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   <span className="text-[10px] text-slate-500 font-mono">
                     {effectiveParents.length} eligible parent{effectiveParents.length === 1 ? '' : 's'}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRegisterModalRole('parent');
+                      setIsRegisterModalOpen(true);
+                    }}
+                    className="text-[10px] text-amber-400 hover:text-amber-300 font-semibold underline flex items-center gap-0.5"
+                  >
+                    <Key className="h-2.5 w-2.5" /> Register XM / Custom Parent
+                  </button>
                   {!hasParents && (
                     <button
                       type="button"
@@ -1095,7 +1109,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                       }}
                       className="text-[10px] text-cyan-400 hover:text-cyan-300 font-medium underline flex items-center gap-0.5"
                     >
-                      <Plus className="h-2.5 w-2.5" /> Create Parent
+                      <Plus className="h-2.5 w-2.5" /> Create Demo
                     </button>
                   )}
                 </div>
@@ -1241,6 +1255,16 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   <span className="text-[10px] text-slate-500 font-mono">
                     {effectiveChildren.length} eligible child{effectiveChildren.length === 1 ? '' : 'ren'}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRegisterModalRole('child');
+                      setIsRegisterModalOpen(true);
+                    }}
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300 font-semibold underline flex items-center gap-0.5"
+                  >
+                    <Key className="h-2.5 w-2.5" /> Register XM / Custom Child
+                  </button>
                   {!hasChildren && (
                     <button
                       type="button"
@@ -1250,7 +1274,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                       }}
                       className="text-[10px] text-emerald-400 hover:text-emerald-300 font-medium underline flex items-center gap-0.5"
                     >
-                      <Plus className="h-2.5 w-2.5" /> Create Child
+                      <Plus className="h-2.5 w-2.5" /> Create Demo
                     </button>
                   )}
                 </div>
@@ -1493,6 +1517,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         defaultRole={createDemoDefaultRole}
         onSuccess={() => {
           onAssignmentSuccess();
+        }}
+      />
+
+      {/* Authoritative MT5 Account Registration Modal (Option A Architecture) */}
+      <RegisterMT5AccountModal
+        isOpen={isRegisterModalOpen}
+        onClose={() => setIsRegisterModalOpen(false)}
+        defaultRole={registerModalRole}
+        onSuccess={async () => {
+          await loadAccounts();
+          onAssignmentSuccess(`Registered MT5 ${registerModalRole} account.`);
         }}
       />
     </>

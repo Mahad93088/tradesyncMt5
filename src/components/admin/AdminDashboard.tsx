@@ -17,22 +17,26 @@ import {
   Bell,
   Clock,
   Info,
-  Layers
+  Layers,
+  Key
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
+import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
 
 interface AdminDashboardProps {
   onNavigateTab: (tab: string) => void;
   onOpenCreateMentor: () => void;
   onOpenAddTrader?: () => void;
+  onOpenRegisterAccount?: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onNavigateTab,
   onOpenCreateMentor,
-  onOpenAddTrader
+  onOpenAddTrader,
+  onOpenRegisterAccount
 }) => {
   const {
     users,
@@ -52,6 +56,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [announcementTitle, setAnnouncementTitle] = useState('');
   const [announcementMsg, setAnnouncementMsg] = useState('');
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
+  const [showRegisterModal, setShowRegisterModal] = useState(false);
 
   // Compute metrics
   const mentors = users.filter((u) => u.role === 'mentor');
@@ -104,6 +109,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              if (onOpenRegisterAccount) {
+                onOpenRegisterAccount();
+              } else {
+                setShowRegisterModal(true);
+              }
+            }}
+            className="flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Key className="h-3.5 w-3.5" />
+            <span>Register MT5 Account</span>
+          </button>
           <button
             onClick={() => setShowBroadcastModal(true)}
             className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 hover:text-white transition-colors"
@@ -456,6 +474,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* Authoritative MT5 Account Registration Modal */}
+      <RegisterMT5AccountModal
+        isOpen={showRegisterModal}
+        onClose={() => setShowRegisterModal(false)}
+        defaultRole="parent"
+        onSuccess={() => {}}
+      />
     </div>
   );
 };
