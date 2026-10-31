@@ -44,7 +44,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   );
   const [accountNumber, setAccountNumber] = useState<string>('');
   const [accountType, setAccountType] = useState<'demo' | 'live'>('demo');
-  const [balance, setBalance] = useState<number>(defaultRole === 'parent' ? 50000 : 10000);
+  const [balance, setBalance] = useState<string | number>(defaultRole === 'parent' ? 50000 : 10000);
   const [currency, setCurrency] = useState<string>('USD');
   const [leverage, setLeverage] = useState<number>(100);
 
@@ -123,14 +123,15 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
     setIsSubmitting(true);
 
     try {
+      const parsedBalance = balance !== '' && !isNaN(Number(balance)) ? Number(balance) : 10000;
       const res = await mt5AdminService.registerMT5Account({
         accountRole,
         brokerName: brokerName.trim() || 'XM',
         brokerServer: brokerServer.trim(),
         accountNumber: accountNumber.trim(),
         accountType,
-        balance: Number(balance) || 10000,
-        equity: Number(balance) || 10000,
+        balance: parsedBalance,
+        equity: parsedBalance,
         currency,
         leverage: Number(leverage) || 100,
         parentAccountId: accountRole === 'child' ? parentAccountId : undefined,
@@ -509,10 +510,10 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                 <label className="text-xs font-semibold text-slate-300">Balance</label>
                 <input
                   type="number"
-                  min="1"
-                  step="100"
+                  step="any"
                   value={balance}
-                  onChange={(e) => setBalance(Number(e.target.value))}
+                  onChange={(e) => setBalance(e.target.value)}
+                  placeholder="e.g. 500000"
                   className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
                 />
               </div>

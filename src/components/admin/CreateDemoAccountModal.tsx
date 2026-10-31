@@ -256,8 +256,7 @@ export const CreateDemoAccountModal: React.FC<CreateDemoAccountModalProps> = ({
                 <span className="absolute left-3 top-2 text-xs text-slate-500 font-mono">$</span>
                 <input
                   type="number"
-                  min="1000"
-                  step="1000"
+                  step="any"
                   value={balance}
                   onChange={(e) => setBalance(parseFloat(e.target.value) || 0)}
                   className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-7 pr-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
