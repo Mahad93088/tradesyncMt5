@@ -101,8 +101,8 @@ interface AppContextType {
     lots: number
   ) => { success: boolean; message: string; ticket?: number; childCount?: number };
   simulateParentClose: (
-    ticket: number
-  ) => { success: boolean; message: string; closedTicket?: number; childCount?: number };
+    ticket: number | string
+  ) => { success: boolean; message: string; closedTicket?: number | string; childCount?: number };
   simulateErrorEvent: (scenario: 'slippage' | 'margin' | 'disconnect') => void;
   clearSyncLogs: () => void;
   resetDemoData: () => void;
@@ -1399,10 +1399,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const simulateParentClose = (
-    ticket: number
-  ): { success: boolean; message: string; closedTicket?: number; childCount?: number } => {
+    ticket: number | string
+  ): { success: boolean; message: string; closedTicket?: number | string; childCount?: number } => {
     // Find parent trade
-    const parentTrade = trades.find((t) => t.ticket === ticket && t.status === 'OPEN');
+    const parentTrade = trades.find((t) => String(t.ticket) === String(ticket) && t.status === 'OPEN');
     if (!parentTrade) {
       return {
         success: false,
@@ -1411,15 +1411,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Find all child mappings and child trades
-    const relatedMappings = tradeMappings.filter((m) => m.parentTradeTicket === ticket);
+    const relatedMappings = tradeMappings.filter((m) => String(m.parentTradeTicket) === String(ticket));
     const mappedChildTickets = relatedMappings
-      .filter((m) => m.childTradeTicket > 0)
-      .map((m) => m.childTradeTicket);
+      .filter((m) => Boolean(m.childTradeTicket && m.childTradeTicket !== 0 && m.childTradeTicket !== '0'))
+      .map((m) => String(m.childTradeTicket));
 
     const childTradesToClose = trades.filter(
       (t) =>
         t.status === 'OPEN' &&
-        (mappedChildTickets.includes(t.ticket) || t.comment === `TS-COPY:#${ticket}`)
+        (mappedChildTickets.includes(String(t.ticket)) || t.comment === `TS-COPY:#${ticket}`)
     );
     const childTickets = childTradesToClose.map((t) => t.ticket);
 
@@ -1427,7 +1427,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setTrades((prev) =>
       prev.map((t) => {
-        if (t.ticket === ticket) {
+        if (String(t.ticket) === String(ticket)) {
           return {
             ...t,
             status: 'CLOSED',

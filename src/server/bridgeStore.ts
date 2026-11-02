@@ -25,15 +25,15 @@ export interface BridgeInstruction {
   action: BridgeInstructionAction;
   childAccountId: string;
   parentAccountId: string;
-  parentTicket: number;
-  childTicket?: number;
+  parentTicket: number | string;
+  childTicket?: number | string;
   symbol: string;
   orderType: OrderType;
   lots: number;
   openPrice?: number;
   sl?: number;
   tp?: number;
-  magicNumber: number;
+  magicNumber: number | string;
   comment: string;
   createdAt: string;
   status: 'QUEUED' | 'IN_FLIGHT' | 'COMPLETED' | 'FAILED';
@@ -44,29 +44,32 @@ export interface BridgeInstruction {
 export interface ExecutionAckPayload {
   instructionId: string;
   status: MappingExecutionStatus;
-  childTicket?: number;
+  childTicket?: number | string;
   fillPrice?: number;
   brokerErrorCode?: number;
   brokerErrorMessage?: string;
   executionLatencyMs?: number;
 }
 
+/**
+ * Durable Serverless Bridge Store
+ * Authoritative source of truth is Supabase PostgreSQL (tables: mt5_accounts, bridge_instructions, trade_mappings, bridge_sync_logs).
+ * Ephemeral memory maps are used only as a short-lived L1 cache within the current request process.
+ * No hardcoded demo tokens or simulated account connections are pre-seeded.
+ */
 export class BridgeStore {
   private static instance: BridgeStore;
 
-  // Local caching layers for process lifecycle performance
+  // L1 execution cache (ephemeral per-lambda instance)
   private terminalsByHash = new Map<string, RegisteredTerminal>();
   private accountToHash = new Map<string, string>();
   private instructions = new Map<string, BridgeInstruction>();
   private idempotencyIndex = new Map<string, string>();
   private tradeMappings = new Map<string, TradeMapping>();
-  private syncLogs: SyncLog[] = [];
 
   private constructor() {
-    // Only initialize development fallback credentials if not in strict production
-    if (process.env.NODE_ENV !== 'production') {
-      this.seedDevelopmentDemoTerminals();
-    }
+    // No mock or hardcoded demo terminals pre-seeded.
+    // Terminals must authentically exist in public.mt5_accounts.
   }
 
   public static getInstance(): BridgeStore {
@@ -86,53 +89,7 @@ export class BridgeStore {
   }
 
   /**
-   * Seed development-only fallback credentials (disabled in production)
-   */
-  private seedDevelopmentDemoTerminals() {
-    const defaultTokens = [
-      {
-        token: 'ts_parent_demo_token_889911',
-        accountId: 'acc_parent_1',
-        userId: 'user_mentor_1',
-        accountRole: 'parent' as const,
-        accountNumber: '88991100',
-        brokerServer: 'MetaQuotes-Demo',
-        brokerName: 'MetaQuotes Ltd.',
-      },
-      {
-        token: 'ts_child_demo_token_223344',
-        accountId: 'acc_child_1',
-        userId: 'user_trader_1',
-        accountRole: 'child' as const,
-        accountNumber: '22334455',
-        brokerServer: 'MetaQuotes-Demo',
-        brokerName: 'MetaQuotes Ltd.',
-      },
-    ];
-
-    for (const def of defaultTokens) {
-      const hash = BridgeStore.hashToken(def.token);
-      const reg: RegisteredTerminal = {
-        tokenHash: hash,
-        rawTokenPrefix: def.token.substring(0, 10) + '...',
-        accountId: def.accountId,
-        userId: def.userId,
-        accountRole: def.accountRole,
-        accountNumber: def.accountNumber,
-        brokerServer: def.brokerServer,
-        brokerName: def.brokerName,
-        lastSeenAt: new Date().toISOString(),
-        pingMs: 14,
-        status: 'connected',
-        isDurableDb: false,
-      };
-      this.terminalsByHash.set(hash, reg);
-      this.accountToHash.set(def.accountId, hash);
-    }
-  }
-
-  /**
-   * Register or re-provision an MT5 terminal token in database + local cache
+   * Register or re-provision an MT5 terminal token in database
    */
   public async registerTerminal(
     token: string,
@@ -160,14 +117,14 @@ export class BridgeStore {
             terminal_token_hash: hash,
             terminal_token_prefix: prefix,
             terminal_token_created_at: new Date().toISOString(),
-            connection_status: 'disconnected',
+            connection_status: 'disconnected', // Initially disconnected until genuine EA connects
           })
           .eq('id', account.accountId);
 
         if (!error) {
           isDurable = true;
         } else {
-          console.warn('[BridgeStore] Supabase token persistence notice:', error.message);
+          console.warn('[BridgeStore] Supabase token persistence error:', error.message);
         }
       } catch (err: any) {
         console.warn('[BridgeStore] Supabase token write exception:', err.message);
@@ -185,7 +142,7 @@ export class BridgeStore {
       brokerName: account.brokerName,
       lastSeenAt: new Date().toISOString(),
       pingMs: 15,
-      status: 'disconnected', // Initial state is disconnected until authenticating EA arrives
+      status: 'disconnected',
       isDurableDb: isDurable,
     };
 
@@ -196,8 +153,8 @@ export class BridgeStore {
 
   /**
    * Authenticate incoming request via terminal token
-   * Checks process cache first, then resolves from Supabase mt5_accounts
-   * Flips connection_status to 'connected' in database upon genuine authentication.
+   * Queries Supabase public.mt5_accounts by SHA-256 hash.
+   * Flips connection_status to 'connected' and updates last_sync in database upon genuine authentication.
    */
   public async authenticateTerminal(
     token?: string,
@@ -206,27 +163,7 @@ export class BridgeStore {
     if (!token) return null;
     const hash = BridgeStore.hashToken(token);
 
-    // 1. Check in-process cache
-    const cached = this.terminalsByHash.get(hash);
-    if (cached) {
-      cached.lastSeenAt = new Date().toISOString();
-      cached.status = 'connected';
-      if (supabaseClient) {
-        // Asynchronously update connection status in durable database
-        Promise.resolve(
-          supabaseClient
-            .from('mt5_accounts')
-            .update({
-              connection_status: 'connected',
-              last_sync: new Date().toISOString(),
-            })
-            .eq('id', cached.accountId)
-        ).catch((err: any) => console.warn('[BridgeStore] Sync update error:', err.message));
-      }
-      return cached;
-    }
-
-    // 2. Query durable database in Supabase
+    // 1. Direct query against Supabase PostgreSQL
     if (supabaseClient) {
       try {
         const { data: acc, error } = await supabaseClient
@@ -271,6 +208,7 @@ export class BridgeStore {
             status: 'connected',
             isDurableDb: true,
           };
+
           this.terminalsByHash.set(hash, registered);
           this.accountToHash.set(acc.id, hash);
           return registered;
@@ -278,6 +216,14 @@ export class BridgeStore {
       } catch (err: any) {
         console.warn('[BridgeStore] Supabase terminal token query exception:', err.message);
       }
+    }
+
+    // 2. L1 ephemeral cache check within current process (for rapid repeat calls)
+    const cached = this.terminalsByHash.get(hash);
+    if (cached) {
+      cached.lastSeenAt = new Date().toISOString();
+      cached.status = 'connected';
+      return cached;
     }
 
     return null;
@@ -296,16 +242,7 @@ export class BridgeStore {
     params: Omit<BridgeInstruction, 'instructionId' | 'createdAt' | 'status' | 'retryCount'>,
     supabaseClient?: SupabaseClient
   ): Promise<{ instruction: BridgeInstruction; isDuplicate: boolean }> {
-    // 1. In-process cache check
-    const existingId = this.idempotencyIndex.get(params.idempotencyKey);
-    if (existingId) {
-      const existing = this.instructions.get(existingId);
-      if (existing) {
-        return { instruction: existing, isDuplicate: true };
-      }
-    }
-
-    // 2. Check durable database in Supabase
+    // 1. Authoritative check on Supabase for idempotency_key
     if (supabaseClient) {
       try {
         const { data: dbExisting } = await supabaseClient
@@ -321,15 +258,15 @@ export class BridgeStore {
             action: dbExisting.action,
             childAccountId: dbExisting.child_account_id,
             parentAccountId: dbExisting.parent_account_id,
-            parentTicket: Number(dbExisting.parent_ticket),
-            childTicket: dbExisting.child_ticket ? Number(dbExisting.child_ticket) : undefined,
+            parentTicket: String(dbExisting.parent_ticket),
+            childTicket: dbExisting.child_ticket != null ? String(dbExisting.child_ticket) : undefined,
             symbol: dbExisting.symbol,
             orderType: dbExisting.order_type,
             lots: Number(dbExisting.lots),
             openPrice: dbExisting.open_price ? Number(dbExisting.open_price) : undefined,
             sl: dbExisting.sl ? Number(dbExisting.sl) : undefined,
             tp: dbExisting.tp ? Number(dbExisting.tp) : undefined,
-            magicNumber: Number(dbExisting.magic_number) || 888999,
+            magicNumber: dbExisting.magic_number != null ? String(dbExisting.magic_number) : '888999',
             comment: dbExisting.comment || '',
             createdAt: dbExisting.created_at,
             status: dbExisting.status,
@@ -344,42 +281,91 @@ export class BridgeStore {
       }
     }
 
+    // 2. L1 cache idempotency fallback
+    const existingId = this.idempotencyIndex.get(params.idempotencyKey);
+    if (existingId) {
+      const existing = this.instructions.get(existingId);
+      if (existing) {
+        return { instruction: existing, isDuplicate: true };
+      }
+    }
+
     const instructionId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const instruction: BridgeInstruction = {
       ...params,
+      parentTicket: String(params.parentTicket),
+      childTicket: params.childTicket != null ? String(params.childTicket) : undefined,
+      magicNumber: params.magicNumber != null ? String(params.magicNumber) : '888999',
       instructionId,
       createdAt: new Date().toISOString(),
       status: 'QUEUED',
       retryCount: 0,
     };
 
-    // Write to durable database
+    // 3. Write to durable PostgreSQL tables
     if (supabaseClient) {
       try {
-        await supabaseClient.from('bridge_instructions').insert({
+        const { error: insErr } = await supabaseClient.from('bridge_instructions').insert({
           id: instructionId,
           idempotency_key: params.idempotencyKey,
           action: params.action,
           child_account_id: params.childAccountId,
           parent_account_id: params.parentAccountId,
-          parent_ticket: params.parentTicket,
-          child_ticket: params.childTicket || null,
+          parent_ticket: String(params.parentTicket),
+          child_ticket: params.childTicket != null ? String(params.childTicket) : null,
           symbol: params.symbol,
           order_type: params.orderType,
           lots: params.lots,
           open_price: params.openPrice || null,
           sl: params.sl || null,
           tp: params.tp || null,
-          magic_number: params.magicNumber,
+          magic_number: params.magicNumber != null ? String(params.magicNumber) : '888999',
           comment: params.comment,
           status: 'QUEUED',
           retry_count: 0,
         });
 
+        if (insErr) {
+          // If unique constraint race condition hit, retrieve existing
+          if (insErr.code === '23505') {
+            const { data: raceExisting } = await supabaseClient
+              .from('bridge_instructions')
+              .select('*')
+              .eq('idempotency_key', params.idempotencyKey)
+              .maybeSingle();
+
+            if (raceExisting) {
+              const mapped: BridgeInstruction = {
+                instructionId: raceExisting.id,
+                idempotencyKey: raceExisting.idempotency_key,
+                action: raceExisting.action,
+                childAccountId: raceExisting.child_account_id,
+                parentAccountId: raceExisting.parent_account_id,
+                parentTicket: String(raceExisting.parent_ticket),
+                childTicket: raceExisting.child_ticket != null ? String(raceExisting.child_ticket) : undefined,
+                symbol: raceExisting.symbol,
+                orderType: raceExisting.order_type,
+                lots: Number(raceExisting.lots),
+                openPrice: raceExisting.open_price ? Number(raceExisting.open_price) : undefined,
+                sl: raceExisting.sl ? Number(raceExisting.sl) : undefined,
+                tp: raceExisting.tp ? Number(raceExisting.tp) : undefined,
+                magicNumber: raceExisting.magic_number != null ? String(raceExisting.magic_number) : '888999',
+                comment: raceExisting.comment || '',
+                createdAt: raceExisting.created_at,
+                status: raceExisting.status,
+                retryCount: Number(raceExisting.retry_count) || 0,
+              };
+              return { instruction: mapped, isDuplicate: true };
+            }
+          }
+          console.error('[BridgeStore] bridge_instructions insert error:', insErr.message);
+          throw new Error(`Failed to persist instruction: ${insErr.message}`);
+        }
+
         if (params.action === 'OPEN') {
           await supabaseClient.from('trade_mappings').upsert({
             id: `map_${instructionId}`,
-            parent_trade_ticket: params.parentTicket,
+            parent_trade_ticket: String(params.parentTicket),
             child_trade_ticket: null,
             parent_account_id: params.parentAccountId,
             child_account_id: params.childAccountId,
@@ -392,7 +378,8 @@ export class BridgeStore {
           }, { onConflict: 'parent_trade_ticket,child_account_id' });
         }
       } catch (dbErr: any) {
-        console.warn('[BridgeStore] Supabase bridge_instructions insert exception:', dbErr.message);
+        console.error('[BridgeStore] Supabase bridge persistence exception:', dbErr.message);
+        throw dbErr;
       }
     }
 
@@ -436,35 +423,78 @@ export class BridgeStore {
    */
   public async pollPendingInstructions(
     childAccountId: string,
+    limit: number = 20,
     supabaseClient?: SupabaseClient
   ): Promise<BridgeInstruction[]> {
     const now = Date.now();
     const leaseTimeIso = new Date(now + 15000).toISOString();
 
-    // 1. If Supabase is available, query durable queue
-    if (supabaseClient) {
+    // 1. Primary: Authoritative atomic claiming via PostgreSQL RPC (FOR UPDATE SKIP LOCKED)
+    if (supabaseClient && typeof (supabaseClient as any).rpc === 'function') {
       try {
-        const { data: pendingRows } = await supabaseClient
+        const { data: rpcRows, error: rpcErr } = await supabaseClient.rpc(
+          'claim_pending_instructions',
+          {
+            p_child_account_id: childAccountId,
+            p_limit: limit,
+            p_lease_seconds: 15,
+          }
+        );
+
+        if (!rpcErr && Array.isArray(rpcRows)) {
+          return rpcRows.map((r: any) => ({
+            instructionId: r.id,
+            idempotencyKey: r.idempotency_key,
+            action: r.action,
+            childAccountId: r.child_account_id,
+            parentAccountId: r.parent_account_id,
+            parentTicket: String(r.parent_ticket),
+            childTicket: r.child_ticket != null ? String(r.child_ticket) : undefined,
+            symbol: r.symbol,
+            orderType: r.order_type,
+            lots: Number(r.lots),
+            openPrice: r.open_price ? Number(r.open_price) : undefined,
+            sl: r.sl ? Number(r.sl) : undefined,
+            tp: r.tp ? Number(r.tp) : undefined,
+            magicNumber: r.magic_number != null ? String(r.magic_number) : '888999',
+            comment: r.comment || '',
+            createdAt: r.created_at,
+            status: 'IN_FLIGHT',
+            leaseExpiresAt: now + 15000,
+            retryCount: Number(r.retry_count) || 0,
+          }));
+        } else if (rpcErr) {
+          console.warn('[BridgeStore] claim_pending_instructions RPC notice:', rpcErr.message);
+        }
+      } catch (err: any) {
+        console.warn('[BridgeStore] claim_pending_instructions RPC exception:', err.message);
+      }
+    }
+
+    // 2. Secondary: Atomic conditional update fallback (prevents race condition across serverless instances)
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
+      try {
+        const { data: candidateRows } = await supabaseClient
           .from('bridge_instructions')
-          .select('*')
+          .select('id, retry_count, status')
           .eq('child_account_id', childAccountId)
           .or(`status.eq.QUEUED,and(status.eq.IN_FLIGHT,lease_expires_at.lt.${new Date(now).toISOString()})`)
           .order('created_at', { ascending: true })
-          .limit(10);
+          .limit(limit);
 
-        if (pendingRows && pendingRows.length > 0) {
+        if (candidateRows && candidateRows.length > 0) {
           const deliverableInstructions: BridgeInstruction[] = [];
 
-          for (const r of pendingRows) {
-            const currentRetries = Number(r.retry_count) || 0;
-            const isExpiredLease = r.status === 'IN_FLIGHT';
+          for (const cand of candidateRows) {
+            const currentRetries = Number(cand.retry_count) || 0;
+            const isExpiredLease = cand.status === 'IN_FLIGHT';
 
-            // Guard against infinite retries if terminal repeatedly crashes
+            // Retry limit check (5 max attempts)
             if (isExpiredLease && currentRetries >= 5) {
               await supabaseClient
                 .from('bridge_instructions')
                 .update({ status: 'FAILED' })
-                .eq('id', r.id);
+                .eq('id', cand.id);
 
               await supabaseClient
                 .from('trade_mappings')
@@ -473,15 +503,13 @@ export class BridgeStore {
                   error_message: 'Max retries (5) exceeded without broker ACK',
                   updated_at: new Date().toISOString(),
                 })
-                .eq('parent_trade_ticket', r.parent_ticket)
-                .eq('child_account_id', r.child_account_id);
+                .eq('child_account_id', childAccountId);
 
               this.addSyncLog(
                 {
                   eventType: 'INSTRUCTION_MAX_RETRIES_EXCEEDED',
                   level: 'error',
-                  details: `Instruction ${r.id} for ticket #${r.parent_ticket} exceeded 5 retries without receiver ACK. Marked as FAILED.`,
-                  ticket: Number(r.parent_ticket),
+                  details: `Instruction ${cand.id} exceeded 5 retries without receiver ACK. Marked as FAILED.`,
                 },
                 supabaseClient
               );
@@ -490,46 +518,57 @@ export class BridgeStore {
 
             const nextRetryCount = isExpiredLease ? currentRetries + 1 : currentRetries;
 
-            await supabaseClient
+            // Atomic conditional claim: only succeeds if row status has NOT already changed
+            const { data: claimedRow, error: claimErr } = await supabaseClient
               .from('bridge_instructions')
               .update({
                 status: 'IN_FLIGHT',
                 lease_expires_at: leaseTimeIso,
                 retry_count: nextRetryCount,
               })
-              .eq('id', r.id);
+              .eq('id', cand.id)
+              .eq('status', cand.status) // Must match status at time of candidate read!
+              .select('*')
+              .maybeSingle();
 
-            deliverableInstructions.push({
-              instructionId: r.id,
-              idempotencyKey: r.idempotency_key,
-              action: r.action,
-              childAccountId: r.child_account_id,
-              parentAccountId: r.parent_account_id,
-              parentTicket: Number(r.parent_ticket),
-              childTicket: r.child_ticket ? Number(r.child_ticket) : undefined,
-              symbol: r.symbol,
-              orderType: r.order_type,
-              lots: Number(r.lots),
-              openPrice: r.open_price ? Number(r.open_price) : undefined,
-              sl: r.sl ? Number(r.sl) : undefined,
-              tp: r.tp ? Number(r.tp) : undefined,
-              magicNumber: Number(r.magic_number) || 888999,
-              comment: r.comment || '',
-              createdAt: r.created_at,
-              status: 'IN_FLIGHT',
-              leaseExpiresAt: now + 15000,
-              retryCount: nextRetryCount,
-            });
+            // If another serverless instance already acquired this row, claimedRow is null
+            if (claimedRow && !claimErr) {
+              deliverableInstructions.push({
+                instructionId: claimedRow.id,
+                idempotencyKey: claimedRow.idempotency_key,
+                action: claimedRow.action,
+                childAccountId: claimedRow.child_account_id,
+                parentAccountId: claimedRow.parent_account_id,
+                parentTicket: String(claimedRow.parent_ticket),
+                childTicket: claimedRow.child_ticket != null ? String(claimedRow.child_ticket) : undefined,
+                symbol: claimedRow.symbol,
+                orderType: claimedRow.order_type,
+                lots: Number(claimedRow.lots),
+                openPrice: claimedRow.open_price ? Number(claimedRow.open_price) : undefined,
+                sl: claimedRow.sl ? Number(claimedRow.sl) : undefined,
+                tp: claimedRow.tp ? Number(claimedRow.tp) : undefined,
+                magicNumber: claimedRow.magic_number != null ? String(claimedRow.magic_number) : '888999',
+                comment: claimedRow.comment || '',
+                createdAt: claimedRow.created_at,
+                status: 'IN_FLIGHT',
+                leaseExpiresAt: now + 15000,
+                retryCount: nextRetryCount,
+              });
+            }
           }
 
           return deliverableInstructions;
         }
+
+        // When Supabase is configured, DB is authoritative: return empty array if no rows exist
+        return [];
       } catch (err: any) {
-        console.warn('[BridgeStore] Supabase pending instructions poll exception:', err.message);
+        console.warn('[BridgeStore] Atomic conditional claim poll exception:', err.message);
+        return [];
       }
     }
 
-    // 2. Fallback to process memory
+    // 2. Ephemeral process fallback (strictly for offline unit tests without database)
     const result: BridgeInstruction[] = [];
     for (const inst of this.instructions.values()) {
       if (inst.childAccountId !== childAccountId) continue;
@@ -564,8 +603,8 @@ export class BridgeStore {
   ): Promise<{ success: boolean; instruction?: BridgeInstruction; error?: string }> {
     let inst = this.instructions.get(ack.instructionId);
 
-    // If not in process memory, query Supabase
-    if (!inst && supabaseClient) {
+    // 1. Authoritative lookup from Supabase if not in process memory
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
         const { data: dbInst } = await supabaseClient
           .from('bridge_instructions')
@@ -580,21 +619,23 @@ export class BridgeStore {
             action: dbInst.action,
             childAccountId: dbInst.child_account_id,
             parentAccountId: dbInst.parent_account_id,
-            parentTicket: Number(dbInst.parent_ticket),
-            childTicket: dbInst.child_ticket ? Number(dbInst.child_ticket) : undefined,
+            parentTicket: String(dbInst.parent_ticket),
+            childTicket: dbInst.child_ticket != null ? String(dbInst.child_ticket) : undefined,
             symbol: dbInst.symbol,
             orderType: dbInst.order_type,
             lots: Number(dbInst.lots),
-            magicNumber: Number(dbInst.magic_number) || 888999,
+            openPrice: dbInst.open_price ? Number(dbInst.open_price) : undefined,
+            sl: dbInst.sl ? Number(dbInst.sl) : undefined,
+            tp: dbInst.tp ? Number(dbInst.tp) : undefined,
+            magicNumber: dbInst.magic_number != null ? String(dbInst.magic_number) : '888999',
             comment: dbInst.comment || '',
             createdAt: dbInst.created_at,
             status: dbInst.status,
             retryCount: Number(dbInst.retry_count) || 0,
           };
-          this.instructions.set(inst.instructionId, inst);
         }
       } catch (err: any) {
-        console.warn('[BridgeStore] Supabase instruction fetch exception:', err.message);
+        console.warn('[BridgeStore] Supabase instruction lookup exception:', err.message);
       }
     }
 
@@ -602,83 +643,97 @@ export class BridgeStore {
       return { success: false, error: `Instruction ${ack.instructionId} not found` };
     }
 
-    if (inst.childAccountId !== childAccountId) {
-      return { success: false, error: 'Authorization mismatch: Instruction not owned by this child terminal' };
+    const nextStatus = ack.status === 'EXECUTED' ? 'COMPLETED' : 'FAILED';
+    inst.status = nextStatus;
+    const childTicketStr = ack.childTicket != null ? String(ack.childTicket).trim() : undefined;
+    if (childTicketStr) {
+      inst.childTicket = childTicketStr;
     }
 
-    inst.status = ack.status === 'EXECUTED' ? 'COMPLETED' : 'FAILED';
-    if (ack.childTicket) {
-      inst.childTicket = ack.childTicket;
-    }
-
-    // Update Supabase tables
-    if (supabaseClient) {
+    // 2. Persist execution outcome to Supabase PostgreSQL
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
         await supabaseClient
           .from('bridge_instructions')
           .update({
-            status: inst.status,
-            child_ticket: ack.childTicket || null,
+            status: nextStatus,
+            child_ticket: childTicketStr || null,
           })
-          .eq('id', inst.instructionId);
+          .eq('id', ack.instructionId);
 
-        await supabaseClient
-          .from('trade_mappings')
-          .update({
-            status: ack.status,
-            child_trade_ticket: ack.childTicket || null,
-            latency_ms: ack.executionLatencyMs || 0,
-            error_message: ack.brokerErrorMessage || null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('parent_trade_ticket', inst.parentTicket)
-          .eq('child_account_id', inst.childAccountId);
-      } catch (dbErr: any) {
-        console.warn('[BridgeStore] Supabase ACK write exception:', dbErr.message);
+        // Update trade_mappings
+        if (inst.action === 'OPEN') {
+          await supabaseClient
+            .from('trade_mappings')
+            .update({
+              child_trade_ticket: childTicketStr || null,
+              status: ack.status,
+              latency_ms: ack.executionLatencyMs || 0,
+              error_message: ack.brokerErrorMessage || null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('parent_trade_ticket', String(inst.parentTicket))
+            .eq('child_account_id', inst.childAccountId);
+        } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
+          await supabaseClient
+            .from('trade_mappings')
+            .update({
+              status: 'CLOSED',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('parent_trade_ticket', String(inst.parentTicket))
+            .eq('child_account_id', inst.childAccountId);
+        }
+      } catch (err: any) {
+        console.error('[BridgeStore] Supabase ack persistence exception:', err.message);
       }
     }
 
-    // Update memory cache
+    // Update in-memory mapping
     const mappingKey = `${inst.parentTicket}_${inst.childAccountId}`;
-    const mapping = this.tradeMappings.get(mappingKey);
-    if (mapping) {
-      mapping.status = ack.status;
-      if (ack.childTicket) mapping.childTradeTicket = ack.childTicket;
-      if (ack.executionLatencyMs !== undefined) mapping.latencyMs = ack.executionLatencyMs;
-      if (ack.brokerErrorMessage) mapping.errorMessage = ack.brokerErrorMessage;
+    const map = this.tradeMappings.get(mappingKey);
+    if (map) {
+      if (childTicketStr) map.childTradeTicket = childTicketStr;
+      map.status = inst.action === 'CLOSE' && ack.status === 'EXECUTED' ? 'CLOSED' : ack.status;
+      map.latencyMs = ack.executionLatencyMs || map.latencyMs;
+      map.errorMessage = ack.brokerErrorMessage || undefined;
     }
 
     this.addSyncLog({
       eventType: `BROKER_ACK_${ack.status}`,
       level: ack.status === 'EXECUTED' ? 'success' : 'error',
-      details: `Receiver reported ${ack.status} for parent ticket #${inst.parentTicket}${ack.childTicket ? ` -> child #${ack.childTicket}` : ''}. Latency: ${ack.executionLatencyMs ?? 0}ms. ${ack.brokerErrorMessage || ''}`,
-      ticket: ack.childTicket || inst.parentTicket,
+      details: `Receiver reported ${ack.status} for parent ticket #${inst.parentTicket}${childTicketStr ? ` -> child #${childTicketStr}` : ''}. Latency: ${ack.executionLatencyMs ?? 0}ms. ${ack.brokerErrorMessage || ''}`,
+      ticket: childTicketStr || inst.parentTicket,
       latencyMs: ack.executionLatencyMs,
     }, supabaseClient);
 
     return { success: true, instruction: inst };
   }
 
-  public getChildTicketForParent(parentTicket: number, childAccountId: string): number | undefined {
+  public getChildTicketForParent(parentTicket: number | string, childAccountId: string): string | undefined {
     const mappingKey = `${parentTicket}_${childAccountId}`;
     const mapping = this.tradeMappings.get(mappingKey);
-    return mapping?.childTradeTicket && mapping.childTradeTicket > 0 ? mapping.childTradeTicket : undefined;
+    return mapping?.childTradeTicket && mapping.childTradeTicket !== '0' && mapping.childTradeTicket !== 0
+      ? String(mapping.childTradeTicket)
+      : undefined;
   }
 
   public async getTradeMappings(supabaseClient?: SupabaseClient): Promise<TradeMapping[]> {
-    if (supabaseClient) {
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
-        const { data: rows } = await supabaseClient
+        const { data: rows, error } = await supabaseClient
           .from('trade_mappings')
           .select('*')
           .order('open_time', { ascending: false })
           .limit(100);
 
-        if (rows && rows.length > 0) {
+        if (error) {
+          console.warn('[BridgeStore] Supabase getTradeMappings error:', error.message);
+        } else if (rows && rows.length > 0) {
           return rows.map((r) => ({
             id: r.id,
-            parentTradeTicket: Number(r.parent_trade_ticket),
-            childTradeTicket: Number(r.child_trade_ticket) || 0,
+            parentTradeTicket: String(r.parent_trade_ticket),
+            childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
             mentorId: '',
             traderId: '',
             parentAccountId: r.parent_account_id,
@@ -702,15 +757,17 @@ export class BridgeStore {
   }
 
   public async getSyncLogs(supabaseClient?: SupabaseClient): Promise<SyncLog[]> {
-    if (supabaseClient) {
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
-        const { data: rows } = await supabaseClient
+        const { data: rows, error } = await supabaseClient
           .from('bridge_sync_logs')
           .select('*')
           .order('created_at', { ascending: false })
           .limit(50);
 
-        if (rows && rows.length > 0) {
+        if (error) {
+          console.warn('[BridgeStore] Supabase getSyncLogs error:', error.message);
+        } else if (rows && rows.length > 0) {
           return rows.map((r) => ({
             id: r.id,
             timestamp: r.created_at,
@@ -718,39 +775,30 @@ export class BridgeStore {
             level: r.level as any,
             details: r.details,
             latencyMs: r.latency_ms ? Number(r.latency_ms) : undefined,
-            ticket: r.ticket ? Number(r.ticket) : undefined,
+            ticket: r.ticket != null ? String(r.ticket) : undefined,
           }));
         }
       } catch (err: any) {
         console.warn('[BridgeStore] Supabase getSyncLogs exception:', err.message);
       }
     }
-    return [...this.syncLogs];
+    return [];
   }
 
-  public async addSyncLog(log: Omit<SyncLog, 'id' | 'timestamp'>, supabaseClient?: SupabaseClient) {
-    const entry: SyncLog = {
-      ...log,
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      timestamp: new Date().toISOString(),
-    };
-    this.syncLogs.unshift(entry);
-    if (this.syncLogs.length > 500) {
-      this.syncLogs.pop();
-    }
-
-    if (supabaseClient) {
-      try {
-        await supabaseClient.from('bridge_sync_logs').insert({
-          event_type: log.eventType,
-          level: log.level,
-          details: log.details,
-          ticket: log.ticket || null,
-          latency_ms: log.latencyMs || null,
-        });
-      } catch (err: any) {
-        console.warn('[BridgeStore] Supabase sync log insert exception:', err.message);
-      }
+  public addSyncLog(log: Omit<SyncLog, 'id' | 'timestamp'>, supabaseClient?: SupabaseClient) {
+    if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
+      Promise.resolve(
+        supabaseClient
+          .from('bridge_sync_logs')
+          .insert({
+            event_type: log.eventType,
+            level: log.level,
+            details: log.details,
+            ticket: log.ticket != null ? String(log.ticket) : null,
+            latency_ms: log.latencyMs || null,
+            created_at: new Date().toISOString(),
+          })
+      ).catch((err: any) => console.warn('[BridgeStore] Sync log write notice:', err.message));
     }
   }
 }

@@ -159,32 +159,142 @@ void PollAndExecuteInstructions()
 }
 
 //+------------------------------------------------------------------+
-//| Lightweight JSON parser for TradeSync instruction format         |
+//| Select valid broker filling mode based on execution and symbol   |
+//| Returns true if a valid supported mode was configured.          |
+//| Returns false if no supported policy is available.               |
+//+------------------------------------------------------------------+
+bool ApplyBrokerFillingMode(string sym)
+{
+   long exeMode = SymbolInfoInteger(sym, SYMBOL_TRADE_EXEMODE);
+   uint fillingMode = (uint)SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+
+   // 1. If broker explicitly advertises filling mode bitmask
+   if(fillingMode > 0)
+   {
+      // Check IOC flag (bit 2)
+      if((fillingMode & SYMBOL_FILLING_IOC) != 0)
+      {
+         g_Trade.SetTypeFilling(ORDER_FILLING_IOC);
+         return true;
+      }
+      // Check FOK flag (bit 1)
+      if((fillingMode & SYMBOL_FILLING_FOK) != 0)
+      {
+         g_Trade.SetTypeFilling(ORDER_FILLING_FOK);
+         return true;
+      }
+      if(exeMode == SYMBOL_TRADE_EXECUTION_EXCHANGE)
+      {
+         g_Trade.SetTypeFilling(ORDER_FILLING_RETURN);
+         return true;
+      }
+   }
+
+   // 2. Broker returns 0 for SYMBOL_FILLING_MODE (standard for MT5 Forex Market Execution)
+   if(exeMode == SYMBOL_TRADE_EXECUTION_MARKET)
+   {
+      // In Market Execution, RETURN is forbidden by MT5 protocol; IOC is standard
+      g_Trade.SetTypeFilling(ORDER_FILLING_IOC);
+      return true;
+   }
+   else if(exeMode == SYMBOL_TRADE_EXECUTION_INSTANT || exeMode == SYMBOL_TRADE_EXECUTION_REQUEST)
+   {
+      g_Trade.SetTypeFilling(ORDER_FILLING_FOK);
+      return true;
+   }
+   else if(exeMode == SYMBOL_TRADE_EXECUTION_EXCHANGE)
+   {
+      g_Trade.SetTypeFilling(ORDER_FILLING_RETURN);
+      return true;
+   }
+
+   // No valid supported policy can be determined safely
+   PrintFormat("[TradeSync Receiver] CRITICAL ERROR: Unable to determine valid filling mode for symbol '%s' (ExeMode: %d, FillingMode: %u)",
+               sym, exeMode, fillingMode);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Robust JSON parser for TradeSync instruction array               |
+//| Handles quotes, escapes, nested braces, and multiple items       |
 //+------------------------------------------------------------------+
 void ParseAndProcessPayload(string json)
 {
-   // Fast check if any instructions exist
-   int instPos = StringFind(json, "\"instructions\":[");
+   int instPos = StringFind(json, "\"instructions\":");
    if(instPos < 0) return;
 
-   int start = instPos + 16;
-   int end = StringFind(json, "]", start);
-   if(end <= start) return;
+   int arrayOpen = StringFind(json, "[", instPos);
+   if(arrayOpen < 0) return;
 
-   string arrayContent = StringSubstr(json, start, end - start);
-   if(StringLen(arrayContent) < 5) return;
+   int jsonLen = StringLen(json);
+   int i = arrayOpen + 1;
 
-   // Split multiple instructions by '},{' or '{'
-   int objStart = 0;
-   while((objStart = StringFind(arrayContent, "{", objStart)) >= 0)
+   while(i < jsonLen)
    {
-      int objEnd = StringFind(arrayContent, "}", objStart);
-      if(objEnd < 0) break;
+      // Find start of next JSON object '{'
+      while(i < jsonLen && StringGetCharacter(json, i) != '{' && StringGetCharacter(json, i) != ']')
+      {
+         i++;
+      }
 
-      string objJson = StringSubstr(arrayContent, objStart, objEnd - objStart + 1);
-      ExecuteSingleInstruction(objJson);
+      if(i >= jsonLen || StringGetCharacter(json, i) == ']')
+      {
+         break; // End of instructions array
+      }
 
-      objStart = objEnd + 1;
+      int objStart = i;
+      int braceDepth = 0;
+      bool inQuotes = false;
+      bool escaped = false;
+      int objEnd = -1;
+
+      for(int j = objStart; j < jsonLen; j++)
+      {
+         ushort c = StringGetCharacter(json, j);
+         if(escaped)
+         {
+            escaped = false;
+            continue;
+         }
+         if(c == '\\')
+         {
+            escaped = true;
+            continue;
+         }
+         if(c == '\"')
+         {
+            inQuotes = !inQuotes;
+            continue;
+         }
+         if(!inQuotes)
+         {
+            if(c == '{')
+            {
+               braceDepth++;
+            }
+            else if(c == '}')
+            {
+               braceDepth--;
+               if(braceDepth == 0)
+               {
+                  objEnd = j;
+                  break;
+               }
+            }
+         }
+      }
+
+      if(objEnd > objStart)
+      {
+         string objJson = StringSubstr(json, objStart, objEnd - objStart + 1);
+         ExecuteSingleInstruction(objJson);
+         i = objEnd + 1;
+      }
+      else
+      {
+         Print("[TradeSync Receiver] PARSE ERROR: Unbalanced JSON object inside instructions array.");
+         break;
+      }
    }
 }
 
@@ -222,15 +332,122 @@ double ExtractJsonDouble(string json, string key)
       if((c >= '0' && c <= '9') || c == '.' || c == '-') p2++;
       else break;
    }
+   if(p2 == p1) return 0.0;
    return StringToDouble(StringSubstr(json, p1, p2 - p1));
 }
 
 //+------------------------------------------------------------------+
 //| Extract numeric integer/ulong value by JSON key                  |
+//| Parses full 64-bit digits directly via StringToInteger           |
+//| Handles both integer ("key": 123) and string ("key": "123")      |
 //+------------------------------------------------------------------+
 ulong ExtractJsonUlong(string json, string key)
 {
-   return (ulong)ExtractJsonDouble(json, key);
+   string needle = "\"" + key + "\":";
+   int p1 = StringFind(json, needle);
+   if(p1 < 0) return 0;
+   p1 += StringLen(needle);
+   
+   // Skip any spaces or quotes
+   while(p1 < StringLen(json) && (StringGetCharacter(json, p1) == ' ' || StringGetCharacter(json, p1) == '\"')) p1++;
+   
+   int p2 = p1;
+   while(p2 < StringLen(json))
+   {
+      ushort c = StringGetCharacter(json, p2);
+      if(c >= '0' && c <= '9') p2++;
+      else break;
+   }
+   if(p2 == p1) return 0;
+   return (ulong)StringToInteger(StringSubstr(json, p1, p2 - p1));
+}
+
+//+------------------------------------------------------------------+
+//| Extract exact numeric parent ticket from position comment tag    |
+//| Parses full digits following TS# or M# until non-digit delimiter  |
+//| Returns 0 if no valid numeric parent ticket tag is found         |
+//+------------------------------------------------------------------+
+ulong ExtractParentTicketFromComment(string comment)
+{
+   if(StringLen(comment) < 4) return 0;
+
+   int tagPos = StringFind(comment, "TS#");
+   int tagLen = 3;
+   if(tagPos < 0)
+   {
+      tagPos = StringFind(comment, "M#");
+      tagLen = 2;
+   }
+   if(tagPos < 0) return 0;
+
+   int start = tagPos + tagLen;
+   int totalLen = StringLen(comment);
+   if(start >= totalLen) return 0;
+
+   string digits = "";
+   for(int i = start; i < totalLen; i++)
+   {
+      ushort c = StringGetCharacter(comment, i);
+      if(c >= '0' && c <= '9')
+      {
+         digits += ShortToString(c);
+      }
+      else
+      {
+         break; // Non-digit delimiter (space, comma, etc.)
+      }
+   }
+
+   if(StringLen(digits) == 0) return 0;
+   return (ulong)StringToInteger(digits);
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Unambiguously find child position matching parent ticket |
+//| Compares exact numeric ulong equality (ticket 123 != 1234/12345) |
+//| Returns 0 if not found OR if multiple positions match (ambiguous)|
+//+------------------------------------------------------------------+
+ulong FindChildPositionByParentTicket(ulong parentTicket)
+{
+   if(parentTicket == 0) return 0;
+
+   int total = PositionsTotal();
+   ulong matchedTicket = 0;
+   int matchCount = 0;
+
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+
+      // Strict safety: magic number must match this Receiver instance
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      ulong extractedParentTicket = ExtractParentTicketFromComment(comment);
+
+      // EXACT NUMERIC EQUALITY (never substring matching)
+      if(extractedParentTicket > 0 && extractedParentTicket == parentTicket)
+      {
+         matchedTicket = ticket;
+         matchCount++;
+      }
+   }
+
+   // Safety invariant: MUST be a unique, unambiguous match
+   if(matchCount == 1)
+   {
+      return matchedTicket;
+   }
+
+   if(matchCount > 1)
+   {
+      PrintFormat("[TradeSync Receiver] SAFETY ALERT: Ambiguous match (%d child positions matched exact parent ticket #%I64u). Refusing to guess.",
+                  matchCount, parentTicket);
+   }
+
+   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -248,17 +465,41 @@ void ExecuteSingleInstruction(string instJson)
    ulong  parentTicket  = ExtractJsonUlong(instJson, "parentTicket");
    ulong  childTicket   = ExtractJsonUlong(instJson, "childTicket");
 
-   if(StringLen(instructionId) == 0 || StringLen(action) == 0) return;
+   if(StringLen(instructionId) == 0 || StringLen(action) == 0)
+   {
+      Print("[TradeSync Receiver] Rejected malformed instruction: missing instructionId or action.");
+      return;
+   }
 
    uint startTicks = GetTickCount();
 
+   // =================================================================
    // 1. ACTION: OPEN NEW ORDER
+   // =================================================================
    if(action == "OPEN")
    {
+      // Validation: reject incomplete or ambiguous instructions
+      if(StringLen(symbol) == 0 || (orderType != "BUY" && orderType != "SELL") || lots <= 0.0 || parentTicket == 0)
+      {
+         PrintFormat("[TradeSync Receiver] REJECTED MALFORMED OPEN: InstId=%s sym=%s type=%s lots=%.2f parentTicket=%I64u",
+                     instructionId, symbol, orderType, lots, parentTicket);
+         SendAck(instructionId, "FAILED", 0, 0.0, 10006, "Malformed OPEN instruction payload (missing symbol/lots/parentTicket)", GetTickCount() - startTicks);
+         return;
+      }
+
       // Select symbol in Market Watch if not active
       if(!SymbolSelect(symbol, true))
       {
          SendAck(instructionId, "FAILED", 0, 0.0, 10001, "Symbol not supported by broker: " + symbol, GetTickCount() - startTicks);
+         return;
+      }
+
+      // Safely configure and validate broker-supported filling mode
+      if(!ApplyBrokerFillingMode(symbol))
+      {
+         SendAck(instructionId, "FAILED", 0, 0.0, 10030,
+                 "Unsupported broker filling mode for symbol " + symbol + ". Execution aborted safely.",
+                 GetTickCount() - startTicks);
          return;
       }
 
@@ -279,14 +520,27 @@ void ExecuteSingleInstruction(string instJson)
          return;
       }
 
+      // Store reliable parent ticket identifier in comment: 'TS#<parentTicket>'
+      // MT5 comments are max 31 characters. 'TS#1234567890' is 13 chars.
+      string tradeComment = StringFormat("TS#%I64u", parentTicket);
+      if(StringLen(InpComment) > 0 && InpComment != "TradeSync Copy")
+      {
+         string prefix = StringSubstr(InpComment, 0, 12);
+         tradeComment = prefix + " TS#" + IntegerToString(parentTicket);
+         if(StringLen(tradeComment) > 31)
+         {
+            tradeComment = StringSubstr(tradeComment, 0, 31);
+         }
+      }
+
       bool success = false;
       if(orderType == "BUY")
       {
-         success = g_Trade.Buy(lots, symbol, 0, sl, tp, InpComment);
+         success = g_Trade.Buy(lots, symbol, 0, sl, tp, tradeComment);
       }
       else if(orderType == "SELL")
       {
-         success = g_Trade.Sell(lots, symbol, 0, sl, tp, InpComment);
+         success = g_Trade.Sell(lots, symbol, 0, sl, tp, tradeComment);
       }
 
       uint latency = GetTickCount() - startTicks;
@@ -298,8 +552,8 @@ void ExecuteSingleInstruction(string instJson)
       {
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Receiver] EXECUTED: %s %s %.2f lots on child ticket #%I64u @ %.5f (Latency: %u ms)",
-                        orderType, symbol, lots, placedTicket, fillPrice, latency);
+            PrintFormat("[TradeSync Receiver] EXECUTED: %s %s %.2f lots on child ticket #%I64u @ %.5f (Parent #%I64u, Latency: %u ms)",
+                        orderType, symbol, lots, placedTicket, fillPrice, parentTicket, latency);
          }
          SendAck(instructionId, "EXECUTED", placedTicket, fillPrice, (int)retcode, "OK", latency);
       }
@@ -310,21 +564,59 @@ void ExecuteSingleInstruction(string instJson)
          SendAck(instructionId, "FAILED", 0, 0.0, (int)retcode, errDesc, latency);
       }
    }
+   // =================================================================
    // 2. ACTION: CLOSE POSITION
+   // =================================================================
    else if(action == "CLOSE")
    {
       uint latency = GetTickCount() - startTicks;
-      if(childTicket == 0)
+
+      // 1. Resolve child position ticket strictly
+      if(childTicket == 0 && parentTicket > 0)
       {
-         // Find open position by parent ticket in comment or position list
          childTicket = FindChildPositionByParentTicket(parentTicket);
       }
 
-      if(childTicket == 0 || !PositionSelectByTicket(childTicket))
+      // Safety Rule: If exact position cannot be determined, NEVER guess or close arbitrary trades!
+      if(childTicket == 0)
       {
-         // Already closed or not found
+         PrintFormat("[TradeSync Receiver] SAFETY REJECTION: Unable to identify child position for parent ticket #%I64u. Aborting close to protect unrelated positions.",
+                     parentTicket);
+         SendAck(instructionId, "FAILED", 0, 0.0, 10004,
+                 "Child position could not be safely identified for parent #" + IntegerToString(parentTicket) + ". Close rejected.",
+                 latency);
+         return;
+      }
+
+      // 2. Select position and verify ownership
+      if(!PositionSelectByTicket(childTicket))
+      {
+         // Position is no longer open in terminal (already closed or stopped out)
          SendAck(instructionId, "EXECUTED", childTicket, 0.0, 10000, "Position already closed or not found", latency);
          return;
+      }
+
+      // Safety Rule: Verify position magic number matches EA
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
+      {
+         PrintFormat("[TradeSync Receiver] SAFETY REJECTION: Target child position #%I64u has magic %I64d != EA magic %u. Refusing to close.",
+                     childTicket, PositionGetInteger(POSITION_MAGIC), InpMagicNumber);
+         SendAck(instructionId, "FAILED", childTicket, 0.0, 10005, "Position magic number mismatch. Unrelated trade protected.", latency);
+         return;
+      }
+
+      // Safety Rule: If parentTicket is provided, cross-verify exact numeric equality
+      if(parentTicket > 0)
+      {
+         string comm = PositionGetString(POSITION_COMMENT);
+         ulong extracted = ExtractParentTicketFromComment(comm);
+         if(extracted != parentTicket)
+         {
+            PrintFormat("[TradeSync Receiver] SAFETY REJECTION: Position #%I64u comment '%s' (parent #%I64u) does not match requested parent #%I64u. Close aborted.",
+                        childTicket, comm, extracted, parentTicket);
+            SendAck(instructionId, "FAILED", childTicket, 0.0, 10007, "Parent ticket exact match failed in child position comment", latency);
+            return;
+         }
       }
 
       bool closed = g_Trade.PositionClose(childTicket, InpMaxSlippagePoints);
@@ -335,7 +627,8 @@ void ExecuteSingleInstruction(string instJson)
       {
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Receiver] CLOSED child position #%I64u (Latency: %u ms)", childTicket, latency);
+            PrintFormat("[TradeSync Receiver] CLOSED child position #%I64u (Parent #%I64u, Latency: %u ms)",
+                        childTicket, parentTicket, latency);
          }
          SendAck(instructionId, "EXECUTED", childTicket, g_Trade.ResultPrice(), (int)retcode, "Closed successfully", latency);
       }
@@ -345,52 +638,59 @@ void ExecuteSingleInstruction(string instJson)
          SendAck(instructionId, "FAILED", childTicket, 0.0, (int)retcode, errDesc, latency);
       }
    }
+   // =================================================================
    // 3. ACTION: MODIFY SL/TP
+   // =================================================================
    else if(action == "MODIFY")
    {
       uint latency = GetTickCount() - startTicks;
-      if(childTicket == 0) childTicket = FindChildPositionByParentTicket(parentTicket);
-
-      if(childTicket > 0 && PositionSelectByTicket(childTicket))
+      if(childTicket == 0 && parentTicket > 0)
       {
-         bool modified = g_Trade.PositionModify(childTicket, sl, tp);
-         latency = GetTickCount() - startTicks;
-         uint retcode = g_Trade.ResultRetcode();
-         if(modified || retcode == TRADE_RETCODE_DONE)
+         childTicket = FindChildPositionByParentTicket(parentTicket);
+      }
+
+      if(childTicket == 0)
+      {
+         SendAck(instructionId, "FAILED", 0, 0.0, 10004, "Child position not found for modification", latency);
+         return;
+      }
+
+      if(!PositionSelectByTicket(childTicket))
+      {
+         SendAck(instructionId, "FAILED", childTicket, 0.0, 10004, "Child position does not exist or already closed", latency);
+         return;
+      }
+
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
+      {
+         SendAck(instructionId, "FAILED", childTicket, 0.0, 10005, "Position magic number mismatch. Refusing modify.", latency);
+         return;
+      }
+
+      // Cross-verify exact parent ticket if provided
+      if(parentTicket > 0)
+      {
+         string comm = PositionGetString(POSITION_COMMENT);
+         ulong extracted = ExtractParentTicketFromComment(comm);
+         if(extracted != parentTicket)
          {
-            SendAck(instructionId, "EXECUTED", childTicket, 0.0, (int)retcode, "SL/TP modified", latency);
+            SendAck(instructionId, "FAILED", childTicket, 0.0, 10007, "Parent ticket exact match failed in child position comment", latency);
+            return;
          }
-         else
-         {
-            SendAck(instructionId, "FAILED", childTicket, 0.0, (int)retcode, g_Trade.ResultComment(), latency);
-         }
+      }
+
+      bool modified = g_Trade.PositionModify(childTicket, sl, tp);
+      latency = GetTickCount() - startTicks;
+      uint retcode = g_Trade.ResultRetcode();
+      if(modified || retcode == TRADE_RETCODE_DONE)
+      {
+         SendAck(instructionId, "EXECUTED", childTicket, 0.0, (int)retcode, "SL/TP modified", latency);
       }
       else
       {
-         SendAck(instructionId, "FAILED", 0, 0.0, 10004, "Child position not found for modification", latency);
+         SendAck(instructionId, "FAILED", childTicket, 0.0, (int)retcode, g_Trade.ResultComment(), latency);
       }
    }
-}
-
-//+------------------------------------------------------------------+
-//| Helper: Find child position ticket matching parent ticket        |
-//+------------------------------------------------------------------+
-ulong FindChildPositionByParentTicket(ulong parentTicket)
-{
-   int total = PositionsTotal();
-   for(int i = 0; i < total; i++)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagicNumber)
-         {
-            // Could match by comment or ticket
-            return ticket;
-         }
-      }
-   }
-   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -400,7 +700,7 @@ void SendAck(string instructionId, string status, ulong childTicket, double fill
 {
    string url = InpServerUrl + "/api/v1/bridge/instructions/ack";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"instructionId\":\"%s\",\"status\":\"%s\",\"childTicket\":%I64u,\"fillPrice\":%.5f,\"brokerErrorCode\":%d,\"brokerErrorMessage\":\"%s\",\"executionLatencyMs\":%u}",
+      "{\"account_number\":\"%I64u\",\"instructionId\":\"%s\",\"status\":\"%s\",\"childTicket\":\"%I64u\",\"fillPrice\":%.5f,\"brokerErrorCode\":%d,\"brokerErrorMessage\":\"%s\",\"executionLatencyMs\":%u}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       instructionId,
       status,
@@ -423,3 +723,5 @@ void SendAck(string instructionId, string status, ulong childTicket, double fill
 
    WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
 }
+
+

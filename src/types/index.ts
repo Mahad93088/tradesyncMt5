@@ -129,7 +129,7 @@ export type OrderStatus = 'OPEN' | 'CLOSED' | 'PENDING' | 'CANCELLED';
 
 export interface Trade {
   id: string;
-  ticket: number;
+  ticket: number | string;
   accountId: string;
   symbol: string;
   type: OrderType;
@@ -143,7 +143,7 @@ export interface Trade {
   openTime: string;
   closeTime?: string;
   status: OrderStatus;
-  magicNumber?: number;
+  magicNumber?: number | string;
   comment?: string;
 }
 
@@ -151,6 +151,7 @@ export type MappingExecutionStatus =
   | 'PENDING'
   | 'EXECUTED'
   | 'FAILED'
+  | 'CLOSED'
   | 'REJECTED_MARGIN'
   | 'REJECTED_OFF_QUOTES'
   | 'SLIPPAGE_EXCEEDED'
@@ -159,8 +160,8 @@ export type MappingExecutionStatus =
 
 export interface TradeMapping {
   id: string;
-  parentTradeTicket: number;
-  childTradeTicket: number;
+  parentTradeTicket: number | string;
+  childTradeTicket: number | string;
   mentorId: string;
   traderId: string;
   parentAccountId: string;
@@ -189,7 +190,7 @@ export interface SyncLog {
   traderName?: string;
   details: string;
   latencyMs?: number;
-  ticket?: number;
+  ticket?: number | string;
 }
 
 export interface AuditLog {

@@ -218,7 +218,7 @@ export const MentorActivityView: React.FC = () => {
 
                     {/* Child Ticket */}
                     <td className="px-4 py-3 font-mono">
-                      {map.childTradeTicket > 0 ? (
+                      {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
                         <span className="font-semibold text-emerald-400">#{map.childTradeTicket}</span>
                       ) : (
                         <span className="text-slate-500 italic text-[11px]">Rejected</span>

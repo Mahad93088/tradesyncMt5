@@ -32,7 +32,7 @@ export const SimulationToolbar: React.FC = () => {
   const [lotInput, setLotInput] = useState<number>(1.0);
   const [submittingAction, setSubmittingAction] = useState<'BUY' | 'SELL' | 'CLOSE' | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
-  const [selectedCloseTicket, setSelectedCloseTicket] = useState<number | null>(null);
+  const [selectedCloseTicket, setSelectedCloseTicket] = useState<number | string | null>(null);
 
   // Active open parent trades (magicNumber 7701 or marked as parent live order)
   const openParentTrades = trades.filter(

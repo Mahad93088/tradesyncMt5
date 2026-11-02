@@ -278,7 +278,7 @@ export const GlobalLogsView: React.FC = () => {
                         <span className="text-[10px] text-slate-500 font-sans">{mentor?.fullName}</span>
                       </td>
                       <td className="px-4 py-3 font-mono">
-                        {map.childTradeTicket > 0 ? (
+                        {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
                           <div className="font-semibold text-emerald-400">#{map.childTradeTicket}</div>
                         ) : (
                           <span className="text-slate-500 italic text-[11px]">Rejected</span>

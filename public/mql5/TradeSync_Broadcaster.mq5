@@ -195,7 +195,7 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
 {
    string url = InpServerUrl + "/api/v1/bridge/events/trade-open";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":%I64u,\"symbol\":\"%s\",\"type\":\"%s\",\"lots\":%.2f,\"openPrice\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"magicNumber\":%d,\"comment\":\"TradeSync Broadcaster\"}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":\"%s\",\"lots\":%.2f,\"openPrice\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"magicNumber\":\"%d\",\"comment\":\"TradeSync Broadcaster\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       symbol,
@@ -217,7 +217,7 @@ void BroadcastTradeClose(ulong parentTicket, double closePrice)
 {
    string url = InpServerUrl + "/api/v1/bridge/events/trade-close";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":%I64u,\"closePrice\":%.5f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"closePrice\":%.5f}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       closePrice
@@ -233,7 +233,7 @@ void BroadcastTradeModify(ulong parentTicket, double sl, double tp)
 {
    string url = InpServerUrl + "/api/v1/bridge/events/trade-modify";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":%I64u,\"sl\":%.5f,\"tp\":%.5f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"sl\":%.5f,\"tp\":%.5f}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       sl,

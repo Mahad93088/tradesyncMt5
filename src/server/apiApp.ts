@@ -558,15 +558,43 @@ export function createApiApp() {
   const bridgeStore = BridgeStore.getInstance();
 
   /**
-   * Helper to resolve authoritative Supabase client for bridge persistence
+   * Helper to resolve authoritative Supabase client for bridge persistence.
+   * For EA terminal bridge operations (requests with X-Terminal-Token or requireServiceRole),
+   * strictly requires server-side SUPABASE_SERVICE_ROLE_KEY.
+   * If missing, throws a descriptive configuration error and refuses silent fallback to anonymous access.
    */
-  const getBridgeDbClient = (req?: Request) => {
+  const getBridgeDbClient = (req?: Request, options: { requireServiceRole?: boolean } = {}) => {
     if (!supabaseUrl) return undefined;
+
+    const isEaBridgeCall = Boolean(
+      options.requireServiceRole ||
+      req?.headers?.['x-terminal-token'] ||
+      (typeof req?.headers?.authorization === 'string' && req.headers.authorization.startsWith('Bearer ts_')) ||
+      (typeof req?.query?.token === 'string' && req.query.token.startsWith('ts_'))
+    );
+
+    if (isEaBridgeCall) {
+      if (!serviceRoleKey) {
+        console.error(
+          '[BridgeServer] CRITICAL CONFIGURATION ERROR: SUPABASE_SERVICE_ROLE_KEY is required for MT5 EA bridge operations. Refusing unauthenticated or anonymous execution.'
+        );
+        throw new Error(
+          'Server Configuration Error: MT5 EA bridge operations require a valid server-side SUPABASE_SERVICE_ROLE_KEY. Configure this variable in your environment or Vercel project settings.'
+        );
+      }
+      return createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+    }
+
+    // 1. Direct server-side service-role client if available
     if (serviceRoleKey) {
       return createClient(supabaseUrl, serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false },
       });
     }
+
+    // 2. User authenticated JWT (from admin or user browser)
     const authHeader = req?.headers?.authorization;
     if (authHeader && authHeader.startsWith('Bearer ') && !authHeader.startsWith('Bearer ts_')) {
       const token = authHeader.replace(/^Bearer\s+/i, '').trim();
@@ -575,6 +603,8 @@ export function createApiApp() {
         global: { headers: { Authorization: `Bearer ${token}` } },
       });
     }
+
+    // 3. Unprivileged public client (for public read status diagnostics only)
     if (publishableKey) {
       return createClient(supabaseUrl, publishableKey, {
         auth: { autoRefreshToken: false, persistSession: false },
@@ -607,7 +637,17 @@ export function createApiApp() {
       };
     }
 
-    const dbClient = getBridgeDbClient();
+    let dbClient;
+    try {
+      dbClient = getBridgeDbClient(req);
+    } catch (confErr: any) {
+      return {
+        terminal: null,
+        error: confErr.message,
+        status: 500,
+      };
+    }
+
     const terminal = await bridgeStore.authenticateTerminal(rawToken, dbClient);
     if (!terminal) {
       return {
@@ -748,7 +788,7 @@ export function createApiApp() {
         return res.status(400).json({ success: false, error: 'Missing accountId or accountNumber in body' });
       }
 
-      const dbClient = getBridgeDbClient();
+      const dbClient = getBridgeDbClient(req);
       let targetRole: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
       let targetUserId = 'system_authorized';
       let targetBrokerServer = brokerServer || 'MetaQuotes-Demo';
@@ -1142,19 +1182,20 @@ export function createApiApp() {
       openPrice,
       sl,
       tp,
-      magicNumber = 0,
+      magicNumber = 888999,
       comment = 'TradeSync Master',
     } = req.body;
 
-    if (!ticket || !symbol || !type || !lots) {
+    if (ticket == null || !symbol || !type || lots == null) {
       return res.status(400).json({
         success: false,
         error: 'Missing required trade parameters: ticket, symbol, type, lots',
       });
     }
 
-    const parentTicketNum = Number(ticket);
+    const parentTicketStr = String(ticket).trim();
     const parentLotsNum = Number(lots);
+    const magicNumStr = magicNumber != null ? String(magicNumber).trim() : '888999';
     const dbClient = getBridgeDbClient();
 
     // Resolve assigned active child accounts from PostgreSQL
@@ -1224,7 +1265,7 @@ export function createApiApp() {
                   eventType: 'ASSIGNMENT_REJECTED',
                   level: 'warn',
                   details: `Skipped copy for child account ${a.child_account_id}: not found or role is not child`,
-                  ticket: parentTicketNum,
+                  ticket: parentTicketStr,
                 },
                 dbClient
               );
@@ -1244,7 +1285,7 @@ export function createApiApp() {
                   eventType: 'TRADER_INACTIVE_SKIPPED',
                   level: 'warn',
                   details: `Skipped copy for child ${a.child_account_id}: trader profile is ${traderProf?.status || 'unknown'}.`,
-                  ticket: parentTicketNum,
+                  ticket: parentTicketStr,
                 },
                 dbClient
               );
@@ -1279,15 +1320,15 @@ export function createApiApp() {
         {
           eventType: 'NO_ACTIVE_CHILDREN',
           level: 'info',
-          details: `Parent trade #${parentTicketNum} received, but no active, verified child accounts are currently assigned to parent ${auth.terminal.accountId}.`,
-          ticket: parentTicketNum,
+          details: `Parent trade #${parentTicketStr} received, but no active, verified child accounts are currently assigned to parent ${auth.terminal.accountId}.`,
+          ticket: parentTicketStr,
         },
         dbClient
       );
 
       return res.status(200).json({
         success: true,
-        parentTicket: parentTicketNum,
+        parentTicket: parentTicketStr,
         childInstructionsQueued: 0,
         message: 'No active, verified child account assignments found for this parent account.',
         instructions: [],
@@ -1321,7 +1362,7 @@ export function createApiApp() {
             eventType: 'RISK_ENGINE_REJECTED',
             level: 'warn',
             details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
-            ticket: parentTicketNum,
+            ticket: parentTicketStr,
           },
           dbClient
         );
@@ -1329,22 +1370,22 @@ export function createApiApp() {
       }
 
       // Durable idempotent queueing
-      const idempotencyKey = `${parentTicketNum}_${child.childAccountId}_OPEN`;
+      const idempotencyKey = `${parentTicketStr}_${child.childAccountId}_OPEN`;
       const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
         {
           idempotencyKey,
           action: 'OPEN',
           childAccountId: child.childAccountId,
           parentAccountId: auth.terminal.accountId,
-          parentTicket: parentTicketNum,
+          parentTicket: parentTicketStr,
           symbol: sizing.childSymbol,
           orderType: type,
           lots: sizing.childLots,
           openPrice: openPrice ? Number(openPrice) : undefined,
           sl: sl ? Number(sl) : undefined,
           tp: tp ? Number(tp) : undefined,
-          magicNumber: Number(magicNumber) || 888999,
-          comment: `${comment} (M#${parentTicketNum})`,
+          magicNumber: magicNumStr,
+          comment: `${comment} (M#${parentTicketStr})`,
         },
         dbClient
       );
@@ -1360,7 +1401,7 @@ export function createApiApp() {
 
     return res.status(200).json({
       success: true,
-      parentTicket: parentTicketNum,
+      parentTicket: parentTicketStr,
       childInstructionsQueued: queuedInstructions.length,
       instructions: queuedInstructions,
     });
@@ -1382,32 +1423,71 @@ export function createApiApp() {
     }
 
     const { ticket } = req.body;
-    if (!ticket) {
+    if (ticket == null) {
       return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
     }
 
-    const parentTicketNum = Number(ticket);
-    const dbClient = getBridgeDbClient();
-    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
-      (m) => m.parentTradeTicket === parentTicketNum && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
+    const parentTicketStr = String(ticket).trim();
+    const dbClient = getBridgeDbClient(req);
+
+    // 1. Primary lookup: trade_mappings table
+    let mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
+      (m) => String(m.parentTradeTicket) === parentTicketStr && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
     );
+
+    // 2. Resilient fallback for delayed acknowledgments:
+    // If trade_mappings has not recorded the active mapping yet, query bridge_instructions
+    // to identify which child accounts were targeted in the initial OPEN event
+    if (mappings.length === 0 && dbClient) {
+      try {
+        const { data: openInstructions } = await dbClient
+          .from('bridge_instructions')
+          .select('child_account_id, symbol, order_type, lots, child_ticket')
+          .eq('parent_account_id', terminal.accountId)
+          .eq('parent_ticket', parentTicketStr)
+          .eq('action', 'OPEN');
+
+        if (openInstructions && openInstructions.length > 0) {
+          mappings = openInstructions.map((oi) => ({
+            id: `map_fallback_${parentTicketStr}_${oi.child_account_id}`,
+            parentTradeTicket: parentTicketStr,
+            childTradeTicket: oi.child_ticket != null ? String(oi.child_ticket) : '0',
+            mentorId: '',
+            traderId: '',
+            parentAccountId: terminal.accountId,
+            childAccountId: oi.child_account_id,
+            symbol: oi.symbol,
+            orderType: oi.order_type as any,
+            parentLots: Number(oi.lots),
+            childLots: Number(oi.lots),
+            openTime: new Date().toISOString(),
+            latencyMs: 0,
+            status: 'PENDING' as any,
+            retryCount: 0,
+          }));
+        }
+      } catch (e: any) {
+        console.warn('[TradeClose] Fallback instruction lookup notice:', e.message);
+      }
+    }
 
     const queuedClose = [];
     for (const map of mappings) {
-      const idempotencyKey = `${parentTicketNum}_${map.childAccountId}_CLOSE`;
+      const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_CLOSE`;
+      const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
       const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
         {
           idempotencyKey,
           action: 'CLOSE',
           childAccountId: map.childAccountId,
           parentAccountId: terminal.accountId,
-          parentTicket: parentTicketNum,
-          childTicket: map.childTradeTicket > 0 ? map.childTradeTicket : undefined,
+          parentTicket: parentTicketStr,
+          childTicket: childTicketVal,
           symbol: map.symbol,
           orderType: map.orderType,
           lots: map.childLots,
-          magicNumber: 888999,
-          comment: `Close Parent #${parentTicketNum}`,
+          magicNumber: '888999',
+          comment: `Close Parent #${parentTicketStr}`,
         },
         dbClient
       );
@@ -1422,7 +1502,7 @@ export function createApiApp() {
 
     return res.status(200).json({
       success: true,
-      parentTicket: parentTicketNum,
+      parentTicket: parentTicketStr,
       closeInstructionsQueued: queuedClose.length,
       instructions: queuedClose,
     });
@@ -1444,39 +1524,73 @@ export function createApiApp() {
     }
 
     const { ticket, sl, tp } = req.body;
-    if (!ticket) {
+    if (ticket == null) {
       return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
     }
 
-    const parentTicketNum = Number(ticket);
-    const dbClient = getBridgeDbClient();
-    const mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
-      (m) => m.parentTradeTicket === parentTicketNum && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
+    const parentTicketStr = String(ticket).trim();
+    const dbClient = getBridgeDbClient(req);
+    let mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
+      (m) => String(m.parentTradeTicket) === parentTicketStr && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
     );
 
+    if (mappings.length === 0 && dbClient) {
+      try {
+        const { data: openInstructions } = await dbClient
+          .from('bridge_instructions')
+          .select('child_account_id, symbol, order_type, lots, child_ticket')
+          .eq('parent_account_id', terminal.accountId)
+          .eq('parent_ticket', parentTicketStr)
+          .eq('action', 'OPEN');
+
+        if (openInstructions && openInstructions.length > 0) {
+          mappings = openInstructions.map((oi) => ({
+            id: `map_mod_${parentTicketStr}_${oi.child_account_id}`,
+            parentTradeTicket: parentTicketStr,
+            childTradeTicket: oi.child_ticket != null ? String(oi.child_ticket) : '0',
+            mentorId: '',
+            traderId: '',
+            parentAccountId: terminal.accountId,
+            childAccountId: oi.child_account_id,
+            symbol: oi.symbol,
+            orderType: oi.order_type as any,
+            parentLots: Number(oi.lots),
+            childLots: Number(oi.lots),
+            openTime: new Date().toISOString(),
+            latencyMs: 0,
+            status: 'PENDING' as any,
+            retryCount: 0,
+          }));
+        }
+      } catch (e: any) {
+        console.warn('[TradeModify] Fallback lookup notice:', e.message);
+      }
+    }
+
     for (const map of mappings) {
-      const idempotencyKey = `${parentTicketNum}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
+      const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
+      const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
       await bridgeStore.queueInstruction(
         {
           idempotencyKey,
           action: 'MODIFY',
           childAccountId: map.childAccountId,
           parentAccountId: auth.terminal.accountId,
-          parentTicket: parentTicketNum,
-          childTicket: map.childTradeTicket > 0 ? map.childTradeTicket : undefined,
+          parentTicket: parentTicketStr,
+          childTicket: childTicketVal,
           symbol: map.symbol,
           orderType: map.orderType,
           lots: map.childLots,
           sl: sl ? Number(sl) : undefined,
           tp: tp ? Number(tp) : undefined,
-          magicNumber: 888999,
-          comment: `Modify Parent #${parentTicketNum}`,
+          magicNumber: '888999',
+          comment: `Modify Parent #${parentTicketStr}`,
         },
         dbClient
       );
     }
 
-    return res.status(200).json({ success: true, parentTicket: parentTicketNum, modifiedCount: mappings.length });
+    return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount: mappings.length });
   });
 
   /**
@@ -1493,8 +1607,8 @@ export function createApiApp() {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Child terminals may poll copy instructions.' });
     }
 
-    const dbClient = getBridgeDbClient();
-    const pending = await bridgeStore.pollPendingInstructions(auth.terminal.accountId, dbClient);
+    const dbClient = getBridgeDbClient(req);
+    const pending = await bridgeStore.pollPendingInstructions(auth.terminal.accountId, 20, dbClient);
     return res.status(200).json({
       success: true,
       count: pending.length,
@@ -1530,13 +1644,14 @@ export function createApiApp() {
       return res.status(400).json({ success: false, error: 'Missing instructionId or status' });
     }
 
-    const dbClient = getBridgeDbClient();
+    const childTicketStr = childTicket != null ? String(childTicket).trim() : undefined;
+    const dbClient = getBridgeDbClient(req);
     const ackResult = await bridgeStore.acknowledgeInstruction(
       auth.terminal.accountId,
       {
         instructionId,
         status,
-        childTicket: childTicket ? Number(childTicket) : undefined,
+        childTicket: childTicketStr,
         fillPrice: fillPrice ? Number(fillPrice) : undefined,
         brokerErrorCode: brokerErrorCode ? Number(brokerErrorCode) : undefined,
         brokerErrorMessage,
@@ -1556,17 +1671,16 @@ export function createApiApp() {
    * 8. Bridge Diagnostic Mappings & Real Logs
    * GET /api/v1/bridge/mappings
    */
-  registerRoute('get', '/api/v1/bridge/mappings', async (_req: Request, res: Response) => {
-    const dbClient = getBridgeDbClient();
+  registerRoute('get', '/api/v1/bridge/mappings', async (req: Request, res: Response) => {
+    const dbClient = getBridgeDbClient(req);
     const mappings = await bridgeStore.getTradeMappings(dbClient);
-    const logs = await bridgeStore.getSyncLogs(dbClient);
+    return res.status(200).json({ success: true, mappings });
+  });
 
-    return res.status(200).json({
-      success: true,
-      databasePersistence: Boolean(dbClient),
-      tradeMappings: mappings,
-      syncLogs: logs.slice(0, 50),
-    });
+  registerRoute('get', '/api/v1/bridge/logs', async (req: Request, res: Response) => {
+    const dbClient = getBridgeDbClient(req);
+    const logs = await bridgeStore.getSyncLogs(dbClient);
+    return res.status(200).json({ success: true, logs });
   });
 
   /**
