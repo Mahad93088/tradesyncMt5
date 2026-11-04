@@ -363,6 +363,41 @@ ulong ExtractJsonUlong(string json, string key)
 }
 
 //+------------------------------------------------------------------+
+//| Extract boolean value by JSON key                                |
+//| Handles "key": true, "key": false, "key": 1, "key": 0           |
+//+------------------------------------------------------------------+
+bool ExtractJsonBool(string json, string key, bool defaultValue = false)
+{
+   string needle = "\"" + key + "\":";
+   int p1 = StringFind(json, needle);
+   if(p1 < 0) return defaultValue;
+   p1 += StringLen(needle);
+
+   while(p1 < StringLen(json) && (StringGetCharacter(json, p1) == ' ' || StringGetCharacter(json, p1) == '\"')) p1++;
+
+   if(StringFind(json, "true", p1) == p1) return true;
+   if(StringFind(json, "false", p1) == p1) return false;
+   if(StringFind(json, "1", p1) == p1) return true;
+   if(StringFind(json, "0", p1) == p1) return false;
+
+   return defaultValue;
+}
+
+//+------------------------------------------------------------------+
+//| Check if key exists and is non-null in JSON                      |
+//+------------------------------------------------------------------+
+bool HasJsonKey(string json, string key)
+{
+   string needle = "\"" + key + "\":";
+   int p1 = StringFind(json, needle);
+   if(p1 < 0) return false;
+   p1 += StringLen(needle);
+   while(p1 < StringLen(json) && StringGetCharacter(json, p1) == ' ') p1++;
+   if(StringFind(json, "null", p1) == p1) return false;
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Extract exact numeric parent ticket from position comment tag    |
 //| Parses full digits following TS# or M# until non-digit delimiter  |
 //| Returns 0 if no valid numeric parent ticket tag is found         |
@@ -460,10 +495,28 @@ void ExecuteSingleInstruction(string instJson)
    string symbol        = ExtractJsonString(instJson, "symbol");
    string orderType     = ExtractJsonString(instJson, "orderType");
    double lots          = ExtractJsonDouble(instJson, "lots");
-   double sl            = ExtractJsonDouble(instJson, "sl");
-   double tp            = ExtractJsonDouble(instJson, "tp");
    ulong  parentTicket  = ExtractJsonUlong(instJson, "parentTicket");
    ulong  childTicket   = ExtractJsonUlong(instJson, "childTicket");
+
+   // Distinguish explicit SL/TP presence vs omission
+   bool hasSL = false;
+   if(HasJsonKey(instJson, "hasSL"))
+      hasSL = ExtractJsonBool(instJson, "hasSL", false);
+   else if(HasJsonKey(instJson, "hasSl"))
+      hasSL = ExtractJsonBool(instJson, "hasSl", false);
+   else if(HasJsonKey(instJson, "sl"))
+      hasSL = true;
+
+   bool hasTP = false;
+   if(HasJsonKey(instJson, "hasTP"))
+      hasTP = ExtractJsonBool(instJson, "hasTP", false);
+   else if(HasJsonKey(instJson, "hasTp"))
+      hasTP = ExtractJsonBool(instJson, "hasTp", false);
+   else if(HasJsonKey(instJson, "tp"))
+      hasTP = true;
+
+   double sl = hasSL ? ExtractJsonDouble(instJson, "sl") : 0.0;
+   double tp = hasTP ? ExtractJsonDouble(instJson, "tp") : 0.0;
 
    if(StringLen(instructionId) == 0 || StringLen(action) == 0)
    {
@@ -533,14 +586,16 @@ void ExecuteSingleInstruction(string instJson)
          }
       }
 
+      double openSL = hasSL ? sl : 0.0;
+      double openTP = hasTP ? tp : 0.0;
       bool success = false;
       if(orderType == "BUY")
       {
-         success = g_Trade.Buy(lots, symbol, 0, sl, tp, tradeComment);
+         success = g_Trade.Buy(lots, symbol, 0, openSL, openTP, tradeComment);
       }
       else if(orderType == "SELL")
       {
-         success = g_Trade.Sell(lots, symbol, 0, sl, tp, tradeComment);
+         success = g_Trade.Sell(lots, symbol, 0, openSL, openTP, tradeComment);
       }
 
       uint latency = GetTickCount() - startTicks;
@@ -679,11 +734,48 @@ void ExecuteSingleInstruction(string instJson)
          }
       }
 
-      bool modified = g_Trade.PositionModify(childTicket, sl, tp);
+      // Retrieve current position SL and TP
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+
+      // Determine target SL:
+      // - Field omitted (hasSL == false): keep existing setting unchanged
+      // - Explicit zero (hasSL == true && sl == 0.0): clear setting (0.0)
+      // - Positive value (hasSL == true && sl > 0.0): update to target value
+      double targetSL = hasSL ? sl : currentSL;
+
+      // Determine target TP:
+      // - Field omitted (hasTP == false): keep existing setting unchanged
+      // - Explicit zero (hasTP == true && tp == 0.0): clear setting (0.0)
+      // - Positive value (hasTP == true && tp > 0.0): update to target value
+      double targetTP = hasTP ? tp : currentTP;
+
+      // Check if target SL/TP are already identical to current position
+      string posSymbol = PositionGetString(POSITION_SYMBOL);
+      double pt = SymbolInfoDouble(posSymbol, SYMBOL_POINT);
+      if(pt <= 0.0) pt = 0.00001;
+
+      if(MathAbs(targetSL - currentSL) < pt / 2.0 && MathAbs(targetTP - currentTP) < pt / 2.0)
+      {
+         if(InpVerboseLogs)
+         {
+            PrintFormat("[TradeSync Receiver] MODIFY NO-OP: Position #%I64u already has SL=%.5f, TP=%.5f. No broker modify needed.",
+                        childTicket, targetSL, targetTP);
+         }
+         SendAck(instructionId, "EXECUTED", childTicket, 0.0, 10000, "SL/TP already matches target", latency);
+         return;
+      }
+
+      bool modified = g_Trade.PositionModify(childTicket, targetSL, targetTP);
       latency = GetTickCount() - startTicks;
       uint retcode = g_Trade.ResultRetcode();
       if(modified || retcode == TRADE_RETCODE_DONE)
       {
+         if(InpVerboseLogs)
+         {
+            PrintFormat("[TradeSync Receiver] MODIFIED position #%I64u: SL %.5f -> %.5f, TP %.5f -> %.5f (Retcode: %u, Latency: %u ms)",
+                        childTicket, currentSL, targetSL, currentTP, targetTP, retcode, latency);
+         }
          SendAck(instructionId, "EXECUTED", childTicket, 0.0, (int)retcode, "SL/TP modified", latency);
       }
       else

@@ -33,6 +33,10 @@ export interface BridgeInstruction {
   openPrice?: number;
   sl?: number;
   tp?: number;
+  hasSL?: boolean;
+  hasTP?: boolean;
+  hasSl?: boolean;
+  hasTp?: boolean;
   magicNumber: number | string;
   comment: string;
   createdAt: string;
@@ -252,6 +256,8 @@ export class BridgeStore {
           .maybeSingle();
 
         if (dbExisting) {
+          const hasSL = dbExisting.sl != null && dbExisting.sl !== '';
+          const hasTP = dbExisting.tp != null && dbExisting.tp !== '';
           const mapped: BridgeInstruction = {
             instructionId: dbExisting.id,
             idempotencyKey: dbExisting.idempotency_key,
@@ -263,9 +269,13 @@ export class BridgeStore {
             symbol: dbExisting.symbol,
             orderType: dbExisting.order_type,
             lots: Number(dbExisting.lots),
-            openPrice: dbExisting.open_price ? Number(dbExisting.open_price) : undefined,
-            sl: dbExisting.sl ? Number(dbExisting.sl) : undefined,
-            tp: dbExisting.tp ? Number(dbExisting.tp) : undefined,
+            openPrice: dbExisting.open_price != null && dbExisting.open_price !== '' ? Number(dbExisting.open_price) : undefined,
+            sl: hasSL ? Number(dbExisting.sl) : undefined,
+            tp: hasTP ? Number(dbExisting.tp) : undefined,
+            hasSL,
+            hasTP,
+            hasSl: hasSL,
+            hasTp: hasTP,
             magicNumber: dbExisting.magic_number != null ? String(dbExisting.magic_number) : '888999',
             comment: dbExisting.comment || '',
             createdAt: dbExisting.created_at,
@@ -291,11 +301,19 @@ export class BridgeStore {
     }
 
     const instructionId = `inst_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const hasSL = params.hasSL !== undefined ? params.hasSL : (params.sl != null && (params.sl as any) !== '');
+    const hasTP = params.hasTP !== undefined ? params.hasTP : (params.tp != null && (params.tp as any) !== '');
     const instruction: BridgeInstruction = {
       ...params,
       parentTicket: String(params.parentTicket),
       childTicket: params.childTicket != null ? String(params.childTicket) : undefined,
       magicNumber: params.magicNumber != null ? String(params.magicNumber) : '888999',
+      sl: hasSL ? Number(params.sl) : undefined,
+      tp: hasTP ? Number(params.tp) : undefined,
+      hasSL,
+      hasTP,
+      hasSl: hasSL,
+      hasTp: hasTP,
       instructionId,
       createdAt: new Date().toISOString(),
       status: 'QUEUED',
@@ -316,9 +334,9 @@ export class BridgeStore {
           symbol: params.symbol,
           order_type: params.orderType,
           lots: params.lots,
-          open_price: params.openPrice || null,
-          sl: params.sl || null,
-          tp: params.tp || null,
+          open_price: params.openPrice != null && (params.openPrice as any) !== '' ? params.openPrice : null,
+          sl: params.sl != null && (params.sl as any) !== '' ? params.sl : null,
+          tp: params.tp != null && (params.tp as any) !== '' ? params.tp : null,
           magic_number: params.magicNumber != null ? String(params.magicNumber) : '888999',
           comment: params.comment,
           status: 'QUEUED',
@@ -335,6 +353,8 @@ export class BridgeStore {
               .maybeSingle();
 
             if (raceExisting) {
+              const raceHasSL = raceExisting.sl != null && raceExisting.sl !== '';
+              const raceHasTP = raceExisting.tp != null && raceExisting.tp !== '';
               const mapped: BridgeInstruction = {
                 instructionId: raceExisting.id,
                 idempotencyKey: raceExisting.idempotency_key,
@@ -346,9 +366,13 @@ export class BridgeStore {
                 symbol: raceExisting.symbol,
                 orderType: raceExisting.order_type,
                 lots: Number(raceExisting.lots),
-                openPrice: raceExisting.open_price ? Number(raceExisting.open_price) : undefined,
-                sl: raceExisting.sl ? Number(raceExisting.sl) : undefined,
-                tp: raceExisting.tp ? Number(raceExisting.tp) : undefined,
+                openPrice: raceExisting.open_price != null && raceExisting.open_price !== '' ? Number(raceExisting.open_price) : undefined,
+                sl: raceHasSL ? Number(raceExisting.sl) : undefined,
+                tp: raceHasTP ? Number(raceExisting.tp) : undefined,
+                hasSL: raceHasSL,
+                hasTP: raceHasTP,
+                hasSl: raceHasSL,
+                hasTp: raceHasTP,
                 magicNumber: raceExisting.magic_number != null ? String(raceExisting.magic_number) : '888999',
                 comment: raceExisting.comment || '',
                 createdAt: raceExisting.created_at,
@@ -442,27 +466,38 @@ export class BridgeStore {
         );
 
         if (!rpcErr && Array.isArray(rpcRows)) {
-          return rpcRows.map((r: any) => ({
-            instructionId: r.id,
-            idempotencyKey: r.idempotency_key,
-            action: r.action,
-            childAccountId: r.child_account_id,
-            parentAccountId: r.parent_account_id,
-            parentTicket: String(r.parent_ticket),
-            childTicket: r.child_ticket != null ? String(r.child_ticket) : undefined,
-            symbol: r.symbol,
-            orderType: r.order_type,
-            lots: Number(r.lots),
-            openPrice: r.open_price ? Number(r.open_price) : undefined,
-            sl: r.sl ? Number(r.sl) : undefined,
-            tp: r.tp ? Number(r.tp) : undefined,
-            magicNumber: r.magic_number != null ? String(r.magic_number) : '888999',
-            comment: r.comment || '',
-            createdAt: r.created_at,
-            status: 'IN_FLIGHT',
-            leaseExpiresAt: now + 15000,
-            retryCount: Number(r.retry_count) || 0,
-          }));
+          return rpcRows.map((r: any) => {
+            const hasSL = r.sl != null && r.sl !== '';
+            const hasTP = r.tp != null && r.tp !== '';
+            const parsedLease = r.lease_expires_at ? new Date(r.lease_expires_at).getTime() : NaN;
+            const validLease = !isNaN(parsedLease) && parsedLease > 0 ? parsedLease : now + 15000;
+
+            return {
+              instructionId: r.id,
+              idempotencyKey: r.idempotency_key,
+              action: r.action,
+              childAccountId: r.child_account_id,
+              parentAccountId: r.parent_account_id,
+              parentTicket: String(r.parent_ticket),
+              childTicket: r.child_ticket != null ? String(r.child_ticket) : undefined,
+              symbol: r.symbol,
+              orderType: r.order_type,
+              lots: Number(r.lots),
+              openPrice: r.open_price != null && r.open_price !== '' ? Number(r.open_price) : undefined,
+              sl: hasSL ? Number(r.sl) : undefined,
+              tp: hasTP ? Number(r.tp) : undefined,
+              hasSL,
+              hasTP,
+              hasSl: hasSL,
+              hasTp: hasTP,
+              magicNumber: r.magic_number != null ? String(r.magic_number) : '888999',
+              comment: r.comment || '',
+              createdAt: r.created_at,
+              status: 'IN_FLIGHT',
+              leaseExpiresAt: validLease,
+              retryCount: Number(r.retry_count) || 0,
+            };
+          });
         } else if (rpcErr) {
           console.warn('[BridgeStore] claim_pending_instructions RPC notice:', rpcErr.message);
         }
@@ -533,6 +568,11 @@ export class BridgeStore {
 
             // If another serverless instance already acquired this row, claimedRow is null
             if (claimedRow && !claimErr) {
+              const hasSL = claimedRow.sl != null && claimedRow.sl !== '';
+              const hasTP = claimedRow.tp != null && claimedRow.tp !== '';
+              const parsedLease = claimedRow.lease_expires_at ? new Date(claimedRow.lease_expires_at).getTime() : NaN;
+              const validLease = !isNaN(parsedLease) && parsedLease > 0 ? parsedLease : now + 15000;
+
               deliverableInstructions.push({
                 instructionId: claimedRow.id,
                 idempotencyKey: claimedRow.idempotency_key,
@@ -544,14 +584,18 @@ export class BridgeStore {
                 symbol: claimedRow.symbol,
                 orderType: claimedRow.order_type,
                 lots: Number(claimedRow.lots),
-                openPrice: claimedRow.open_price ? Number(claimedRow.open_price) : undefined,
-                sl: claimedRow.sl ? Number(claimedRow.sl) : undefined,
-                tp: claimedRow.tp ? Number(claimedRow.tp) : undefined,
+                openPrice: claimedRow.open_price != null && claimedRow.open_price !== '' ? Number(claimedRow.open_price) : undefined,
+                sl: hasSL ? Number(claimedRow.sl) : undefined,
+                tp: hasTP ? Number(claimedRow.tp) : undefined,
+                hasSL,
+                hasTP,
+                hasSl: hasSL,
+                hasTp: hasTP,
                 magicNumber: claimedRow.magic_number != null ? String(claimedRow.magic_number) : '888999',
                 comment: claimedRow.comment || '',
                 createdAt: claimedRow.created_at,
                 status: 'IN_FLIGHT',
-                leaseExpiresAt: now + 15000,
+                leaseExpiresAt: validLease,
                 retryCount: nextRetryCount,
               });
             }
@@ -613,6 +657,8 @@ export class BridgeStore {
           .maybeSingle();
 
         if (dbInst) {
+          const hasSL = dbInst.sl != null && dbInst.sl !== '';
+          const hasTP = dbInst.tp != null && dbInst.tp !== '';
           inst = {
             instructionId: dbInst.id,
             idempotencyKey: dbInst.idempotency_key,
@@ -624,9 +670,13 @@ export class BridgeStore {
             symbol: dbInst.symbol,
             orderType: dbInst.order_type,
             lots: Number(dbInst.lots),
-            openPrice: dbInst.open_price ? Number(dbInst.open_price) : undefined,
-            sl: dbInst.sl ? Number(dbInst.sl) : undefined,
-            tp: dbInst.tp ? Number(dbInst.tp) : undefined,
+            openPrice: dbInst.open_price != null && dbInst.open_price !== '' ? Number(dbInst.open_price) : undefined,
+            sl: hasSL ? Number(dbInst.sl) : undefined,
+            tp: hasTP ? Number(dbInst.tp) : undefined,
+            hasSL,
+            hasTP,
+            hasSl: hasSL,
+            hasTp: hasTP,
             magicNumber: dbInst.magic_number != null ? String(dbInst.magic_number) : '888999',
             comment: dbInst.comment || '',
             createdAt: dbInst.created_at,
