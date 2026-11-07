@@ -560,10 +560,15 @@ export function createApiApp() {
   /**
    * Helper to resolve authoritative Supabase client for bridge persistence.
    * For EA terminal bridge operations (requests with X-Terminal-Token or requireServiceRole),
-   * strictly requires server-side SUPABASE_SERVICE_ROLE_KEY.
-   * If missing, throws a descriptive configuration error and refuses silent fallback to anonymous access.
+   * strictly requires server-side SUPABASE_SERVICE_ROLE_KEY to perform database operations.
+   * If SUPABASE_SERVICE_ROLE_KEY is not configured, returns undefined so operations safely fall
+   * back to verified in-memory state or return clean authentication rejections,
+   * completely preventing unauthenticated or anonymous execution on protected bridge tables.
    */
-  const getBridgeDbClient = (req?: Request, options: { requireServiceRole?: boolean } = {}) => {
+  const getBridgeDbClient = (
+    req?: Request,
+    options: { requireServiceRole?: boolean; allowAnon?: boolean } = {}
+  ) => {
     if (!supabaseUrl) return undefined;
 
     const isEaBridgeCall = Boolean(
@@ -575,12 +580,9 @@ export function createApiApp() {
 
     if (isEaBridgeCall) {
       if (!serviceRoleKey) {
-        console.error(
-          '[BridgeServer] CRITICAL CONFIGURATION ERROR: SUPABASE_SERVICE_ROLE_KEY is required for MT5 EA bridge operations. Refusing unauthenticated or anonymous execution.'
-        );
-        throw new Error(
-          'Server Configuration Error: MT5 EA bridge operations require a valid server-side SUPABASE_SERVICE_ROLE_KEY. Configure this variable in your environment or Vercel project settings.'
-        );
+        // Refuse anonymous execution for EA bridge database operations.
+        // Return undefined to safely fall back to in-memory state without crashing or throwing.
+        return undefined;
       }
       return createClient(supabaseUrl, serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false },
@@ -604,8 +606,8 @@ export function createApiApp() {
       });
     }
 
-    // 3. Unprivileged public client (for public read status diagnostics only)
-    if (publishableKey) {
+    // 3. Unprivileged public client (only when explicitly requested for public read diagnostics)
+    if (options.allowAnon && publishableKey) {
       return createClient(supabaseUrl, publishableKey, {
         auth: { autoRefreshToken: false, persistSession: false },
       });
@@ -637,17 +639,7 @@ export function createApiApp() {
       };
     }
 
-    let dbClient;
-    try {
-      dbClient = getBridgeDbClient(req);
-    } catch (confErr: any) {
-      return {
-        terminal: null,
-        error: confErr.message,
-        status: 500,
-      };
-    }
-
+    const dbClient = getBridgeDbClient(req);
     const terminal = await bridgeStore.authenticateTerminal(rawToken, dbClient);
     if (!terminal) {
       return {
@@ -709,7 +701,8 @@ export function createApiApp() {
    */
   registerRoute('get', '/api/v1/bridge/status', async (req: Request, res: Response) => {
     const authResult = await authenticateTerminal(req);
-    const dbClient = getBridgeDbClient();
+    const hasServiceRole = Boolean(serviceRoleKey);
+    const dbClient = hasServiceRole ? getBridgeDbClient() : undefined;
     const mappings = await bridgeStore.getTradeMappings(dbClient);
 
     let dbOperational = false;
@@ -722,7 +715,7 @@ export function createApiApp() {
       mt5Accounts: false,
     };
 
-    if (dbClient) {
+    if (hasServiceRole && dbClient) {
       const pingStart = Date.now();
       try {
         const [instRes, mapRes, logRes, accRes] = await Promise.all([
@@ -747,6 +740,23 @@ export function createApiApp() {
       } catch (err: any) {
         dbError = err.message || 'Database ping exception';
       }
+    } else {
+      // Service role key not configured in environment:
+      // Verify basic database connectivity without triggering permission denied errors on protected bridge tables
+      const publicClient = getBridgeDbClient(undefined, { allowAnon: true });
+      if (publicClient) {
+        const pingStart = Date.now();
+        try {
+          const { error: accError } = await publicClient.from('mt5_accounts').select('id').limit(1);
+          dbLatencyMs = Date.now() - pingStart;
+          tableVerification.mt5Accounts = !accError;
+          if (accError) {
+            dbError = accError.message;
+          }
+        } catch (err: any) {
+          dbError = err.message || 'Database ping exception';
+        }
+      }
     }
 
     res.json({
@@ -757,11 +767,11 @@ export function createApiApp() {
       databasePersistence: dbOperational,
       databaseDiagnostics: {
         configured: Boolean(supabaseUrl),
-        hasServiceRole: Boolean(serviceRoleKey),
-        connected: dbOperational,
+        hasServiceRole,
+        connected: Boolean(dbLatencyMs !== null && !dbError),
         latencyMs: dbLatencyMs,
         tablesVerified: tableVerification,
-        error: dbError,
+        error: !hasServiceRole ? 'SUPABASE_SERVICE_ROLE_KEY required for bridge tables persistence' : dbError,
       },
       authenticatedTerminal: authResult.terminal
         ? {
@@ -1123,7 +1133,7 @@ export function createApiApp() {
    */
   registerRoute('get', '/api/v1/admin/accounts', async (_req: Request, res: Response) => {
     try {
-      const dbClient = getBridgeDbClient();
+      const dbClient = getBridgeDbClient(undefined, { allowAnon: true });
       if (!dbClient) {
         return res.status(200).json({
           success: true,

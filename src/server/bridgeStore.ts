@@ -778,7 +778,9 @@ export class BridgeStore {
           .limit(100);
 
         if (error) {
-          console.warn('[BridgeStore] Supabase getTradeMappings error:', error.message);
+          if (!error.message?.toLowerCase().includes('permission denied')) {
+            console.warn('[BridgeStore] Supabase getTradeMappings notice:', error.message);
+          }
         } else if (rows && rows.length > 0) {
           return rows.map((r) => ({
             id: r.id,
@@ -800,7 +802,9 @@ export class BridgeStore {
           }));
         }
       } catch (err: any) {
-        console.warn('[BridgeStore] Supabase getTradeMappings exception:', err.message);
+        if (!err.message?.toLowerCase().includes('permission denied')) {
+          console.warn('[BridgeStore] Supabase getTradeMappings exception:', err.message);
+        }
       }
     }
     return Array.from(this.tradeMappings.values());
@@ -816,7 +820,9 @@ export class BridgeStore {
           .limit(50);
 
         if (error) {
-          console.warn('[BridgeStore] Supabase getSyncLogs error:', error.message);
+          if (!error.message?.toLowerCase().includes('permission denied')) {
+            console.warn('[BridgeStore] Supabase getSyncLogs notice:', error.message);
+          }
         } else if (rows && rows.length > 0) {
           return rows.map((r) => ({
             id: r.id,
@@ -829,7 +835,9 @@ export class BridgeStore {
           }));
         }
       } catch (err: any) {
-        console.warn('[BridgeStore] Supabase getSyncLogs exception:', err.message);
+        if (!err.message?.toLowerCase().includes('permission denied')) {
+          console.warn('[BridgeStore] Supabase getSyncLogs exception:', err.message);
+        }
       }
     }
     return [];
