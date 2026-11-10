@@ -256,7 +256,31 @@ void BroadcastTradeModify(ulong parentTicket, double sl, double tp)
 void SendHeartbeat()
 {
    string url = InpServerUrl + "/api/v1/bridge/status";
-   SendJsonRequest("GET", url, "");
+   char postData[];
+   char resultData[];
+   string resultHeaders;
+   string headers = "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
+                    "X-Account-Number: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
+
+   ResetLastError();
+   int res = WebRequest("GET", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
+
+   if(res == -1)
+   {
+      int err = GetLastError();
+      PrintFormat("[TradeSync Broadcaster] Heartbeat WebRequest FAILED (Error %d) on GET %s", err, url);
+      return;
+   }
+
+   string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(res == 200 || res == 201)
+   {
+      PrintFormat("[TradeSync Broadcaster] Heartbeat OK (HTTP %d) | Response: %s", res, responseText);
+   }
+   else
+   {
+      PrintFormat("[TradeSync Broadcaster] Heartbeat FAILED (HTTP %d) on GET %s | Response: %s", res, url, responseText);
+   }
 }
 
 //+------------------------------------------------------------------+
