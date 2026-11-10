@@ -127,6 +127,16 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       ulong magic    = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
       ulong position = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
 
+      // Only process actual BUY and SELL trade deals; ignore balance, credit, commission, and other non-trading transactions
+      if(dealType != DEAL_TYPE_BUY && dealType != DEAL_TYPE_SELL) return;
+
+      // Validate required identifiers, symbol, and volume before processing
+      string symbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+      double volume = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+      double price  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+
+      if(position == 0 || StringLen(symbol) == 0 || volume <= 0.0) return;
+
       // Magic number filter check
       if(InpMagicFilter > 0 && magic != InpMagicFilter) return;
 
@@ -134,13 +144,10 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       if(IsDealProcessed(dealTicket)) return;
       MarkDealProcessed(dealTicket);
 
-      string symbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
-      double volume = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
-      double price  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-
       // 1. POSITION OPEN (DEAL_ENTRY_IN)
       if(dealEntry == DEAL_ENTRY_IN)
       {
+
          string orderType = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
          double sl = 0.0;
          double tp = 0.0;
@@ -198,8 +205,8 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
       "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":\"%s\",\"lots\":%.2f,\"openPrice\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"magicNumber\":\"%d\",\"comment\":\"TradeSync Broadcaster\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
-      symbol,
-      orderType,
+      EscapeJsonString(symbol),
+      EscapeJsonString(orderType),
       lots,
       price,
       sl,
@@ -260,12 +267,12 @@ bool SendJsonRequest(string method, string url, string payload)
    char postData[];
    char resultData[];
    string resultHeaders;
-   string headers = "Content-Type: application/json\r\n" +
-                    "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
+   string headers = "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
                     "X-Account-Number: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
 
    if(StringLen(payload) > 0)
    {
+      headers = "Content-Type: application/json\r\n" + headers;
       StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
       // Strip trailing null terminator
       ArrayResize(postData, ArraySize(postData) - 1);
@@ -284,11 +291,24 @@ bool SendJsonRequest(string method, string url, string payload)
    if(res != 200 && res != 201)
    {
       string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
-      PrintFormat("[TradeSync Broadcaster] Server returned HTTP %d: %s", res, responseText);
+      PrintFormat("[TradeSync Broadcaster] HTTP %d on %s %s | Response: %s", res, method, url, responseText);
       return false;
    }
 
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Escape special characters for valid JSON string fields   |
+//+------------------------------------------------------------------+
+string EscapeJsonString(string value)
+{
+   StringReplace(value, "\\", "\\\\");
+   StringReplace(value, "\"", "\\\"");
+   StringReplace(value, "\r", "\\r");
+   StringReplace(value, "\n", "\\n");
+   StringReplace(value, "\t", "\\t");
+   return value;
 }
 
 //+------------------------------------------------------------------+

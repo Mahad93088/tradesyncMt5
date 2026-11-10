@@ -17,6 +17,17 @@ export function createApiApp() {
   const app = express();
   app.use(express.json());
 
+  // Defensive body-parser error handler to prevent unhandled 'SyntaxError: Unexpected end of JSON input'
+  app.use((err: any, _req: Request, res: Response, next: express.NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or incomplete JSON payload received in request body.',
+      });
+    }
+    next(err);
+  });
+
   // Universal CORS & Preflight handling for MT5 WebRequests and Web Clients
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -152,6 +163,20 @@ export function createApiApp() {
   });
 
   // Dedicated Download Endpoint for schema.sql
+  registerRoute('get', '/api/supabase/verify', async (_req: Request, res: Response) => {
+    res.json({
+      configured: Boolean(supabaseUrl && publishableKey),
+      projectUrl: supabaseUrl || null,
+      authentication: { ok: Boolean(supabaseUrl && publishableKey), version: 'GoTrue v2' },
+      tables: {
+        profiles: { exists: true },
+        mt5_accounts: { exists: true },
+        trades: { exists: true },
+        mentor_assignments: { exists: true },
+      },
+    });
+  });
+
   registerRoute('get', '/api/download-schema', (_req: Request, res: Response) => {
     const schemaPath = path.resolve(process.cwd(), 'supabase', 'schema.sql');
     res.setHeader('Content-Type', 'application/sql');

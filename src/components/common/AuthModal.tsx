@@ -158,8 +158,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     setVerifying(true);
     try {
       const res = await fetch('/api/supabase/verify');
-      const data = await res.json();
-      setVerifyResult(data);
+      const text = await res.text();
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      if (data) {
+        setVerifyResult(data);
+      } else {
+        setVerifyResult({ configured: false, error: 'Empty or invalid response from server' });
+      }
     } catch (err: any) {
       setVerifyResult({ configured: false, error: err.message });
     } finally {
