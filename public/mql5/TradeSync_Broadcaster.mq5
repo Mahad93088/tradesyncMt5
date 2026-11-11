@@ -268,11 +268,16 @@ void SendHeartbeat()
    string url = InpServerUrl + "/api/v1/bridge/heartbeat";
    PrintFormat("[TradeSync Broadcaster] Sending heartbeat: POST %s", url);
 
+   string payload = StringFormat("{\"account_number\":\"%I64u\"}", AccountInfoInteger(ACCOUNT_LOGIN));
    char postData[];
    char resultData[];
    string resultHeaders;
-   string headers = "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
+   string headers = "Content-Type: application/json\r\n" +
+                    "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
                     "X-Account-Number: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
+
+   StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(postData, ArraySize(postData) - 1);
 
    ResetLastError();
    int res = WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
