@@ -82,7 +82,16 @@ int OnInit()
 
    // Send initial connection ping to backend
    SendHeartbeat();
-   EventSetTimer(30); // 30-second heartbeat check
+
+   ResetLastError();
+   if(!EventSetTimer(30))
+   {
+      PrintFormat("[TradeSync Broadcaster] ERROR: EventSetTimer(30) failed (Error %d). Periodic heartbeats will NOT run.", GetLastError());
+   }
+   else
+   {
+      Print("[TradeSync Broadcaster] Timer registered successfully (interval: 30s).");
+   }
 
    PrintFormat("[TradeSync Broadcaster] Initialized successfully. Server: %s", InpServerUrl);
    Print("[TradeSync Broadcaster] Ensure '" + InpServerUrl + "' is listed in Tools -> Options -> Expert Advisors -> Allow WebRequest");
@@ -103,6 +112,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   Print("[TradeSync Broadcaster] OnTimer() triggered - executing periodic heartbeat...");
    SendHeartbeat();
 }
 
@@ -256,6 +266,8 @@ void BroadcastTradeModify(ulong parentTicket, double sl, double tp)
 void SendHeartbeat()
 {
    string url = InpServerUrl + "/api/v1/bridge/status";
+   PrintFormat("[TradeSync Broadcaster] Sending heartbeat: GET %s", url);
+
    char postData[];
    char resultData[];
    string resultHeaders;
