@@ -42,6 +42,11 @@ int OnInit()
                AccountInfoString(ACCOUNT_COMPANY),
                AccountInfoString(ACCOUNT_SERVER));
 
+   if(!EnsureDemoAccount("OnInit"))
+   {
+      return(INIT_FAILED);
+   }
+
    // 1. Strict Server URL Validation
    string cleanUrl = InpServerUrl;
    StringTrimLeft(cleanUrl);
@@ -127,6 +132,8 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void PollAndExecuteInstructions()
 {
+   if(!EnsureDemoAccount("PollAndExecuteInstructions")) return;
+
    string url = InpServerUrl + "/api/v1/bridge/instructions/pending";
    char postData[];
    char resultData[];
@@ -519,6 +526,8 @@ ulong FindChildPositionByParentTicket(ulong parentTicket)
 //+------------------------------------------------------------------+
 void ExecuteSingleInstruction(string instJson)
 {
+   if(!EnsureDemoAccount("ExecuteSingleInstruction")) return;
+
    string instructionId = ExtractJsonString(instJson, "instructionId");
    string action        = ExtractJsonString(instJson, "action");
    string symbol        = ExtractJsonString(instJson, "symbol");
@@ -843,6 +852,40 @@ void SendAck(string instructionId, string status, ulong childTicket, double fill
    ArrayResize(postData, ArraySize(postData) - 1);
 
    WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
+}
+
+//+------------------------------------------------------------------+
+//| Safety Guard: Strictly enforce Demo Account execution only       |
+//+------------------------------------------------------------------+
+bool EnsureDemoAccount(string context)
+{
+   long tradeMode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   string modeName = "UNKNOWN";
+   if(tradeMode == ACCOUNT_TRADE_MODE_DEMO) modeName = "DEMO";
+   else if(tradeMode == ACCOUNT_TRADE_MODE_CONTEST) modeName = "CONTEST";
+   else if(tradeMode == ACCOUNT_TRADE_MODE_REAL) modeName = "REAL";
+
+   if(tradeMode != ACCOUNT_TRADE_MODE_DEMO)
+   {
+      PrintFormat("[TradeSync Receiver] SAFETY BLOCK (%s): Login=%I64u | Server='%s' | TradeMode=%s (%I64d). This EA is strictly restricted to DEMO accounts.",
+                  context,
+                  AccountInfoInteger(ACCOUNT_LOGIN),
+                  AccountInfoString(ACCOUNT_SERVER),
+                  modeName,
+                  tradeMode);
+      return false;
+   }
+
+   if(context == "OnInit")
+   {
+      PrintFormat("[TradeSync Receiver] Demo check PASSED (%s): Login=%I64u | Server='%s' | TradeMode=%s (%I64d)",
+                  context,
+                  AccountInfoInteger(ACCOUNT_LOGIN),
+                  AccountInfoString(ACCOUNT_SERVER),
+                  modeName,
+                  tradeMode);
+   }
+   return true;
 }
 
 
