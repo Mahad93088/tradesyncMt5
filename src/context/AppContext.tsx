@@ -223,6 +223,65 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(mt5Accounts));
   }, [mt5Accounts]);
 
+  // Sync authoritative MT5 account statuses (connectionStatus, lastSync) from backend Supabase
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncAccountsFromServer = async () => {
+      try {
+        const res = await fetch('/api/v1/admin/accounts');
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!isMounted || !json?.success || !Array.isArray(json.accounts) || json.accounts.length === 0) {
+          return;
+        }
+
+        const serverAccounts: MT5Account[] = json.accounts.map((acc: any) => ({
+          id: acc.id,
+          userId: acc.user_id,
+          accountRole: acc.account_role === 'parent' ? 'parent' : 'child',
+          accountNumber: String(acc.account_number),
+          broker: acc.broker_name || 'MetaTrader 5',
+          server: acc.broker_server || '',
+          accountType: acc.account_type === 'live' ? 'live' : 'demo',
+          balance: Number(acc.balance) || 0,
+          equity: Number(acc.equity) || 0,
+          margin: Number(acc.margin) || 0,
+          freeMargin: Number(acc.free_margin) || 0,
+          currency: acc.currency || 'USD',
+          leverage: Number(acc.leverage) || 100,
+          connectionStatus: acc.connection_status || 'disconnected',
+          isInvestorPassword: Boolean(acc.is_investor_password),
+          autoTradingEnabled: Boolean(acc.auto_trading_enabled),
+          pingMs: Number(acc.ping_ms) || 12,
+          lastSync: acc.last_sync || new Date().toISOString(),
+          errorMessage: acc.error_message || undefined,
+        }));
+
+        setMt5Accounts((prev) => {
+          const serverById = new Map(serverAccounts.map((sa) => [sa.id, sa]));
+          const merged = [...serverAccounts];
+          for (const existing of prev) {
+            if (!serverById.has(existing.id)) {
+              merged.push(existing);
+            }
+          }
+          return merged;
+        });
+      } catch {
+        // Silently ignore transient network/API errors so dashboard remains stable
+      }
+    };
+
+    syncAccountsFromServer();
+    const intervalId = setInterval(syncAccountsFromServer, 12000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, []);
+
   useEffect(() => {
     localStorage.setItem('tradesync_links', JSON.stringify(parentChildLinks));
   }, [parentChildLinks]);
