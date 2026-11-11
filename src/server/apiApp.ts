@@ -812,6 +812,31 @@ export function createApiApp() {
   });
 
   /**
+   * 1b. Authenticated Terminal Heartbeat
+   * POST /api/v1/bridge/heartbeat
+   * Enforces terminal-token authentication and updates connection_status = 'connected' + last_sync.
+   */
+  registerRoute('post', '/api/v1/bridge/heartbeat', async (req: Request, res: Response) => {
+    const auth = await authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({
+        success: false,
+        error: auth.error || 'Unauthorized: Invalid or unverified terminal authentication token.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      accountId: auth.terminal.accountId,
+      accountRole: auth.terminal.accountRole,
+      accountNumber: auth.terminal.accountNumber,
+      brokerServer: auth.terminal.brokerServer,
+      connectionStatus: 'connected',
+      lastSync: new Date().toISOString(),
+    });
+  });
+
+  /**
    * 2. Provision or Refresh Terminal Authentication Token
    * POST /api/v1/bridge/terminals/token
    */
