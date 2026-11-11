@@ -28,6 +28,9 @@ input bool     InpVerboseLogs       = true;                            // Output
 //--- Global Variables
 CTrade   g_Trade;
 bool     g_IsPollInFlight = false;
+datetime g_LastPollSuccessLog = 0;
+datetime g_LastPollErrorLog = 0;
+int      g_LastPollErrorCode = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -139,19 +142,45 @@ void PollAndExecuteInstructions()
    {
       // Error 4014 = URL not allowed in WebRequest settings
       int err = GetLastError();
-      if(err == 4014)
+      datetime now = TimeLocal();
+      if(err != g_LastPollErrorCode || (now - g_LastPollErrorLog) >= 30)
       {
-         PrintFormat("[TradeSync Receiver] WebRequest blocked: Add '%s' to Tools -> Options -> Expert Advisors -> Allow WebRequest", InpServerUrl);
+         g_LastPollErrorLog = now;
+         g_LastPollErrorCode = err;
+         if(err == 4014)
+         {
+            PrintFormat("[TradeSync Receiver] WebRequest blocked (Error 4014): Add '%s' to Tools -> Options -> Expert Advisors -> Allow WebRequest", InpServerUrl);
+         }
+         else
+         {
+            PrintFormat("[TradeSync Receiver] Poll WebRequest FAILED (Error %d) on GET %s", err, url);
+         }
       }
       return;
    }
 
+   string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+
    if(res != 200)
    {
+      datetime now = TimeLocal();
+      if(res != g_LastPollErrorCode || (now - g_LastPollErrorLog) >= 30)
+      {
+         g_LastPollErrorLog = now;
+         g_LastPollErrorCode = res;
+         PrintFormat("[TradeSync Receiver] Poll FAILED (HTTP %d) on GET %s | Response: %s", res, url, responseText);
+      }
       return;
    }
 
-   string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+   g_LastPollErrorCode = 0;
+   datetime now = TimeLocal();
+   if(g_LastPollSuccessLog == 0 || (now - g_LastPollSuccessLog) >= 30)
+   {
+      g_LastPollSuccessLog = now;
+      PrintFormat("[TradeSync Receiver] Poll OK (HTTP 200) | Response: %s", responseText);
+   }
+
    if(StringLen(responseText) < 10) return;
 
    // Parse JSON instruction payload
