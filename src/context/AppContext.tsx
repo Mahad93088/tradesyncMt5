@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabaseDataService } from '../services/supabaseDataService';
+import { ensureValidSession } from '../lib/sessionManager';
 import {
   User,
   UserRole,
@@ -228,8 +229,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let isMounted = true;
 
     const syncAccountsFromServer = async () => {
+      if (!isCloudMode || !isConfigured || authUser.role !== 'admin' || authUser.status !== 'active') {
+        return;
+      }
       try {
-        const res = await fetch('/api/v1/admin/accounts');
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return;
+        }
+        const res = await fetch('/api/v1/admin/accounts', {
+          headers: {
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+        });
         if (!res.ok) return;
         const json = await res.json();
         if (!isMounted || !json?.success || !Array.isArray(json.accounts) || json.accounts.length === 0) {
@@ -280,7 +292,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, []);
+  }, [isCloudMode, isConfigured, authUser.role, authUser.status]);
 
   useEffect(() => {
     localStorage.setItem('tradesync_links', JSON.stringify(parentChildLinks));
@@ -320,12 +332,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Switch role helper
   const switchRole = (role: UserRole, specificUserId?: string) => {
-    const isOwnerOrAdmin =
-      authUser.role === 'admin' ||
-      authUser.email?.toLowerCase().trim() === 'jamesjoker20188@gmail.com' ||
-      authUser.email?.toLowerCase().includes('admin');
+    const isOwnerOrAdmin = authUser.role === 'admin' && authUser.status === 'active';
 
-    if (isCloudMode && !isOwnerOrAdmin && authUser.role !== 'admin') {
+    if (isCloudMode && !isOwnerOrAdmin) {
       const notif: PlatformNotification = {
         id: `notif_${Date.now()}`,
         title: 'Role Switching Restricted in Cloud Mode',

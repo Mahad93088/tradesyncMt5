@@ -411,11 +411,20 @@ export const mt5AdminService = {
     demoLinks?: ParentChildLink[];
     isCloudMode?: boolean;
   }): Promise<{ data: ParentAccountItem[]; error: string | null; source: 'supabase' | 'demo_harness' }> {
-    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts
-    try {
-      const apiRes = await fetch('/api/v1/admin/accounts');
-      if (apiRes.ok) {
-        const json = await apiRes.json();
+    const isCloud = options?.isCloudMode && isSupabaseConfigured();
+
+    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts when authenticated
+    if (isCloud) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        if (sessionCheck.valid && sessionCheck.session?.access_token) {
+          const apiRes = await fetch('/api/v1/admin/accounts', {
+            headers: {
+              Authorization: `Bearer ${sessionCheck.session.access_token}`,
+            },
+          });
+          if (apiRes.ok) {
+            const json = await apiRes.json();
         if (json.success && Array.isArray(json.accounts) && json.accounts.length > 0) {
           const profileMap = new Map<string, any>();
           (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
@@ -495,14 +504,14 @@ export const mt5AdminService = {
             });
 
             return { data: parents, error: null, source: 'supabase' };
+              }
+            }
           }
         }
+      } catch (e: any) {
+        console.warn('[mt5AdminService] /api/v1/admin/accounts fetch notice:', e.message);
       }
-    } catch (e: any) {
-      console.warn('[mt5AdminService] /api/v1/admin/accounts fetch notice:', e.message);
     }
-
-    const isCloud = options?.isCloudMode && isSupabaseConfigured();
 
     if (isCloud) {
       try {
@@ -756,11 +765,20 @@ export const mt5AdminService = {
     demoLinks?: ParentChildLink[];
     isCloudMode?: boolean;
   }): Promise<{ data: ChildAccountItem[]; error: string | null; source: 'supabase' | 'demo_harness' }> {
-    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts
-    try {
-      const apiRes = await fetch('/api/v1/admin/accounts');
-      if (apiRes.ok) {
-        const json = await apiRes.json();
+    const isCloud = options?.isCloudMode && isSupabaseConfigured();
+
+    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts when authenticated
+    if (isCloud) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        if (sessionCheck.valid && sessionCheck.session?.access_token) {
+          const apiRes = await fetch('/api/v1/admin/accounts', {
+            headers: {
+              Authorization: `Bearer ${sessionCheck.session.access_token}`,
+            },
+          });
+          if (apiRes.ok) {
+            const json = await apiRes.json();
         if (json.success && Array.isArray(json.accounts) && json.accounts.length > 0) {
           const profileMap = new Map<string, any>();
           (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
@@ -858,14 +876,14 @@ export const mt5AdminService = {
             });
 
             return { data: children, error: null, source: 'supabase' };
+              }
+            }
           }
         }
+      } catch (e: any) {
+        console.warn('[mt5AdminService] /api/v1/admin/accounts getChildAccounts notice:', e.message);
       }
-    } catch (e: any) {
-      console.warn('[mt5AdminService] /api/v1/admin/accounts getChildAccounts notice:', e.message);
     }
-
-    const isCloud = options?.isCloudMode && isSupabaseConfigured();
 
     if (isCloud) {
       try {

@@ -367,21 +367,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const isUserAuthenticated = Boolean(session?.user || supabaseUser);
 
-  const effectiveEmail = (
-    profile?.email ||
-    supabaseUser?.email ||
-    session?.user?.email ||
-    ''
-  ).toLowerCase().trim();
-
-  // Project owner, admin credentials, or explicit admin profile role
-  const isProjectOwnerOrAdmin =
-    profile?.role === 'admin' ||
-    effectiveEmail === 'jamesjoker20188@gmail.com' ||
-    effectiveEmail === 'admin@tradesync.io' ||
-    effectiveEmail.startsWith('admin@') ||
-    Boolean(supabaseUser?.user_metadata?.is_admin) ||
-    Boolean(session?.user?.user_metadata?.is_admin);
+  // Authoritative administrator check: requires active profile with role === 'admin'
+  const isProjectOwnerOrAdmin = profile?.role === 'admin' && profile?.status === 'active';
 
   const resolvedRole: UserRole = isProjectOwnerOrAdmin
     ? 'admin'

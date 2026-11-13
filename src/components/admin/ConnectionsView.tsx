@@ -20,6 +20,7 @@ import {
   X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { ensureValidSession } from '../../lib/sessionManager';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
@@ -39,6 +40,7 @@ export const ConnectionsView: React.FC = () => {
   const [generatedTokens, setGeneratedTokens] = useState<Record<string, string>>({});
   const [copiedTokenAccId, setCopiedTokenAccId] = useState<string | null>(null);
   const [isGeneratingToken, setIsGeneratingToken] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
 
   // One-time Token presentation modal state (e.g. on token generation/rotation)
@@ -53,10 +55,20 @@ export const ConnectionsView: React.FC = () => {
 
   const handleGenerateToken = async (account: MT5Account) => {
     setIsGeneratingToken(account.id);
+    setTokenError(null);
     try {
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        setTokenError('Authentication required: sign in as an active administrator or account owner to rotate terminal tokens.');
+        return;
+      }
+
       const res = await fetch('/api/v1/bridge/terminals/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionCheck.session.access_token}`,
+        },
         body: JSON.stringify({
           accountId: account.id,
           accountNumber: account.accountNumber,
@@ -66,15 +78,17 @@ export const ConnectionsView: React.FC = () => {
         }),
       });
       const data = await res.json();
-      if (data.success && data.terminalToken) {
-        setGeneratedTokens((prev) => ({ ...prev, [account.id]: data.terminalToken }));
-        setTokenModalData({
-          account,
-          terminalToken: data.terminalToken,
-        });
+      if (!res.ok || !data?.success || !data?.terminalToken) {
+        setTokenError(data?.error || `Token rotation failed (HTTP ${res.status}).`);
+        return;
       }
-    } catch (err) {
-      console.error('Failed to generate token:', err);
+      setGeneratedTokens((prev) => ({ ...prev, [account.id]: data.terminalToken }));
+      setTokenModalData({
+        account,
+        terminalToken: data.terminalToken,
+      });
+    } catch (err: any) {
+      setTokenError(err?.message || 'Failed to rotate terminal token.');
     } finally {
       setIsGeneratingToken(null);
     }
@@ -211,6 +225,18 @@ export const ConnectionsView: React.FC = () => {
             <span>Registered Account Terminal Tokens</span>
             <span className="text-[10px] text-slate-500 font-mono">Server-Authoritative Hashing (SHA-256)</span>
           </div>
+          {tokenError && (
+            <div className="px-3 py-2 bg-rose-950/60 border-b border-rose-800/80 text-rose-300 text-xs flex items-center justify-between gap-2">
+              <span>{tokenError}</span>
+              <button
+                type="button"
+                onClick={() => setTokenError(null)}
+                className="text-rose-400 hover:text-rose-200"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           <div className="divide-y divide-slate-800/60 max-h-72 overflow-y-auto">
             {mt5Accounts.length === 0 ? (
               <div className="p-4 text-center text-xs text-slate-500">

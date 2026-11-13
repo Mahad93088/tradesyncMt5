@@ -1,5 +1,5 @@
 import express, { type Request, type Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -7,13 +7,21 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { RiskEngine } from './riskEngine.ts';
 import { BridgeStore, RegisteredTerminal } from './bridgeStore.ts';
+import type { MappingExecutionStatus } from '../types';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export function createApiApp() {
+export interface ApiAppDependencies {
+  serviceRoleClientOverride?: SupabaseClient | null;
+  authUserResolverOverride?: (token: string) => Promise<{ user: any; error?: any }>;
+  supabaseUrlOverride?: string;
+  serviceRoleKeyOverride?: string;
+}
+
+export function createApiApp(deps?: ApiAppDependencies) {
   const app = express();
   app.use(express.json());
 
@@ -94,7 +102,9 @@ export function createApiApp() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   );
 
-  const effectiveServerUrl = !isPlaceholderValue(rawSupabaseUrl) ? rawSupabaseUrl : FALLBACK_PROJECT_REF;
+  const effectiveServerUrl = deps?.supabaseUrlOverride !== undefined
+    ? deps.supabaseUrlOverride
+    : (!isPlaceholderValue(rawSupabaseUrl) ? rawSupabaseUrl : FALLBACK_PROJECT_REF);
   const effectivePublishableKey = !isPlaceholderValue(rawPublishableKey) ? rawPublishableKey : FALLBACK_PUBLISHABLE_KEY;
 
   const supabaseUrl = normalizeSupabaseUrl(effectiveServerUrl);
@@ -105,7 +115,17 @@ export function createApiApp() {
     process.env.SUPABASE_SERVICE_KEY ||
     process.env.SERVICE_ROLE_KEY
   );
-  const serviceRoleKey = !isPlaceholderValue(rawServiceRoleKey) ? rawServiceRoleKey : '';
+  const serviceRoleKey = deps?.serviceRoleKeyOverride !== undefined
+    ? deps.serviceRoleKeyOverride
+    : (!isPlaceholderValue(rawServiceRoleKey) ? rawServiceRoleKey : '');
+
+  const hasServiceRoleAccess = Boolean(deps?.serviceRoleClientOverride) || Boolean(supabaseUrl && serviceRoleKey);
+
+  if (!hasServiceRoleAccess && process.env.NODE_ENV !== 'test') {
+    console.warn(
+      '[TradeSync API] WARNING: SUPABASE_SERVICE_ROLE_KEY is missing. MT5 bridge persistence & admin operations requiring service-role access will reject requests until configured.'
+    );
+  }
 
   // In-memory diagnostic record of the last GET /api/admin/users evaluation
   let lastAdminUsersDiagnostic: {
@@ -146,8 +166,152 @@ export function createApiApp() {
     }
   };
 
+  /**
+   * Authoritative server-side Supabase service-role client.
+   * Returns null if SUPABASE_SERVICE_ROLE_KEY is not configured.
+   */
+  const getServiceRoleClient = (): SupabaseClient | null => {
+    if (deps?.serviceRoleClientOverride !== undefined) {
+      return deps.serviceRoleClientOverride;
+    }
+    if (!supabaseUrl || !serviceRoleKey) {
+      return null;
+    }
+    return createClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+  };
+
+  const requireServiceRoleClient = (res: Response): SupabaseClient | null => {
+    const client = getServiceRoleClient();
+    if (!client) {
+      res.status(503).json({
+        success: false,
+        code: 'SUPABASE_SERVICE_ROLE_MISSING',
+        error:
+          'Server Configuration Error: SUPABASE_SERVICE_ROLE_KEY is not configured on the server. Durable Supabase persistence is required and silent in-memory fallback is disabled.',
+      });
+      return null;
+    }
+    return client;
+  };
+
+  interface AuthenticatedCaller {
+    user: { id: string; email?: string; app_metadata?: Record<string, any> };
+    profile: { id: string; email?: string; full_name?: string; role: string; status: string } | null;
+    isVerifiedAdmin: boolean;
+    token: string;
+    authClient: SupabaseClient;
+  }
+
+  /**
+   * Authenticates browser/API callers via Supabase Auth JWT and validates active profile role.
+   * Strictly prohibits email-prefix (e.g. admin@*), hardcoded email, or user_metadata admin elevation.
+   */
+  const authenticateSupabaseCaller = async (
+    req: Request,
+    res: Response,
+    options: { requireAdmin?: boolean; requireServiceRole?: boolean } = {}
+  ): Promise<AuthenticatedCaller | null> => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.status(401).json({ success: false, error: 'Unauthorized: Missing or malformed Authorization Bearer token.' });
+      return null;
+    }
+
+    const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!token || token.startsWith('ts_')) {
+      res.status(401).json({
+        success: false,
+        error: 'Unauthorized: Endpoint requires a Supabase user JWT, not an MT5 terminal token.',
+      });
+      return null;
+    }
+
+    if (!supabaseUrl || !publishableKey) {
+      res.status(503).json({ success: false, error: 'Supabase configuration is unavailable on the server.' });
+      return null;
+    }
+
+    const authClient = createClient(supabaseUrl, publishableKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    });
+
+    let callerUser: any = null;
+    let authError: any = null;
+    if (deps?.authUserResolverOverride) {
+      const resolved = await deps.authUserResolverOverride(token);
+      callerUser = resolved.user;
+      authError = resolved.error;
+    } else {
+      const userRes = await authClient.auth.getUser(token);
+      callerUser = userRes.data?.user;
+      authError = userRes.error;
+    }
+
+    if (authError || !callerUser) {
+      res.status(401).json({ success: false, error: 'Unauthorized: Invalid or expired authentication token.' });
+      return null;
+    }
+
+    const serviceClient = getServiceRoleClient();
+    if (options.requireServiceRole && !serviceClient) {
+      requireServiceRoleClient(res);
+      return null;
+    }
+
+    const queryClient = serviceClient || authClient;
+    const { data: callerProfile, error: profErr } = await queryClient
+      .from('profiles')
+      .select('id, email, full_name, role, status')
+      .eq('id', callerUser.id)
+      .maybeSingle();
+
+    if (profErr) {
+      console.error('[Auth] Failed to query caller profile:', profErr.message);
+      res.status(500).json({ success: false, error: 'Failed to verify caller profile authorization.' });
+      return null;
+    }
+
+    if (!callerProfile) {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: No active user profile found in public.profiles.',
+      });
+      return null;
+    }
+
+    if (callerProfile.status !== 'active') {
+      res.status(403).json({
+        success: false,
+        error: `Forbidden: Account status is '${callerProfile.status}'. Active status required.`,
+      });
+      return null;
+    }
+
+    const isVerifiedAdmin = callerProfile.role === 'admin' && callerProfile.status === 'active';
+
+    if (options.requireAdmin && !isVerifiedAdmin) {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Verified active administrator privileges required.',
+      });
+      return null;
+    }
+
+    return {
+      user: callerUser,
+      profile: callerProfile,
+      isVerifiedAdmin,
+      token,
+      authClient,
+    };
+  };
+
   // System Health Endpoint
   registerRoute('get', '/api/health', (_req: Request, res: Response) => {
+    const serviceReady = hasServiceRoleAccess;
     res.json({
       status: 'ok',
       service: 'TradeSync MT5 Server Bridge',
@@ -156,23 +320,120 @@ export function createApiApp() {
       supabaseConfigured: Boolean(supabaseUrl && publishableKey),
       supabaseUrl: supabaseUrl || null,
       hasPublishableKey: Boolean(publishableKey),
-      hasServiceRole: Boolean(serviceRoleKey),
+      hasServiceRole: serviceReady,
+      bridgePersistenceReady: serviceReady,
       serviceRoleRequiredForClient: false,
+      missingServerEnv: serviceReady ? [] : ['SUPABASE_SERVICE_ROLE_KEY'],
       timestamp: new Date().toISOString(),
     });
   });
 
-  // Dedicated Download Endpoint for schema.sql
+  // Live Supabase Schema, Bridge Tables & RPC Verification Endpoint
   registerRoute('get', '/api/supabase/verify', async (_req: Request, res: Response) => {
-    res.json({
-      configured: Boolean(supabaseUrl && publishableKey),
-      projectUrl: supabaseUrl || null,
-      authentication: { ok: Boolean(supabaseUrl && publishableKey), version: 'GoTrue v2' },
+    const configured = Boolean(supabaseUrl && publishableKey);
+    const serviceClient = getServiceRoleClient();
+
+    if (!configured) {
+      return res.status(503).json({
+        configured: false,
+        projectUrl: null,
+        hasServiceRole: false,
+        authentication: { ok: false, version: 'GoTrue v2' },
+        tables: {},
+        rpcs: {},
+        error: 'Supabase URL or publishable key missing.',
+      });
+    }
+
+    const probeClient =
+      serviceClient ||
+      createClient(supabaseUrl, publishableKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+
+    const checkTable = async (tableName: string, columns = 'id') => {
+      try {
+        const { error } = await probeClient.from(tableName).select(columns).limit(1);
+        if (!error) return { exists: true, accessible: true };
+        const msg = error.message || '';
+        const missing =
+          msg.toLowerCase().includes('does not exist') ||
+          msg.toLowerCase().includes('could not find the table') ||
+          error.code === '42P01';
+        return {
+          exists: !missing,
+          accessible: false,
+          error: msg,
+        };
+      } catch (e: any) {
+        return { exists: false, accessible: false, error: e.message };
+      }
+    };
+
+    const [
+      profilesStatus,
+      mt5AccountsStatus,
+      tradesStatus,
+      assignmentsStatus,
+      bridgeInstructionsStatus,
+      tradeMappingsStatus,
+      bridgeSyncLogsStatus,
+    ] = await Promise.all([
+      checkTable('profiles'),
+      checkTable('mt5_accounts', serviceClient ? 'id, terminal_token_hash' : 'id'),
+      checkTable('trades'),
+      checkTable('mentor_assignments'),
+      checkTable('bridge_instructions'),
+      checkTable('trade_mappings'),
+      checkTable('bridge_sync_logs'),
+    ]);
+
+    let rpcClaimStatus: { exists: boolean; verified: boolean; error?: string } = {
+      exists: false,
+      verified: false,
+      error: serviceClient ? undefined : 'SUPABASE_SERVICE_ROLE_KEY required to verify claim_pending_instructions RPC',
+    };
+
+    if (serviceClient) {
+      try {
+        const { error: rpcErr } = await serviceClient.rpc('claim_pending_instructions', {
+          p_child_account_id: '00000000-0000-0000-0000-000000000000',
+          p_limit: 0,
+          p_lease_seconds: 15,
+        });
+        if (!rpcErr) {
+          rpcClaimStatus = { exists: true, verified: true };
+        } else {
+          const notFound =
+            rpcErr.message.toLowerCase().includes('could not find the function') ||
+            rpcErr.code === '42883';
+          rpcClaimStatus = {
+            exists: !notFound,
+            verified: false,
+            error: rpcErr.message,
+          };
+        }
+      } catch (e: any) {
+        rpcClaimStatus = { exists: false, verified: false, error: e.message };
+      }
+    }
+
+    return res.json({
+      configured: true,
+      projectUrl: supabaseUrl,
+      hasServiceRole: Boolean(serviceClient),
+      authentication: { ok: true, version: 'GoTrue v2' },
       tables: {
-        profiles: { exists: true },
-        mt5_accounts: { exists: true },
-        trades: { exists: true },
-        mentor_assignments: { exists: true },
+        profiles: profilesStatus,
+        mt5_accounts: mt5AccountsStatus,
+        trades: tradesStatus,
+        mentor_assignments: assignmentsStatus,
+        bridge_instructions: bridgeInstructionsStatus,
+        trade_mappings: tradeMappingsStatus,
+        bridge_sync_logs: bridgeSyncLogsStatus,
+      },
+      rpcs: {
+        claim_pending_instructions: rpcClaimStatus,
       },
     });
   });
@@ -191,8 +452,11 @@ export function createApiApp() {
     });
   });
 
-  // Diagnostic endpoint to inspect the actual GET /api/admin/users evaluation
-  registerRoute('get', '/api/admin/diagnostic/users', (_req: Request, res: Response) => {
+  // Protected diagnostic endpoint (Active Super Admin only)
+  registerRoute('get', '/api/admin/diagnostic/users', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true });
+    if (!caller) return;
+
     res.json({
       status: 'ok',
       hasDiagnostic: Boolean(lastAdminUsersDiagnostic),
@@ -200,7 +464,7 @@ export function createApiApp() {
       config: {
         supabaseConfigured: Boolean(supabaseUrl && publishableKey),
         hasPublishableKey: Boolean(publishableKey),
-        hasServiceRole: Boolean(serviceRoleKey),
+        hasServiceRole: hasServiceRoleAccess,
         platform: process.env.VERCEL ? 'vercel' : 'node_express',
         url: supabaseUrl ? 'configured' : 'missing',
       },
@@ -210,50 +474,14 @@ export function createApiApp() {
   // Directory of Registered Users for Authorized Super Admin Approval
   registerRoute('get', '/api/admin/users', async (req: Request, res: Response) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Missing or malformed Authorization header' });
-      }
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true });
+      if (!caller) return;
 
-      if (!supabaseUrl) {
-        return res.status(503).json({ error: 'Supabase URL not configured' });
-      }
+      const serviceClient = getServiceRoleClient();
+      const clientForQueries = serviceClient || caller.authClient;
+      const callerEmail = (caller.profile?.email || caller.user.email || '').toLowerCase().trim();
 
-      const token = authHeader.replace('Bearer ', '').trim();
-      const authClient = createClient(supabaseUrl, publishableKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-        global: { headers: { Authorization: `Bearer ${token}` } },
-      });
-
-      // 1. Authenticate caller
-      const { data: { user: callerUser }, error: authError } = await authClient.auth.getUser(token);
-      if (authError || !callerUser) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid authentication token' });
-      }
-
-      const clientForQueries = serviceRoleKey
-        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
-        : authClient;
-
-      // 2. Verify caller has admin privileges
-      const { data: callerProfile } = await clientForQueries
-        .from('profiles')
-        .select('id, email, role, status')
-        .eq('id', callerUser.id)
-        .maybeSingle();
-
-      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
-      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
-
-      if (!isVerifiedAdmin) {
-        return res.status(403).json({
-          error: 'Forbidden: Only verified administrators can access the user directory',
-        });
-      }
-
-      // 3. Fetch registered profiles
+      // Fetch registered profiles
       const { data: profiles, error: listError } = await clientForQueries
         .from('profiles')
         .select('id, email, full_name, role, status, created_at, avatar_url')
@@ -266,14 +494,14 @@ export function createApiApp() {
           httpStatus: 500,
           contentType: 'application/json',
           caller: {
-            id: callerUser.id,
+            id: caller.user.id,
             email: callerEmail,
-            roleInDb: callerProfile?.role,
-            statusInDb: callerProfile?.status,
-            isOwner,
-            isVerifiedAdmin,
+            roleInDb: caller.profile?.role,
+            statusInDb: caller.profile?.status,
+            isOwner: false,
+            isVerifiedAdmin: caller.isVerifiedAdmin,
           },
-          clientMode: serviceRoleKey ? 'service_role' : 'authenticated_jwt',
+          clientMode: serviceClient ? 'service_role' : 'authenticated_jwt',
           postgrestError: listError.message,
           rawCountFromDb: 0,
           users: [],
@@ -290,23 +518,19 @@ export function createApiApp() {
         createdAt: p.created_at,
       }));
 
-      console.log(
-        `[AdminAPI] GET /api/admin/users => caller=${callerEmail}, roleInDb=${callerProfile?.role ?? 'none'}, statusInDb=${callerProfile?.status ?? 'none'}, isOwner=${isOwner}, queryMode=${serviceRoleKey ? 'service_role' : 'authenticated_jwt'}, dbCount=${sanitizedUsers.length}`
-      );
-
       lastAdminUsersDiagnostic = {
         timestamp: new Date().toISOString(),
         httpStatus: 200,
         contentType: 'application/json',
         caller: {
-          id: callerUser.id,
+          id: caller.user.id,
           email: callerEmail,
-          roleInDb: callerProfile?.role,
-          statusInDb: callerProfile?.status,
-          isOwner,
-          isVerifiedAdmin,
+          roleInDb: caller.profile?.role,
+          statusInDb: caller.profile?.status,
+          isOwner: false,
+          isVerifiedAdmin: caller.isVerifiedAdmin,
         },
-        clientMode: serviceRoleKey ? 'service_role' : 'authenticated_jwt',
+        clientMode: serviceClient ? 'service_role' : 'authenticated_jwt',
         postgrestError: null,
         rawCountFromDb: sanitizedUsers.length,
         users: sanitizedUsers,
@@ -322,60 +546,13 @@ export function createApiApp() {
     }
   });
 
-  // Dedicated Approval Endpoint: Updates ONLY status = 'active' while preserving existing role (Requirement 8)
+  // Dedicated Approval Endpoint: Updates ONLY status = 'active' while preserving existing role
   registerRoute('post', '/api/admin/approve-user', async (req: Request, res: Response) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ success: false, error: 'Missing or malformed Authorization header' });
-      }
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true });
+      if (!caller) return;
 
-      if (!supabaseUrl) {
-        return res.status(503).json({
-          success: false,
-          error: 'Supabase URL is not configured.',
-          configured: false,
-        });
-      }
-
-      const token = authHeader.replace('Bearer ', '').trim();
-      const authClient = createClient(supabaseUrl, publishableKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-        global: { headers: { Authorization: `Bearer ${token}` } },
-      });
-
-      // 1. Authenticate caller using Supabase Auth
-      const {
-        data: { user: callerUser },
-        error: authError,
-      } = await authClient.auth.getUser(token);
-
-      if (authError || !callerUser) {
-        return res.status(401).json({ success: false, error: 'Unauthorized: Invalid authentication token' });
-      }
-
-      const clientForQueries = serviceRoleKey
-        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
-        : authClient;
-
-      // 2. Verify caller has active 'admin' role in public.profiles or is authorized project owner
-      const { data: callerProfile } = await clientForQueries
-        .from('profiles')
-        .select('id, email, role, status')
-        .eq('id', callerUser.id)
-        .maybeSingle();
-
-      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
-      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
-
-      if (!isVerifiedAdmin) {
-        return res.status(403).json({
-          success: false,
-          error: 'Forbidden: Only verified active administrators can approve registered users',
-        });
-      }
+      const clientForQueries = getServiceRoleClient() || caller.authClient;
 
       const { targetUserId } = req.body;
       if (!targetUserId || !isValidUUID(targetUserId)) {
@@ -385,15 +562,15 @@ export function createApiApp() {
         });
       }
 
-      // 3. Anti-self-approval protection
-      if (targetUserId === callerUser.id) {
+      // Anti-self-approval protection
+      if (targetUserId === caller.user.id) {
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Administrators cannot approve their own account.',
         });
       }
 
-      // 4. Verify target user profile exists in public.profiles
+      // Verify target user profile exists in public.profiles
       const { data: targetProfile, error: targetError } = await clientForQueries
         .from('profiles')
         .select('id, email, full_name, role, status')
@@ -411,7 +588,7 @@ export function createApiApp() {
         });
       }
 
-      // 5. REQUIREMENT 8: Approval MUST update ONLY the intended user's status to 'active'
+      // Approval updates ONLY status = 'active'
       const { data: updatedProfile, error: updateError } = await clientForQueries
         .from('profiles')
         .update({
@@ -445,57 +622,10 @@ export function createApiApp() {
   // Protected Server-Side Admin Promotion Endpoint
   registerRoute('post', '/api/admin/promote-user', async (req: Request, res: Response) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ success: false, error: 'Missing or malformed Authorization header' });
-      }
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true });
+      if (!caller) return;
 
-      if (!supabaseUrl) {
-        return res.status(503).json({
-          success: false,
-          error: 'Supabase URL is not configured.',
-          configured: false,
-        });
-      }
-
-      const token = authHeader.replace('Bearer ', '').trim();
-      const authClient = createClient(supabaseUrl, publishableKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-        global: { headers: { Authorization: `Bearer ${token}` } },
-      });
-
-      // 1. Authenticate caller using Supabase Auth
-      const {
-        data: { user: callerUser },
-        error: authError,
-      } = await authClient.auth.getUser(token);
-
-      if (authError || !callerUser) {
-        return res.status(401).json({ success: false, error: 'Unauthorized: Invalid authentication token' });
-      }
-
-      const clientForQueries = serviceRoleKey
-        ? createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
-        : authClient;
-
-      // 2. Verify caller has active 'admin' role in public.profiles
-      const { data: callerProfile } = await clientForQueries
-        .from('profiles')
-        .select('id, email, role, status')
-        .eq('id', callerUser.id)
-        .maybeSingle();
-
-      const callerEmail = (callerProfile?.email || callerUser.email || '').toLowerCase().trim();
-      const isOwner = callerEmail === 'jamesjoker20188@gmail.com' || callerEmail === 'admin@tradesync.io' || callerEmail.startsWith('admin@');
-      const isMetadataAdmin = Boolean(callerUser.user_metadata?.is_admin || callerUser.app_metadata?.role === 'admin');
-      const isVerifiedAdmin = (callerProfile?.role === 'admin' && callerProfile?.status === 'active') || isOwner || isMetadataAdmin;
-
-      if (!isVerifiedAdmin) {
-        return res.status(403).json({
-          success: false,
-          error: 'Forbidden: Only verified active administrators can approve mentors or modify roles',
-        });
-      }
+      const clientForQueries = getServiceRoleClient() || caller.authClient;
 
       const { targetUserId, newRole } = req.body;
       if (!targetUserId || !isValidUUID(targetUserId)) {
@@ -505,8 +635,8 @@ export function createApiApp() {
         });
       }
 
-      // 3. Anti-self-promotion protection
-      if (targetUserId === callerUser.id) {
+      // Anti-self-promotion protection
+      if (targetUserId === caller.user.id) {
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Super Administrators cannot alter or promote their own role.',
@@ -527,7 +657,7 @@ export function createApiApp() {
         });
       }
 
-      // 4. Verify target user profile exists in public.profiles
+      // Verify target user profile exists in public.profiles
       const { data: targetProfile, error: targetError } = await clientForQueries
         .from('profiles')
         .select('id, email, full_name, role, status')
@@ -545,7 +675,7 @@ export function createApiApp() {
         });
       }
 
-      // 5. Elevate target user role to requested role (e.g. 'mentor') and ensure status is active
+      // Elevate target user role to requested role and ensure status is active
       const { data: updatedProfile, error: updateError } = await clientForQueries
         .from('profiles')
         .update({
@@ -578,82 +708,33 @@ export function createApiApp() {
   });
 
   // ==============================================================================
-  // MT5 Expert Advisor Bridge Architecture Endpoints (Phase 1 & Production Persistence)
+  // MT5 Expert Advisor Bridge Architecture Endpoints (Durable Persistence Required)
   // ==============================================================================
   const bridgeStore = BridgeStore.getInstance();
 
   /**
-   * Helper to resolve authoritative Supabase client for bridge persistence.
-   * For EA terminal bridge operations (requests with X-Terminal-Token or requireServiceRole),
-   * strictly requires server-side SUPABASE_SERVICE_ROLE_KEY to perform database operations.
-   * If SUPABASE_SERVICE_ROLE_KEY is not configured, returns undefined so operations safely fall
-   * back to verified in-memory state or return clean authentication rejections,
-   * completely preventing unauthenticated or anonymous execution on protected bridge tables.
-   */
-  const getBridgeDbClient = (
-    req?: Request,
-    options: { requireServiceRole?: boolean; allowAnon?: boolean } = {}
-  ) => {
-    if (!supabaseUrl) return undefined;
-
-    const isEaBridgeCall = Boolean(
-      options.requireServiceRole ||
-      req?.headers?.['x-terminal-token'] ||
-      (typeof req?.headers?.authorization === 'string' && req.headers.authorization.startsWith('Bearer ts_')) ||
-      (typeof req?.query?.token === 'string' && req.query.token.startsWith('ts_'))
-    );
-
-    if (isEaBridgeCall) {
-      if (!serviceRoleKey) {
-        // Refuse anonymous execution for EA bridge database operations.
-        // Return undefined to safely fall back to in-memory state without crashing or throwing.
-        return undefined;
-      }
-      return createClient(supabaseUrl, serviceRoleKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-      });
-    }
-
-    // 1. Direct server-side service-role client if available
-    if (serviceRoleKey) {
-      return createClient(supabaseUrl, serviceRoleKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-      });
-    }
-
-    // 2. User authenticated JWT (from admin or user browser)
-    const authHeader = req?.headers?.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ') && !authHeader.startsWith('Bearer ts_')) {
-      const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-      return createClient(supabaseUrl, publishableKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-        global: { headers: { Authorization: `Bearer ${token}` } },
-      });
-    }
-
-    // 3. Unprivileged public client (only when explicitly requested for public read diagnostics)
-    if (options.allowAnon && publishableKey) {
-      return createClient(supabaseUrl, publishableKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-      });
-    }
-    return undefined;
-  };
-
   /**
    * Terminal Authentication Middleware / Helper
-   * Validates device/terminal token against Supabase PostgreSQL and process cache.
-   * Resolves the authoritative accountId and role. Does not trust raw account numbers.
+   * Validates device/terminal token strictly via headers (X-Terminal-Token or Authorization: Bearer ts_...).
+   * Query-string token authentication is strictly forbidden.
+   * Requires server-side SUPABASE_SERVICE_ROLE_KEY for durable database validation.
    */
   const authenticateTerminal = async (
     req: Request
-  ): Promise<{ terminal: RegisteredTerminal | null; error?: string; status?: number }> => {
+  ): Promise<{ terminal: RegisteredTerminal | null; dbClient?: SupabaseClient; error?: string; code?: string; status?: number }> => {
+    if (typeof req.query?.token === 'string' && req.query.token.trim().length > 0 && !req.headers['x-terminal-token']) {
+      return {
+        terminal: null,
+        error: 'Unauthorized: Query-string terminal tokens are disabled. Pass token via X-Terminal-Token header.',
+        status: 401,
+      };
+    }
+
     const rawToken = (
       req.headers['x-terminal-token'] ||
       (typeof req.headers['authorization'] === 'string' && req.headers['authorization'].startsWith('Bearer ts_')
         ? req.headers['authorization'].replace(/^Bearer\s+/i, '')
-        : undefined) ||
-      (typeof req.query.token === 'string' ? req.query.token : undefined)
+        : undefined)
     )?.toString().trim();
 
     if (!rawToken) {
@@ -664,7 +745,16 @@ export function createApiApp() {
       };
     }
 
-    const dbClient = getBridgeDbClient(req);
+    const dbClient = getServiceRoleClient();
+    if (!dbClient) {
+      return {
+        terminal: null,
+        code: 'SUPABASE_SERVICE_ROLE_MISSING',
+        error: 'Server Configuration Error: SUPABASE_SERVICE_ROLE_KEY is required for durable MT5 bridge authentication and persistence.',
+        status: 503,
+      };
+    }
+
     const terminal = await bridgeStore.authenticateTerminal(rawToken, dbClient);
     if (!terminal) {
       return {
@@ -685,20 +775,22 @@ export function createApiApp() {
     }
 
     // Ensure authoritative database record is marked connected and synced
-    if (dbClient && terminal.accountId) {
-      Promise.resolve(
-        dbClient
-          .from('mt5_accounts')
-          .update({
-            connection_status: 'connected',
-            last_sync: new Date().toISOString(),
-            error_message: null,
-          })
-          .eq('id', terminal.accountId)
-      ).catch((e: any) => console.warn('[Bridge] Sync status update notice:', e.message));
+    if (terminal.accountId) {
+      const { error: syncErr } = await dbClient
+        .from('mt5_accounts')
+        .update({
+          connection_status: 'connected',
+          last_sync: new Date().toISOString(),
+          error_message: null,
+        })
+        .eq('id', terminal.accountId);
+
+      if (syncErr) {
+        console.warn('[Bridge] Sync status update notice:', syncErr.message);
+      }
     }
 
-    return { terminal };
+    return { terminal, dbClient };
   };
 
   /**
@@ -723,11 +815,32 @@ export function createApiApp() {
   /**
    * 1. Bridge Status & Terminal Health Check
    * GET /api/v1/bridge/status
+   * Protected: Requires either a valid MT5 terminal token OR a verified Admin JWT.
    */
   registerRoute('get', '/api/v1/bridge/status', async (req: Request, res: Response) => {
-    const authResult = await authenticateTerminal(req);
-    const hasServiceRole = Boolean(serviceRoleKey);
-    const dbClient = hasServiceRole ? getBridgeDbClient() : undefined;
+    const hasTerminalAuth = Boolean(
+      req.headers['x-terminal-token'] ||
+      (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ts_'))
+    );
+
+    let authResult: { terminal: RegisteredTerminal | null; dbClient?: SupabaseClient; error?: string; code?: string; status?: number } = { terminal: null };
+    if (hasTerminalAuth) {
+      authResult = await authenticateTerminal(req);
+      if (!authResult.terminal) {
+        return res.status(authResult.status || 401).json({
+          success: false,
+          ...(authResult.code ? { code: authResult.code } : {}),
+          error: authResult.error,
+        });
+      }
+    } else {
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+      if (!caller) return;
+    }
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
     const mappings = await bridgeStore.getTradeMappings(dbClient);
 
     let dbOperational = false;
@@ -738,50 +851,41 @@ export function createApiApp() {
       tradeMappings: false,
       bridgeSyncLogs: false,
       mt5Accounts: false,
+      claimPendingRpc: false,
     };
 
-    if (hasServiceRole && dbClient) {
-      const pingStart = Date.now();
-      try {
-        const [instRes, mapRes, logRes, accRes] = await Promise.all([
-          dbClient.from('bridge_instructions').select('id').limit(1),
-          dbClient.from('trade_mappings').select('id').limit(1),
-          dbClient.from('bridge_sync_logs').select('id').limit(1),
-          dbClient.from('mt5_accounts').select('id, terminal_token_hash').limit(1),
-        ]);
+    const pingStart = Date.now();
+    try {
+      const [instRes, mapRes, logRes, accRes, rpcRes] = await Promise.all([
+        dbClient.from('bridge_instructions').select('id').limit(1),
+        dbClient.from('trade_mappings').select('id').limit(1),
+        dbClient.from('bridge_sync_logs').select('id').limit(1),
+        dbClient.from('mt5_accounts').select('id, terminal_token_hash').limit(1),
+        dbClient.rpc('claim_pending_instructions', {
+          p_child_account_id: '00000000-0000-0000-0000-000000000000',
+          p_limit: 0,
+          p_lease_seconds: 15,
+        }),
+      ]);
 
-        dbLatencyMs = Date.now() - pingStart;
-        tableVerification.bridgeInstructions = !instRes.error;
-        tableVerification.tradeMappings = !mapRes.error;
-        tableVerification.bridgeSyncLogs = !logRes.error;
-        tableVerification.mt5Accounts = !accRes.error;
+      dbLatencyMs = Date.now() - pingStart;
+      tableVerification.bridgeInstructions = !instRes.error;
+      tableVerification.tradeMappings = !mapRes.error;
+      tableVerification.bridgeSyncLogs = !logRes.error;
+      tableVerification.mt5Accounts = !accRes.error;
+      tableVerification.claimPendingRpc = !rpcRes.error;
 
-        // Authoritative persistence confirmed only if core bridge tables are queryable
-        if (!instRes.error && !mapRes.error) {
-          dbOperational = true;
-        } else {
-          dbError = instRes.error?.message || mapRes.error?.message || 'Database schema tables not found';
-        }
-      } catch (err: any) {
-        dbError = err.message || 'Database ping exception';
+      if (!instRes.error && !mapRes.error && !rpcRes.error) {
+        dbOperational = true;
+      } else {
+        dbError =
+          instRes.error?.message ||
+          mapRes.error?.message ||
+          rpcRes.error?.message ||
+          'Database schema tables or RPC not found';
       }
-    } else {
-      // Service role key not configured in environment:
-      // Verify basic database connectivity without triggering permission denied errors on protected bridge tables
-      const publicClient = getBridgeDbClient(undefined, { allowAnon: true });
-      if (publicClient) {
-        const pingStart = Date.now();
-        try {
-          const { error: accError } = await publicClient.from('mt5_accounts').select('id').limit(1);
-          dbLatencyMs = Date.now() - pingStart;
-          tableVerification.mt5Accounts = !accError;
-          if (accError) {
-            dbError = accError.message;
-          }
-        } catch (err: any) {
-          dbError = err.message || 'Database ping exception';
-        }
-      }
+    } catch (err: any) {
+      dbError = err.message || 'Database ping exception';
     }
 
     res.json({
@@ -792,11 +896,11 @@ export function createApiApp() {
       databasePersistence: dbOperational,
       databaseDiagnostics: {
         configured: Boolean(supabaseUrl),
-        hasServiceRole,
+        hasServiceRole: true,
         connected: Boolean(dbLatencyMs !== null && !dbError),
         latencyMs: dbLatencyMs,
         tablesVerified: tableVerification,
-        error: !hasServiceRole ? 'SUPABASE_SERVICE_ROLE_KEY required for bridge tables persistence' : dbError,
+        error: dbError,
       },
       authenticatedTerminal: authResult.terminal
         ? {
@@ -821,6 +925,7 @@ export function createApiApp() {
     if (!auth.terminal) {
       return res.status(auth.status || 401).json({
         success: false,
+        ...(auth.code ? { code: auth.code } : {}),
         error: auth.error || 'Unauthorized: Invalid or unverified terminal authentication token.',
       });
     }
@@ -839,56 +944,65 @@ export function createApiApp() {
   /**
    * 2. Provision or Refresh Terminal Authentication Token
    * POST /api/v1/bridge/terminals/token
+   * Protected: Requires active Admin or owning tenant user + durable service-role DB.
    */
   registerRoute('post', '/api/v1/bridge/terminals/token', async (req: Request, res: Response) => {
     try {
-      const { accountId, accountNumber, brokerServer, brokerName, accountRole = 'child' } = req.body;
+      const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+      if (!caller) return;
 
-      if (!accountId || !accountNumber) {
-        return res.status(400).json({ success: false, error: 'Missing accountId or accountNumber in body' });
+      const dbClient = requireServiceRoleClient(res);
+      if (!dbClient) return;
+
+      const { accountId } = req.body;
+      if (!accountId || !isValidUUID(accountId)) {
+        return res.status(400).json({ success: false, error: 'Invalid or missing accountId UUID in request body.' });
       }
 
-      const dbClient = getBridgeDbClient(req);
-      let targetRole: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
-      let targetUserId = 'system_authorized';
-      let targetBrokerServer = brokerServer || 'MetaQuotes-Demo';
-      let targetBrokerName = brokerName || 'MetaTrader Broker';
-      let targetAccountNumber = String(accountNumber);
+      const { data: dbAcc, error: accErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id, user_id, account_role, account_number, broker_server, broker_name')
+        .eq('id', accountId)
+        .maybeSingle();
 
-      if (dbClient) {
-        try {
-          const { data: dbAcc } = await dbClient
-            .from('mt5_accounts')
-            .select('id, user_id, account_role, account_number, broker_server, broker_name')
-            .eq('id', accountId)
-            .maybeSingle();
-
-          if (dbAcc) {
-            targetRole = dbAcc.account_role === 'parent' ? 'parent' : 'child';
-            targetUserId = dbAcc.user_id;
-            targetAccountNumber = dbAcc.account_number;
-            targetBrokerServer = dbAcc.broker_server;
-            targetBrokerName = dbAcc.broker_name || targetBrokerName;
-          }
-        } catch (e: any) {
-          console.warn('[TerminalToken] DB lookup notice:', e.message);
-        }
+      if (accErr) {
+        return res.status(500).json({ success: false, error: `Failed to verify target account: ${accErr.message}` });
       }
 
+      if (!dbAcc) {
+        return res.status(404).json({ success: false, error: 'MT5 account not found in database.' });
+      }
+
+      // Enforce Admin or Tenant Ownership
+      if (!caller.isVerifiedAdmin && dbAcc.user_id !== caller.user.id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Only an administrator or the owning account holder may provision or rotate terminal tokens.',
+        });
+      }
+
+      const targetRole: 'parent' | 'child' = dbAcc.account_role === 'parent' ? 'parent' : 'child';
       const rawToken = BridgeStore.generateSecureToken(targetRole === 'parent' ? 'ts_parent' : 'ts_child');
 
       const terminal = await bridgeStore.registerTerminal(
         rawToken,
         {
-          accountId,
-          userId: targetUserId,
+          accountId: dbAcc.id,
+          userId: dbAcc.user_id,
           accountRole: targetRole,
-          accountNumber: targetAccountNumber,
-          brokerServer: targetBrokerServer,
-          brokerName: targetBrokerName,
+          accountNumber: String(dbAcc.account_number),
+          brokerServer: String(dbAcc.broker_server || ''),
+          brokerName: String(dbAcc.broker_name || 'MetaTrader 5'),
         },
         dbClient
       );
+
+      if (!terminal.isDurableDb) {
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to persist terminal token hash to Supabase mt5_accounts.',
+        });
+      }
 
       return res.status(200).json({
         success: true,
@@ -897,8 +1011,8 @@ export function createApiApp() {
         accountId: terminal.accountId,
         accountRole: terminal.accountRole,
         accountNumber: terminal.accountNumber,
-        brokerServer: targetBrokerServer,
-        brokerName: targetBrokerName,
+        brokerServer: terminal.brokerServer,
+        brokerName: terminal.brokerName,
         isDurableDb: terminal.isDurableDb,
         instructions: `Paste this token into the 'InpTerminalToken' parameter in your MT5 Expert Advisor.`,
       });
@@ -910,12 +1024,16 @@ export function createApiApp() {
   /**
    * 2b. Admin MT5 Account Registration Endpoint
    * POST /api/v1/admin/accounts/register
-   * Registers arbitrary broker/server accounts (e.g. XM servers 'xmglobal_mt5 7' and 'xmglobal_mt5 2').
-   * Persists record in Supabase mt5_accounts with connection_status = 'disconnected'.
-   * Generates cryptographically secure terminal token, stores SHA-256 hash, and returns plaintext token once.
+   * Protected: Verified active Super Admin + durable service-role DB required.
    */
   registerRoute('post', '/api/v1/admin/accounts/register', async (req: Request, res: Response) => {
     try {
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+      if (!caller) return;
+
+      const dbClient = requireServiceRoleClient(res);
+      if (!dbClient) return;
+
       const {
         accountRole = 'parent',
         brokerName = 'XM',
@@ -939,198 +1057,174 @@ export function createApiApp() {
         return res.status(400).json({ success: false, error: 'MT5 Broker Server name is required (e.g. xmglobal_mt5 7)' });
       }
 
+      if (!['demo', 'live'].includes(String(accountType))) {
+        return res.status(400).json({ success: false, error: 'Invalid accountType: must be demo or live' });
+      }
+
       const role: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
       const cleanAccNumber = String(accountNumber).trim();
       const cleanBrokerServer = String(brokerServer).trim();
       const cleanBrokerName = String(brokerName || 'XM').trim();
-      const dbClient = getBridgeDbClient(req);
 
-      let targetUserId = userId && isValidUUID(userId) ? userId : null;
+      let targetUserId: string | null = null;
+      if (userId !== undefined && userId !== null && String(userId).trim() !== '') {
+        if (!isValidUUID(userId)) {
+          return res.status(400).json({ success: false, error: 'Invalid userId: must be a valid RFC 4122 UUID.' });
+        }
+        const { data: explicitProf, error: explicitErr } = await dbClient
+          .from('profiles')
+          .select('id, status')
+          .eq('id', String(userId).trim())
+          .maybeSingle();
 
-      // If no valid userId provided, resolve or find an existing active profile
-      if (!targetUserId && dbClient) {
-        try {
-          const profileQuery = dbClient
-            .from('profiles')
-            .select('id, role')
-            .eq('status', 'active');
+        if (explicitErr) {
+          return res.status(500).json({ success: false, error: `Failed to verify target userId: ${explicitErr.message}` });
+        }
+        if (!explicitProf) {
+          return res.status(404).json({ success: false, error: 'Target userId profile not found in public.profiles.' });
+        }
+        targetUserId = explicitProf.id;
+      } else {
+        const profileQuery = dbClient
+          .from('profiles')
+          .select('id, role')
+          .eq('status', 'active');
 
-          if (role === 'parent') {
-            profileQuery.in('role', ['mentor', 'admin']);
-          } else {
-            profileQuery.in('role', ['trader', 'user', 'admin']);
-          }
+        if (role === 'parent') {
+          profileQuery.in('role', ['mentor', 'admin']);
+        } else {
+          profileQuery.in('role', ['trader', 'admin']);
+        }
 
-          const { data: matchedProfiles } = await profileQuery.limit(1);
-          if (matchedProfiles && matchedProfiles.length > 0) {
-            targetUserId = matchedProfiles[0].id;
-          } else {
-            const { data: anyProfile } = await dbClient.from('profiles').select('id').limit(1);
-            if (anyProfile && anyProfile.length > 0) {
-              targetUserId = anyProfile[0].id;
-            } else {
-              const { data: dirProfiles } = await dbClient.from('mentor_directory').select('id').limit(1);
-              if (dirProfiles && dirProfiles.length > 0) {
-                targetUserId = dirProfiles[0].id;
-              }
-            }
-          }
-        } catch (e: any) {
-          console.warn('[RegisterAccount] Profile lookup notice:', e.message);
+        const { data: matchedProfiles } = await profileQuery.limit(1);
+        if (matchedProfiles && matchedProfiles.length > 0) {
+          targetUserId = matchedProfiles[0].id;
+        } else {
+          targetUserId = caller.user.id;
         }
       }
 
-      if (!targetUserId) {
-        targetUserId = role === 'parent' ? '54325d98-ec0c-4821-a9ef-e7a514f51c43' : '00000000-0000-4000-a000-000000000011';
-      }
-
-      // Generate secure terminal token
       const rawToken = BridgeStore.generateSecureToken(role === 'parent' ? 'ts_parent' : 'ts_child');
       const tokenHash = BridgeStore.hashToken(rawToken);
       const tokenPrefix = rawToken.substring(0, 12) + '...';
 
       let accountId = crypto.randomUUID();
-      let isPersistedInDb = false;
-      let dbError: string | null = null;
 
-      if (dbClient) {
-        try {
-          const { data: existingAcc } = await dbClient
-            .from('mt5_accounts')
-            .select('id, user_id')
-            .eq('account_number', cleanAccNumber)
-            .eq('broker_server', cleanBrokerServer)
-            .maybeSingle();
+      const { data: existingAcc, error: existErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id, user_id')
+        .eq('account_number', cleanAccNumber)
+        .eq('broker_server', cleanBrokerServer)
+        .maybeSingle();
 
-          const accountPayload: Record<string, any> = {
-            id: accountId,
-            user_id: targetUserId,
-            account_number: cleanAccNumber,
-            broker_server: cleanBrokerServer,
+      if (existErr) {
+        return res.status(500).json({ success: false, error: `Database lookup error: ${existErr.message}` });
+      }
+
+      const accountPayload: Record<string, any> = {
+        id: accountId,
+        user_id: targetUserId,
+        account_number: cleanAccNumber,
+        broker_server: cleanBrokerServer,
+        broker_name: cleanBrokerName,
+        account_role: role,
+        account_type: accountType,
+        balance: Number(balance) || 10000,
+        equity: Number(equity || balance) || 10000,
+        margin: 0,
+        free_margin: Number(balance) || 10000,
+        currency: currency || 'USD',
+        leverage: Number(leverage) || 100,
+        connection_status: 'disconnected',
+        is_investor_password: true,
+        auto_trading_enabled: true,
+      };
+
+      if (existingAcc) {
+        accountId = existingAcc.id;
+        const { error: updateErr } = await dbClient
+          .from('mt5_accounts')
+          .update({
             broker_name: cleanBrokerName,
             account_role: role,
             account_type: accountType,
             balance: Number(balance) || 10000,
             equity: Number(equity || balance) || 10000,
-            margin: 0,
-            free_margin: Number(balance) || 10000,
             currency: currency || 'USD',
             leverage: Number(leverage) || 100,
-            connection_status: 'disconnected', // Awaiting EA connection
-            is_investor_password: true,
-            auto_trading_enabled: true,
-          };
+            connection_status: 'disconnected',
+            terminal_token_hash: tokenHash,
+            terminal_token_prefix: tokenPrefix,
+            terminal_token_created_at: new Date().toISOString(),
+          })
+          .eq('id', accountId);
 
-          if (existingAcc) {
-            accountId = existingAcc.id;
-            const updatePayload: Record<string, any> = {
-              broker_name: cleanBrokerName,
-              account_role: role,
-              account_type: accountType,
-              balance: Number(balance) || 10000,
-              equity: Number(equity || balance) || 10000,
-              currency: currency || 'USD',
-              leverage: Number(leverage) || 100,
-              connection_status: 'disconnected',
-            };
+        if (updateErr) {
+          return res.status(500).json({
+            success: false,
+            error: `Failed to update MT5 account in Supabase: ${updateErr.message}`,
+          });
+        }
+      } else {
+        const { error: insertErr } = await dbClient
+          .from('mt5_accounts')
+          .insert([
+            {
+              ...accountPayload,
+              terminal_token_hash: tokenHash,
+              terminal_token_prefix: tokenPrefix,
+              terminal_token_created_at: new Date().toISOString(),
+            },
+          ]);
 
-            // Attempt update with terminal token
-            let { error: updateErr } = await dbClient
-              .from('mt5_accounts')
-              .update({
-                ...updatePayload,
-                terminal_token_hash: tokenHash,
-                terminal_token_prefix: tokenPrefix,
-                terminal_token_created_at: new Date().toISOString(),
-              })
-              .eq('id', accountId);
-
-            if (updateErr && updateErr.message.includes('terminal_token')) {
-              // Retry without terminal token columns if migration 03 not yet applied
-              const retry = await dbClient
-                .from('mt5_accounts')
-                .update(updatePayload)
-                .eq('id', accountId);
-              updateErr = retry.error;
-            }
-
-            if (!updateErr) {
-              isPersistedInDb = true;
-            } else {
-              dbError = updateErr.message;
-              console.warn('[RegisterAccount] Supabase update notice:', updateErr.message);
-            }
-          } else {
-            // Attempt insert with token columns
-            let { error: insertErr } = await dbClient
-              .from('mt5_accounts')
-              .insert([{
-                ...accountPayload,
-                terminal_token_hash: tokenHash,
-                terminal_token_prefix: tokenPrefix,
-                terminal_token_created_at: new Date().toISOString(),
-              }]);
-
-            if (insertErr && insertErr.message.includes('terminal_token')) {
-              // Retry without terminal_token columns if migration 03 not yet run
-              const retry = await dbClient
-                .from('mt5_accounts')
-                .insert([accountPayload]);
-              insertErr = retry.error;
-            }
-
-            if (!insertErr) {
-              isPersistedInDb = true;
-            } else {
-              dbError = insertErr.message;
-              console.warn('[RegisterAccount] Supabase insert notice:', insertErr.message);
-            }
-          }
-
-          // If child account and parentAccountId provided, establish link in mentor_assignments
-          if (role === 'child' && parentAccountId && isValidUUID(parentAccountId)) {
-            try {
-              const { data: parentAcc } = await dbClient
-                .from('mt5_accounts')
-                .select('id, user_id')
-                .eq('id', parentAccountId)
-                .maybeSingle();
-
-              if (parentAcc) {
-                const { error: assignErr } = await dbClient
-                  .from('mentor_assignments')
-                  .upsert([{
-                    mentor_id: parentAcc.user_id,
-                    trader_id: targetUserId,
-                    parent_account_id: parentAccountId,
-                    child_account_id: accountId,
-                    status: 'active',
-                    lot_copy_mode: lotSettings?.copyMode || 'parent_lot',
-                    lot_multiplier: Number(lotSettings?.multiplier) || 1.0,
-                    fixed_lot: Number(lotSettings?.fixedLot) || 0.1,
-                    assigned_at: new Date().toISOString(),
-                  }], { onConflict: 'mentor_id,trader_id' });
-
-                if (assignErr) {
-                  console.warn('[RegisterAccount] Mentor assignment notice:', assignErr.message);
-                }
-              }
-            } catch (linkErr: any) {
-              console.warn('[RegisterAccount] Parent link error:', linkErr.message);
-            }
-          }
-        } catch (err: any) {
-          dbError = err.message;
-          console.warn('[RegisterAccount] Supabase write exception:', err.message);
+        if (insertErr) {
+          return res.status(500).json({
+            success: false,
+            error: `Failed to insert MT5 account in Supabase: ${insertErr.message}`,
+          });
         }
       }
 
-      // Register in memory bridgeStore
+      // If child account and parentAccountId provided, establish link in mentor_assignments
+      if (role === 'child' && parentAccountId && isValidUUID(parentAccountId)) {
+        const { data: parentAcc } = await dbClient
+          .from('mt5_accounts')
+          .select('id, user_id, account_role')
+          .eq('id', parentAccountId)
+          .maybeSingle();
+
+        if (parentAcc && parentAcc.account_role === 'parent') {
+          const { error: assignErr } = await dbClient
+            .from('mentor_assignments')
+            .upsert(
+              [
+                {
+                  mentor_id: parentAcc.user_id,
+                  trader_id: targetUserId,
+                  parent_account_id: parentAccountId,
+                  child_account_id: accountId,
+                  status: 'active',
+                  lot_copy_mode: lotSettings?.copyMode || 'parent_lot',
+                  lot_multiplier: Number(lotSettings?.multiplier) || 1.0,
+                  fixed_lot: Number(lotSettings?.fixedLot) || 0.1,
+                  assigned_at: new Date().toISOString(),
+                },
+              ],
+              { onConflict: 'mentor_id,trader_id' }
+            );
+
+          if (assignErr) {
+            console.warn('[RegisterAccount] Mentor assignment notice:', assignErr.message);
+          }
+        }
+      }
+
+      // Refresh L1 terminal registry cache
       await bridgeStore.registerTerminal(
         rawToken,
         {
           accountId,
-          userId: targetUserId,
+          userId: targetUserId!,
           accountRole: role,
           accountNumber: cleanAccNumber,
           brokerServer: cleanBrokerServer,
@@ -1156,8 +1250,8 @@ export function createApiApp() {
           currency,
           leverage: Number(leverage) || 100,
           connectionStatus: 'disconnected',
-          isDurableDb: isPersistedInDb,
-          dbError: isPersistedInDb ? null : dbError,
+          isDurableDb: true,
+          dbError: null,
         },
         terminalToken: rawToken, // Displayed strictly once!
         tokenPrefix,
@@ -1178,30 +1272,34 @@ export function createApiApp() {
   /**
    * 2c. Authoritative Admin MT5 Accounts Retrieval Endpoint
    * GET /api/v1/admin/accounts
-   * Returns all registered MT5 accounts directly from Supabase public.mt5_accounts
-   * (including parent and child XM accounts) along with active mentor_assignments and profiles.
+   * Protected: Verified active Super Admin + durable service-role DB required.
+   * Explicitly excludes terminal_token_hash from projection.
    */
-  registerRoute('get', '/api/v1/admin/accounts', async (_req: Request, res: Response) => {
+  registerRoute('get', '/api/v1/admin/accounts', async (req: Request, res: Response) => {
     try {
-      const dbClient = getBridgeDbClient(undefined, { allowAnon: true });
-      if (!dbClient) {
-        return res.status(200).json({
-          success: true,
-          source: 'memory_cache',
-          accounts: [],
-          assignments: [],
-          profiles: [],
-        });
-      }
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+      if (!caller) return;
+
+      const dbClient = requireServiceRoleClient(res);
+      if (!dbClient) return;
+
+      const safeAccountColumns =
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at, assigned_parent_id';
 
       const [accResult, assignResult, profilesResult] = await Promise.all([
-        dbClient.from('mt5_accounts').select('*').order('created_at', { ascending: false }),
+        dbClient.from('mt5_accounts').select(safeAccountColumns).order('created_at', { ascending: false }),
         dbClient.from('mentor_assignments').select('*').eq('status', 'active'),
         dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status'),
       ]);
 
       if (accResult.error) {
         return res.status(500).json({ success: false, error: accResult.error.message });
+      }
+      if (assignResult.error) {
+        return res.status(500).json({ success: false, error: assignResult.error.message });
+      }
+      if (profilesResult.error) {
+        return res.status(500).json({ success: false, error: profilesResult.error.message });
       }
 
       return res.status(200).json({
@@ -1224,7 +1322,11 @@ export function createApiApp() {
   registerRoute('post', '/api/v1/bridge/events/trade-open', async (req: Request, res: Response) => {
     const auth = await authenticateTerminal(req);
     if (!auth.terminal) {
-      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
     }
 
     if (auth.terminal.accountRole !== 'parent') {
@@ -1255,8 +1357,16 @@ export function createApiApp() {
 
     const parentTicketStr = String(ticket).trim();
     const parentLotsNum = Number(lots);
+    if (!Number.isFinite(parentLotsNum) || parentLotsNum <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid trade volume: lots must be a positive finite number.',
+      });
+    }
+
     const magicNumStr = magicNumber != null ? String(magicNumber).trim() : '888999';
-    const dbClient = getBridgeDbClient();
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
 
     // Resolve assigned active child accounts from PostgreSQL
     interface ChildCandidate {
@@ -1268,111 +1378,121 @@ export function createApiApp() {
 
     let assignedChildren: ChildCandidate[] = [];
 
-    if (dbClient) {
-      try {
-        // 1. Authoritative check on Parent MT5 account & profile
-        const { data: parentAcc, error: parentAccErr } = await dbClient
-          .from('mt5_accounts')
-          .select('id, user_id, account_role, connection_status')
-          .eq('id', auth.terminal.accountId)
-          .maybeSingle();
+    try {
+      // 1. Authoritative check on Parent MT5 account & profile
+      const { data: parentAcc, error: parentAccErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id, user_id, account_role, connection_status')
+        .eq('id', auth.terminal.accountId)
+        .maybeSingle();
 
-        if (parentAccErr || !parentAcc || parentAcc.account_role !== 'parent') {
-          return res.status(403).json({
-            success: false,
-            error: 'Forbidden: Authenticated terminal is not a registered Parent/Mentor account in database.',
-          });
-        }
-
-        const { data: mentorProfile } = await dbClient
-          .from('profiles')
-          .select('id, role, status')
-          .eq('id', parentAcc.user_id)
-          .maybeSingle();
-
-        if (!mentorProfile || mentorProfile.status !== 'active') {
-          return res.status(403).json({
-            success: false,
-            error: `Forbidden: Mentor account profile is ${mentorProfile?.status || 'inactive'}. Broadcasting disabled.`,
-          });
-        }
-
-        // 2. Query active mentor assignments specifically paired with this parent account
-        const { data: assignments, error: assignErr } = await dbClient
-          .from('mentor_assignments')
-          .select('id, mentor_id, trader_id, child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
-          .eq('parent_account_id', auth.terminal.accountId)
-          .eq('status', 'active');
-
-        if (assignErr) {
-          console.error('[Bridge] Error querying active assignments:', assignErr.message);
-        }
-
-        if (assignments && assignments.length > 0) {
-          for (const a of assignments) {
-            if (!a.child_account_id) continue;
-
-            // 3. Verify Child account exists and is assigned role 'child'
-            const { data: childAcc } = await dbClient
-              .from('mt5_accounts')
-              .select('id, user_id, account_role, connection_status')
-              .eq('id', a.child_account_id)
-              .maybeSingle();
-
-            if (!childAcc || childAcc.account_role !== 'child') {
-              bridgeStore.addSyncLog(
-                {
-                  eventType: 'ASSIGNMENT_REJECTED',
-                  level: 'warn',
-                  details: `Skipped copy for child account ${a.child_account_id}: not found or role is not child`,
-                  ticket: parentTicketStr,
-                },
-                dbClient
-              );
-              continue;
-            }
-
-            // 4. Verify Trader user profile is active and not suspended
-            const { data: traderProf } = await dbClient
-              .from('profiles')
-              .select('id, status')
-              .eq('id', childAcc.user_id)
-              .maybeSingle();
-
-            if (!traderProf || traderProf.status !== 'active') {
-              bridgeStore.addSyncLog(
-                {
-                  eventType: 'TRADER_INACTIVE_SKIPPED',
-                  level: 'warn',
-                  details: `Skipped copy for child ${a.child_account_id}: trader profile is ${traderProf?.status || 'unknown'}.`,
-                  ticket: parentTicketStr,
-                },
-                dbClient
-              );
-              continue;
-            }
-
-            assignedChildren.push({
-              childAccountId: a.child_account_id,
-              lotMode: a.lot_mode === 'fixed_lot' || a.lot_mode === 'multiplier' ? 'custom_lot' : 'parent_lot',
-              lotMultiplier: Number(a.lot_multiplier) || 1.0,
-              fixedLot: Number(a.fixed_lot) || 0.1,
-            });
-          }
-        }
-      } catch (dbErr: any) {
-        console.warn('[Bridge] Supabase assignments query notice:', dbErr.message);
+      if (parentAccErr) {
+        return res.status(500).json({
+          success: false,
+          error: `Database error verifying parent account: ${parentAccErr.message}`,
+        });
       }
-    } else if (process.env.NODE_ENV !== 'production') {
-      // Local development test fallback only when database is offline
-      assignedChildren = [
-        {
-          childAccountId: 'acc_child_1',
-          lotMode: 'parent_lot',
-          lotMultiplier: 1.0,
-          fixedLot: 0.1,
-        },
-      ];
+
+      if (!parentAcc || parentAcc.account_role !== 'parent') {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Authenticated terminal is not a registered Parent/Mentor account in database.',
+        });
+      }
+
+      const { data: mentorProfile, error: mentorProfErr } = await dbClient
+        .from('profiles')
+        .select('id, role, status')
+        .eq('id', parentAcc.user_id)
+        .maybeSingle();
+
+      if (mentorProfErr) {
+        return res.status(500).json({
+          success: false,
+          error: `Database error verifying mentor profile: ${mentorProfErr.message}`,
+        });
+      }
+
+      if (!mentorProfile || mentorProfile.status !== 'active') {
+        return res.status(403).json({
+          success: false,
+          error: `Forbidden: Mentor account profile is ${mentorProfile?.status || 'inactive'}. Broadcasting disabled.`,
+        });
+      }
+
+      // 2. Query active mentor assignments specifically paired with this parent account
+      const { data: assignments, error: assignErr } = await dbClient
+        .from('mentor_assignments')
+        .select('id, mentor_id, trader_id, child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
+        .eq('parent_account_id', auth.terminal.accountId)
+        .eq('status', 'active');
+
+      if (assignErr) {
+        console.error('[Bridge] Error querying active assignments:', assignErr.message);
+        return res.status(500).json({
+          success: false,
+          error: `Failed to query mentor assignments: ${assignErr.message}`,
+        });
+      }
+
+      if (assignments && assignments.length > 0) {
+        for (const a of assignments) {
+          if (!a.child_account_id) continue;
+
+          // 3. Verify Child account exists and is assigned role 'child'
+          const { data: childAcc } = await dbClient
+            .from('mt5_accounts')
+            .select('id, user_id, account_role, connection_status')
+            .eq('id', a.child_account_id)
+            .maybeSingle();
+
+          if (!childAcc || childAcc.account_role !== 'child') {
+            bridgeStore.addSyncLog(
+              {
+                eventType: 'ASSIGNMENT_REJECTED',
+                level: 'warn',
+                details: `Skipped copy for child account ${a.child_account_id}: not found or role is not child`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          // 4. Verify Trader user profile is active and not suspended
+          const { data: traderProf } = await dbClient
+            .from('profiles')
+            .select('id, status')
+            .eq('id', childAcc.user_id)
+            .maybeSingle();
+
+          if (!traderProf || traderProf.status !== 'active') {
+            bridgeStore.addSyncLog(
+              {
+                eventType: 'TRADER_INACTIVE_SKIPPED',
+                level: 'warn',
+                details: `Skipped copy for child ${a.child_account_id}: trader profile is ${traderProf?.status || 'unknown'}.`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          assignedChildren.push({
+            childAccountId: a.child_account_id,
+            lotMode: a.lot_mode === 'fixed_lot' || a.lot_mode === 'multiplier' ? 'custom_lot' : 'parent_lot',
+            lotMultiplier: Number(a.lot_multiplier) || 1.0,
+            fixedLot: Number(a.fixed_lot) || 0.1,
+          });
+        }
+      }
+    } catch (dbErr: any) {
+      console.error('[Bridge] Supabase assignments query failure:', dbErr.message);
+      return res.status(500).json({
+        success: false,
+        error: `Bridge persistence error while resolving child assignments: ${dbErr.message}`,
+      });
     }
 
     if (assignedChildren.length === 0) {
@@ -1478,7 +1598,11 @@ export function createApiApp() {
   registerRoute('post', '/api/v1/bridge/events/trade-close', async (req: Request, res: Response) => {
     const auth = await authenticateTerminal(req);
     if (!auth.terminal) {
-      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
     }
     const terminal = auth.terminal;
 
@@ -1492,26 +1616,51 @@ export function createApiApp() {
     }
 
     const parentTicketStr = String(ticket).trim();
-    const dbClient = getBridgeDbClient(req);
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
 
-    // 1. Primary lookup: trade_mappings table
-    let mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
-      (m) => String(m.parentTradeTicket) === parentTicketStr && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
-    );
+    try {
+      // 1. Primary lookup: targeted query on trade_mappings for this parent account + ticket
+      const { data: mapRows, error: mapErr } = await dbClient
+        .from('trade_mappings')
+        .select('*')
+        .eq('parent_trade_ticket', parentTicketStr)
+        .eq('parent_account_id', terminal.accountId);
 
-    // 2. Resilient fallback for delayed acknowledgments:
-    // If trade_mappings has not recorded the active mapping yet, query bridge_instructions
-    // to identify which child accounts were targeted in the initial OPEN event
-    if (mappings.length === 0 && dbClient) {
-      try {
-        const { data: openInstructions } = await dbClient
+      if (mapErr) {
+        return res.status(500).json({ success: false, error: `Failed to query trade_mappings: ${mapErr.message}` });
+      }
+
+      let mappings = (mapRows || []).map((r: any) => ({
+        id: r.id,
+        parentTradeTicket: String(r.parent_trade_ticket),
+        childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
+        mentorId: '',
+        traderId: '',
+        parentAccountId: r.parent_account_id,
+        childAccountId: r.child_account_id,
+        symbol: r.symbol,
+        orderType: r.order_type as any,
+        parentLots: Number(r.parent_lots),
+        childLots: Number(r.child_lots),
+        openTime: r.open_time,
+        latencyMs: Number(r.latency_ms) || 0,
+        status: r.status as any,
+        retryCount: Number(r.retry_count) || 0,
+      }));
+
+      // 2. Resilient fallback for delayed acknowledgments
+      if (mappings.length === 0) {
+        const { data: openInstructions, error: oiErr } = await dbClient
           .from('bridge_instructions')
           .select('child_account_id, symbol, order_type, lots, child_ticket')
           .eq('parent_account_id', terminal.accountId)
           .eq('parent_ticket', parentTicketStr)
           .eq('action', 'OPEN');
 
-        if (openInstructions && openInstructions.length > 0) {
+        if (oiErr) {
+          console.warn('[TradeClose] Fallback instruction lookup notice:', oiErr.message);
+        } else if (openInstructions && openInstructions.length > 0) {
           mappings = openInstructions.map((oi) => ({
             id: `map_fallback_${parentTicketStr}_${oi.child_account_id}`,
             parentTradeTicket: parentTicketStr,
@@ -1530,46 +1679,47 @@ export function createApiApp() {
             retryCount: 0,
           }));
         }
-      } catch (e: any) {
-        console.warn('[TradeClose] Fallback instruction lookup notice:', e.message);
       }
-    }
 
-    const queuedClose = [];
-    for (const map of mappings) {
-      const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_CLOSE`;
-      const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
-      const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
-        {
-          idempotencyKey,
-          action: 'CLOSE',
-          childAccountId: map.childAccountId,
-          parentAccountId: terminal.accountId,
-          parentTicket: parentTicketStr,
-          childTicket: childTicketVal,
-          symbol: map.symbol,
-          orderType: map.orderType,
-          lots: map.childLots,
-          magicNumber: '888999',
-          comment: `Close Parent #${parentTicketStr}`,
-        },
-        dbClient
-      );
+      const queuedClose = [];
+      for (const map of mappings) {
+        const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_CLOSE`;
+        const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
+        const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
+          {
+            idempotencyKey,
+            action: 'CLOSE',
+            childAccountId: map.childAccountId,
+            parentAccountId: terminal.accountId,
+            parentTicket: parentTicketStr,
+            childTicket: childTicketVal,
+            symbol: map.symbol,
+            orderType: map.orderType,
+            lots: map.childLots,
+            magicNumber: '888999',
+            comment: `Close Parent #${parentTicketStr}`,
+          },
+          dbClient
+        );
 
-      queuedClose.push({
-        instructionId: instruction.instructionId,
-        childAccountId: instruction.childAccountId,
-        childTicket: instruction.childTicket,
-        isDuplicate,
+        queuedClose.push({
+          instructionId: instruction.instructionId,
+          childAccountId: instruction.childAccountId,
+          childTicket: instruction.childTicket,
+          isDuplicate,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        parentTicket: parentTicketStr,
+        closeInstructionsQueued: queuedClose.length,
+        instructions: queuedClose,
       });
+    } catch (err: any) {
+      console.error('[TradeClose] Execution error:', err.message);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to queue close instructions' });
     }
-
-    return res.status(200).json({
-      success: true,
-      parentTicket: parentTicketStr,
-      closeInstructionsQueued: queuedClose.length,
-      instructions: queuedClose,
-    });
   });
 
   /**
@@ -1579,7 +1729,11 @@ export function createApiApp() {
   registerRoute('post', '/api/v1/bridge/events/trade-modify', async (req: Request, res: Response) => {
     const auth = await authenticateTerminal(req);
     if (!auth.terminal) {
-      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
     }
     const terminal = auth.terminal;
 
@@ -1593,21 +1747,49 @@ export function createApiApp() {
     }
 
     const parentTicketStr = String(ticket).trim();
-    const dbClient = getBridgeDbClient(req);
-    let mappings = (await bridgeStore.getTradeMappings(dbClient)).filter(
-      (m) => String(m.parentTradeTicket) === parentTicketStr && (m.parentAccountId === terminal.accountId || !m.parentAccountId)
-    );
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
 
-    if (mappings.length === 0 && dbClient) {
-      try {
-        const { data: openInstructions } = await dbClient
+    try {
+      const { data: mapRows, error: mapErr } = await dbClient
+        .from('trade_mappings')
+        .select('*')
+        .eq('parent_trade_ticket', parentTicketStr)
+        .eq('parent_account_id', terminal.accountId);
+
+      if (mapErr) {
+        return res.status(500).json({ success: false, error: `Failed to query trade_mappings: ${mapErr.message}` });
+      }
+
+      let mappings = (mapRows || []).map((r: any) => ({
+        id: r.id,
+        parentTradeTicket: String(r.parent_trade_ticket),
+        childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
+        mentorId: '',
+        traderId: '',
+        parentAccountId: r.parent_account_id,
+        childAccountId: r.child_account_id,
+        symbol: r.symbol,
+        orderType: r.order_type as any,
+        parentLots: Number(r.parent_lots),
+        childLots: Number(r.child_lots),
+        openTime: r.open_time,
+        latencyMs: Number(r.latency_ms) || 0,
+        status: r.status as any,
+        retryCount: Number(r.retry_count) || 0,
+      }));
+
+      if (mappings.length === 0) {
+        const { data: openInstructions, error: oiErr } = await dbClient
           .from('bridge_instructions')
           .select('child_account_id, symbol, order_type, lots, child_ticket')
           .eq('parent_account_id', terminal.accountId)
           .eq('parent_ticket', parentTicketStr)
           .eq('action', 'OPEN');
 
-        if (openInstructions && openInstructions.length > 0) {
+        if (oiErr) {
+          console.warn('[TradeModify] Fallback lookup notice:', oiErr.message);
+        } else if (openInstructions && openInstructions.length > 0) {
           mappings = openInstructions.map((oi) => ({
             id: `map_mod_${parentTicketStr}_${oi.child_account_id}`,
             parentTradeTicket: parentTicketStr,
@@ -1626,39 +1808,40 @@ export function createApiApp() {
             retryCount: 0,
           }));
         }
-      } catch (e: any) {
-        console.warn('[TradeModify] Fallback lookup notice:', e.message);
       }
-    }
 
-    for (const map of mappings) {
-      const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
-      const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
-      await bridgeStore.queueInstruction(
-        {
-          idempotencyKey,
-          action: 'MODIFY',
-          childAccountId: map.childAccountId,
-          parentAccountId: auth.terminal.accountId,
-          parentTicket: parentTicketStr,
-          childTicket: childTicketVal,
-          symbol: map.symbol,
-          orderType: map.orderType,
-          lots: map.childLots,
-          sl: sl != null && sl !== '' ? Number(sl) : undefined,
-          tp: tp != null && tp !== '' ? Number(tp) : undefined,
-          hasSL: sl != null && sl !== '',
-          hasTP: tp != null && tp !== '',
-          hasSl: sl != null && sl !== '',
-          hasTp: tp != null && tp !== '',
-          magicNumber: '888999',
-          comment: `Modify Parent #${parentTicketStr}`,
-        },
-        dbClient
-      );
-    }
+      for (const map of mappings) {
+        const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
+        const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
+        await bridgeStore.queueInstruction(
+          {
+            idempotencyKey,
+            action: 'MODIFY',
+            childAccountId: map.childAccountId,
+            parentAccountId: terminal.accountId,
+            parentTicket: parentTicketStr,
+            childTicket: childTicketVal,
+            symbol: map.symbol,
+            orderType: map.orderType,
+            lots: map.childLots,
+            sl: sl != null && sl !== '' ? Number(sl) : undefined,
+            tp: tp != null && tp !== '' ? Number(tp) : undefined,
+            hasSL: sl != null && sl !== '',
+            hasTP: tp != null && tp !== '',
+            hasSl: sl != null && sl !== '',
+            hasTp: tp != null && tp !== '',
+            magicNumber: '888999',
+            comment: `Modify Parent #${parentTicketStr}`,
+          },
+          dbClient
+        );
+      }
 
-    return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount: mappings.length });
+      return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount: mappings.length });
+    } catch (err: any) {
+      console.error('[TradeModify] Execution error:', err.message);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to queue modify instructions' });
+    }
   });
 
   /**
@@ -1668,30 +1851,55 @@ export function createApiApp() {
   registerRoute('get', '/api/v1/bridge/instructions/pending', async (req: Request, res: Response) => {
     const auth = await authenticateTerminal(req);
     if (!auth.terminal) {
-      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
     }
 
     if (auth.terminal.accountRole !== 'child') {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Child terminals may poll copy instructions.' });
     }
 
-    const dbClient = getBridgeDbClient(req);
-    const pending = await bridgeStore.pollPendingInstructions(auth.terminal.accountId, 20, dbClient);
-    return res.status(200).json({
-      success: true,
-      count: pending.length,
-      instructions: pending,
-    });
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const pending = await bridgeStore.pollPendingInstructions(auth.terminal.accountId, 20, dbClient);
+      return res.status(200).json({
+        success: true,
+        count: pending.length,
+        instructions: pending,
+      });
+    } catch (err: any) {
+      console.error('[BridgePoll] Failed to poll pending instructions:', err.message);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to poll pending instructions' });
+    }
   });
 
   /**
    * 7. Child Execution Acknowledgment & Broker Results (Receiver EA hook)
    * POST /api/v1/bridge/instructions/ack
    */
+  const VALID_ACK_STATUSES = new Set<MappingExecutionStatus>([
+    'EXECUTED',
+    'FAILED',
+    'REJECTED_MARGIN',
+    'REJECTED_OFF_QUOTES',
+    'SLIPPAGE_EXCEEDED',
+    'RETRIED',
+    'SKIPPED_LOT_LIMIT',
+  ]);
+
   registerRoute('post', '/api/v1/bridge/instructions/ack', async (req: Request, res: Response) => {
     const auth = await authenticateTerminal(req);
     if (!auth.terminal) {
-      return res.status(auth.status || 401).json({ success: false, error: auth.error });
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
     }
 
     if (auth.terminal.accountRole !== 'child') {
@@ -1712,43 +1920,90 @@ export function createApiApp() {
       return res.status(400).json({ success: false, error: 'Missing instructionId or status' });
     }
 
+    if (!VALID_ACK_STATUSES.has(status)) {
+      return res.status(400).json({ success: false, error: `Invalid execution acknowledgment status: ${status}` });
+    }
+
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
+
     const childTicketStr = childTicket != null ? String(childTicket).trim() : undefined;
-    const dbClient = getBridgeDbClient(req);
     const ackResult = await bridgeStore.acknowledgeInstruction(
       auth.terminal.accountId,
       {
-        instructionId,
+        instructionId: String(instructionId).trim(),
         status,
         childTicket: childTicketStr,
-        fillPrice: fillPrice ? Number(fillPrice) : undefined,
-        brokerErrorCode: brokerErrorCode ? Number(brokerErrorCode) : undefined,
-        brokerErrorMessage,
-        executionLatencyMs: executionLatencyMs ? Number(executionLatencyMs) : undefined,
+        fillPrice: fillPrice != null && fillPrice !== '' ? Number(fillPrice) : undefined,
+        brokerErrorCode: brokerErrorCode != null && brokerErrorCode !== '' ? Number(brokerErrorCode) : undefined,
+        brokerErrorMessage: brokerErrorMessage != null ? String(brokerErrorMessage) : undefined,
+        executionLatencyMs: executionLatencyMs != null && executionLatencyMs !== '' ? Number(executionLatencyMs) : undefined,
       },
       dbClient
     );
 
     if (!ackResult.success) {
-      return res.status(404).json({ success: false, error: ackResult.error });
+      return res.status(ackResult.statusCode || 404).json({ success: false, error: ackResult.error });
     }
 
-    return res.status(200).json({ success: true, acknowledged: true });
+    return res.status(200).json({
+      success: true,
+      acknowledged: true,
+      duplicate: Boolean(ackResult.duplicate),
+    });
   });
 
   /**
-   * 8. Bridge Diagnostic Mappings & Real Logs
+   * 8. Bridge Diagnostic Mappings & Real Logs (Authenticated & Tenant-Scoped / Admin)
    * GET /api/v1/bridge/mappings
    */
   registerRoute('get', '/api/v1/bridge/mappings', async (req: Request, res: Response) => {
-    const dbClient = getBridgeDbClient(req);
-    const mappings = await bridgeStore.getTradeMappings(dbClient);
-    return res.status(200).json({ success: true, mappings });
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const mappings = await bridgeStore.getTradeMappings(dbClient);
+      if (caller.isVerifiedAdmin) {
+        return res.status(200).json({ success: true, mappings });
+      }
+
+      // Tenant isolation: non-admin callers may only inspect mappings for their own MT5 accounts
+      const { data: ownedAccounts, error: ownedErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id')
+        .eq('user_id', caller.user.id);
+
+      if (ownedErr) {
+        return res.status(500).json({ success: false, error: `Failed to verify account ownership: ${ownedErr.message}` });
+      }
+
+      const ownedIds = new Set((ownedAccounts || []).map((a: any) => a.id));
+      const scopedMappings = mappings.filter(
+        (m) => (m.parentAccountId && ownedIds.has(m.parentAccountId)) || (m.childAccountId && ownedIds.has(m.childAccountId))
+      );
+
+      return res.status(200).json({ success: true, mappings: scopedMappings });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to load bridge mappings' });
+    }
   });
 
   registerRoute('get', '/api/v1/bridge/logs', async (req: Request, res: Response) => {
-    const dbClient = getBridgeDbClient(req);
-    const logs = await bridgeStore.getSyncLogs(dbClient);
-    return res.status(200).json({ success: true, logs });
+    const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const logs = await bridgeStore.getSyncLogs(dbClient);
+      return res.status(200).json({ success: true, logs });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to load bridge logs' });
+    }
   });
 
   /**

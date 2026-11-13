@@ -25,12 +25,47 @@ input ulong    InpMaxSlippagePoints = 30;                              // Max al
 input string   InpComment           = "TradeSync Copy";                // Order comment
 input bool     InpVerboseLogs       = true;                            // Output detailed execution logs
 
+//--- Reliability & Duplicate Protection Constants
+#define MAX_PROCESSED_CACHE 256
+#define MAX_PENDING_ACKS    64
+#define MAX_ACK_RETRIES     30
+#define ACK_RETRY_DELAY_SEC 2
+
+struct ProcessedInstructionRecord
+{
+   string   instructionId;
+   string   status;
+   ulong    childTicket;
+   double   fillPrice;
+   int      errCode;
+   string   errMsg;
+   uint     latencyMs;
+   datetime recordedAt;
+};
+
+struct PendingAckRecord
+{
+   string   instructionId;
+   string   status;
+   ulong    childTicket;
+   double   fillPrice;
+   int      errCode;
+   string   errMsg;
+   uint     latencyMs;
+   int      attempts;
+   datetime nextRetryAt;
+};
+
 //--- Global Variables
 CTrade   g_Trade;
 bool     g_IsPollInFlight = false;
 datetime g_LastPollSuccessLog = 0;
 datetime g_LastPollErrorLog = 0;
 int      g_LastPollErrorCode = 0;
+
+ProcessedInstructionRecord g_ProcessedCache[];
+int      g_ProcessedWriteIdx = 0;
+PendingAckRecord           g_PendingAcks[];
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -123,6 +158,7 @@ void OnTimer()
    if(g_IsPollInFlight) return; // Prevent re-entrant network congestion
 
    g_IsPollInFlight = true;
+   FlushPendingAcks();
    PollAndExecuteInstructions();
    g_IsPollInFlight = false;
 }
@@ -478,12 +514,12 @@ ulong ExtractParentTicketFromComment(string comment)
 //| Compares exact numeric ulong equality (ticket 123 != 1234/12345) |
 //| Returns 0 if not found OR if multiple positions match (ambiguous)|
 //+------------------------------------------------------------------+
-ulong FindChildPositionByParentTicket(ulong parentTicket)
+int CountChildPositionsByParentTicket(ulong parentTicket, ulong &firstMatchedTicket)
 {
+   firstMatchedTicket = 0;
    if(parentTicket == 0) return 0;
 
    int total = PositionsTotal();
-   ulong matchedTicket = 0;
    int matchCount = 0;
 
    for(int i = 0; i < total; i++)
@@ -491,20 +527,34 @@ ulong FindChildPositionByParentTicket(ulong parentTicket)
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
 
-      // Strict safety: magic number must match this Receiver instance
       if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
          continue;
 
       string comment = PositionGetString(POSITION_COMMENT);
       ulong extractedParentTicket = ExtractParentTicketFromComment(comment);
 
-      // EXACT NUMERIC EQUALITY (never substring matching)
       if(extractedParentTicket > 0 && extractedParentTicket == parentTicket)
       {
-         matchedTicket = ticket;
+         if(matchCount == 0)
+         {
+            firstMatchedTicket = ticket;
+         }
          matchCount++;
       }
    }
+
+   return matchCount;
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Unambiguously find child position matching parent ticket |
+//| Compares exact numeric ulong equality (ticket 123 != 1234/12345) |
+//| Returns 0 if not found OR if multiple positions match (ambiguous)|
+//+------------------------------------------------------------------+
+ulong FindChildPositionByParentTicket(ulong parentTicket)
+{
+   ulong matchedTicket = 0;
+   int matchCount = CountChildPositionsByParentTicket(parentTicket, matchedTicket);
 
    // Safety invariant: MUST be a unique, unambiguous match
    if(matchCount == 1)
@@ -519,6 +569,74 @@ ulong FindChildPositionByParentTicket(ulong parentTicket)
    }
 
    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Escape special characters for safe JSON string serialization     |
+//+------------------------------------------------------------------+
+string EscapeJsonString(string raw)
+{
+   string out = "";
+   int len = StringLen(raw);
+   for(int i = 0; i < len; i++)
+   {
+      ushort c = StringGetCharacter(raw, i);
+      if(c == '\\')      out += "\\\\";
+      else if(c == '\"') out += "\\\"";
+      else if(c == '\n') out += "\\n";
+      else if(c == '\r') out += "\\r";
+      else if(c == '\t') out += "\\t";
+      else if(c >= 32)   out += ShortToString(c);
+   }
+   return out;
+}
+
+//+------------------------------------------------------------------+
+//| Lookup & store processed instructions to prevent re-execution    |
+//+------------------------------------------------------------------+
+int FindProcessedInstructionIndex(string instructionId)
+{
+   if(StringLen(instructionId) == 0) return -1;
+   int size = ArraySize(g_ProcessedCache);
+   for(int i = 0; i < size; i++)
+   {
+      if(g_ProcessedCache[i].instructionId == instructionId)
+      {
+         return i;
+      }
+   }
+   return -1;
+}
+
+void RecordProcessedInstruction(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+{
+   if(StringLen(instructionId) == 0) return;
+
+   int existingIdx = FindProcessedInstructionIndex(instructionId);
+   int targetIdx = existingIdx;
+   if(targetIdx < 0)
+   {
+      int currentSize = ArraySize(g_ProcessedCache);
+      if(currentSize < MAX_PROCESSED_CACHE)
+      {
+         ArrayResize(g_ProcessedCache, currentSize + 1);
+         targetIdx = currentSize;
+      }
+      else
+      {
+         targetIdx = g_ProcessedWriteIdx % MAX_PROCESSED_CACHE;
+         g_ProcessedWriteIdx = (g_ProcessedWriteIdx + 1) % MAX_PROCESSED_CACHE;
+      }
+   }
+
+   g_ProcessedCache[targetIdx].instructionId = instructionId;
+   g_ProcessedCache[targetIdx].status        = status;
+   g_ProcessedCache[targetIdx].childTicket   = childTicket;
+   g_ProcessedCache[targetIdx].fillPrice     = fillPrice;
+   g_ProcessedCache[targetIdx].errCode       = errCode;
+   g_ProcessedCache[targetIdx].errMsg        = errMsg;
+   g_ProcessedCache[targetIdx].latencyMs     = latencyMs;
+   g_ProcessedCache[targetIdx].recordedAt    = TimeLocal();
 }
 
 //+------------------------------------------------------------------+
@@ -562,6 +680,17 @@ void ExecuteSingleInstruction(string instJson)
       return;
    }
 
+   // Duplicate instruction delivery guard: never execute the same instructionId twice
+   int processedIdx = FindProcessedInstructionIndex(instructionId);
+   if(processedIdx >= 0)
+   {
+      ProcessedInstructionRecord cached = g_ProcessedCache[processedIdx];
+      PrintFormat("[TradeSync Receiver] DUPLICATE INSTRUCTION GUARD: Instruction %s already processed (%s, ticket #%I64u). Skipping re-execution and ensuring ACK delivery.",
+                  instructionId, cached.status, cached.childTicket);
+      QueueOrRetryExistingAck(cached.instructionId, cached.status, cached.childTicket, cached.fillPrice, cached.errCode, cached.errMsg, cached.latencyMs);
+      return;
+   }
+
    uint startTicks = GetTickCount();
 
    // =================================================================
@@ -575,6 +704,28 @@ void ExecuteSingleInstruction(string instJson)
          PrintFormat("[TradeSync Receiver] REJECTED MALFORMED OPEN: InstId=%s sym=%s type=%s lots=%.2f parentTicket=%I64u",
                      instructionId, symbol, orderType, lots, parentTicket);
          SendAck(instructionId, "FAILED", 0, 0.0, 10006, "Malformed OPEN instruction payload (missing symbol/lots/parentTicket)", GetTickCount() - startTicks);
+         return;
+      }
+
+      // Duplicate position guard: check if child terminal already holds an open position for parentTicket
+      ulong existingChildTicket = 0;
+      int existingMatches = CountChildPositionsByParentTicket(parentTicket, existingChildTicket);
+      if(existingMatches == 1 && existingChildTicket > 0)
+      {
+         PrintFormat("[TradeSync Receiver] DUPLICATE OPEN GUARD: Child position #%I64u already exists for parent ticket #%I64u. Skipping duplicate order.",
+                     existingChildTicket, parentTicket);
+         SendAck(instructionId, "EXECUTED", existingChildTicket, 0.0, 10000,
+                 "Duplicate OPEN prevented: child position already open for parent ticket",
+                 GetTickCount() - startTicks);
+         return;
+      }
+      if(existingMatches > 1)
+      {
+         PrintFormat("[TradeSync Receiver] SAFETY ALERT: %d child positions already match parent ticket #%I64u. Aborting duplicate OPEN.",
+                     existingMatches, parentTicket);
+         SendAck(instructionId, "FAILED", existingChildTicket, 0.0, 10008,
+                 "Duplicate OPEN aborted: multiple child positions already exist for parent ticket",
+                 GetTickCount() - startTicks);
          return;
       }
 
@@ -821,24 +972,35 @@ void ExecuteSingleInstruction(string instJson)
          SendAck(instructionId, "FAILED", childTicket, 0.0, (int)retcode, g_Trade.ResultComment(), latency);
       }
    }
+   else
+   {
+      PrintFormat("[TradeSync Receiver] Unsupported instruction action '%s' for instruction %s", action, instructionId);
+      SendAck(instructionId, "FAILED", 0, 0.0, 10009, "Unsupported instruction action: " + action, GetTickCount() - startTicks);
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Post Execution Acknowledgment back to TradeSync Bridge API       |
+//| Attempt immediate ACK HTTP POST; classifies retryable failures   |
 //+------------------------------------------------------------------+
-void SendAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+bool TrySendAckNow(const PendingAckRecord &ack, bool &retryable)
 {
+   retryable = false;
+   if(!EnsureDemoAccount("TrySendAckNow"))
+   {
+      return false;
+   }
+
    string url = InpServerUrl + "/api/v1/bridge/instructions/ack";
    string json = StringFormat(
       "{\"account_number\":\"%I64u\",\"instructionId\":\"%s\",\"status\":\"%s\",\"childTicket\":\"%I64u\",\"fillPrice\":%.5f,\"brokerErrorCode\":%d,\"brokerErrorMessage\":\"%s\",\"executionLatencyMs\":%u}",
       AccountInfoInteger(ACCOUNT_LOGIN),
-      instructionId,
-      status,
-      childTicket,
-      fillPrice,
-      errCode,
-      errMsg,
-      latencyMs
+      EscapeJsonString(ack.instructionId),
+      EscapeJsonString(ack.status),
+      ack.childTicket,
+      ack.fillPrice,
+      ack.errCode,
+      EscapeJsonString(ack.errMsg),
+      ack.latencyMs
    );
 
    char postData[];
@@ -851,7 +1013,169 @@ void SendAck(string instructionId, string status, ulong childTicket, double fill
    StringToCharArray(json, postData, 0, WHOLE_ARRAY, CP_UTF8);
    ArrayResize(postData, ArraySize(postData) - 1);
 
-   WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
+   ResetLastError();
+   int res = WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
+
+   if(res >= 200 && res < 300)
+   {
+      return true;
+   }
+
+   if(res == -1)
+   {
+      int err = GetLastError();
+      retryable = (err != 4014);
+      PrintFormat("[TradeSync Receiver] ACK WebRequest FAILED for %s (MT5 Error %d, retryable=%s)",
+                  ack.instructionId, err, retryable ? "true" : "false");
+      return false;
+   }
+
+   string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+   // 400/401/403/404 are terminal client rejections; 408/429/5xx are transient & retryable
+   if(res == 400 || res == 401 || res == 403 || res == 404)
+   {
+      retryable = false;
+      PrintFormat("[TradeSync Receiver] ACK REJECTED (HTTP %d) for %s: %s",
+                  res, ack.instructionId, responseText);
+      return false;
+   }
+
+   retryable = true;
+   PrintFormat("[TradeSync Receiver] ACK transient failure (HTTP %d) for %s; will retry. Response: %s",
+               res, ack.instructionId, responseText);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Queue ACK for retry if not already queued                        |
+//+------------------------------------------------------------------+
+void EnqueuePendingAck(const PendingAckRecord &ack)
+{
+   int count = ArraySize(g_PendingAcks);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_PendingAcks[i].instructionId == ack.instructionId)
+      {
+         return;
+      }
+   }
+
+   if(count >= MAX_PENDING_ACKS)
+   {
+      PrintFormat("[TradeSync Receiver] WARNING: Pending ACK retry queue full (%d). Dropping oldest ACK %s.",
+                  MAX_PENDING_ACKS, g_PendingAcks[0].instructionId);
+      for(int k = 1; k < count; k++)
+      {
+         g_PendingAcks[k - 1] = g_PendingAcks[k];
+      }
+      count = MAX_PENDING_ACKS - 1;
+      ArrayResize(g_PendingAcks, count);
+   }
+
+   ArrayResize(g_PendingAcks, count + 1);
+   g_PendingAcks[count] = ack;
+   g_PendingAcks[count].nextRetryAt = TimeLocal() + ACK_RETRY_DELAY_SEC;
+}
+
+//+------------------------------------------------------------------+
+//| Flush any queued acknowledgements whose retry backoff elapsed    |
+//+------------------------------------------------------------------+
+void FlushPendingAcks()
+{
+   int count = ArraySize(g_PendingAcks);
+   if(count == 0) return;
+   if(!EnsureDemoAccount("FlushPendingAcks")) return;
+
+   datetime now = TimeLocal();
+   for(int i = count - 1; i >= 0; i--)
+   {
+      if(g_PendingAcks[i].nextRetryAt > now) continue;
+
+      g_PendingAcks[i].attempts++;
+      bool retryable = false;
+      if(TrySendAckNow(g_PendingAcks[i], retryable))
+      {
+         if(InpVerboseLogs)
+         {
+            PrintFormat("[TradeSync Receiver] ACK retry SUCCEEDED for %s on attempt #%d",
+                        g_PendingAcks[i].instructionId, g_PendingAcks[i].attempts);
+         }
+         int last = ArraySize(g_PendingAcks) - 1;
+         if(i != last) g_PendingAcks[i] = g_PendingAcks[last];
+         ArrayResize(g_PendingAcks, last);
+      }
+      else if(!retryable || g_PendingAcks[i].attempts >= MAX_ACK_RETRIES)
+      {
+         PrintFormat("[TradeSync Receiver] ACK DROPPED for %s after %d attempts (retryable=%s)",
+                     g_PendingAcks[i].instructionId, g_PendingAcks[i].attempts, retryable ? "true" : "false");
+         int last = ArraySize(g_PendingAcks) - 1;
+         if(i != last) g_PendingAcks[i] = g_PendingAcks[last];
+         ArrayResize(g_PendingAcks, last);
+      }
+      else
+      {
+         int backoff = ACK_RETRY_DELAY_SEC * MathMin(g_PendingAcks[i].attempts, 15);
+         g_PendingAcks[i].nextRetryAt = now + backoff;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Ensure cached ACK is either already queued or sent now           |
+//+------------------------------------------------------------------+
+void QueueOrRetryExistingAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+{
+   int count = ArraySize(g_PendingAcks);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_PendingAcks[i].instructionId == instructionId)
+      {
+         return; // Already scheduled for retry
+      }
+   }
+
+   PendingAckRecord ack;
+   ack.instructionId = instructionId;
+   ack.status        = status;
+   ack.childTicket   = childTicket;
+   ack.fillPrice     = fillPrice;
+   ack.errCode       = errCode;
+   ack.errMsg        = errMsg;
+   ack.latencyMs     = latencyMs;
+   ack.attempts      = 1;
+   ack.nextRetryAt   = TimeLocal();
+
+   bool retryable = false;
+   if(!TrySendAckNow(ack, retryable) && retryable)
+   {
+      EnqueuePendingAck(ack);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Post Execution Acknowledgment back to TradeSync Bridge API       |
+//| Records result locally and retries automatically on failures     |
+//+------------------------------------------------------------------+
+void SendAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+{
+   RecordProcessedInstruction(instructionId, status, childTicket, fillPrice, errCode, errMsg, latencyMs);
+
+   PendingAckRecord ack;
+   ack.instructionId = instructionId;
+   ack.status        = status;
+   ack.childTicket   = childTicket;
+   ack.fillPrice     = fillPrice;
+   ack.errCode       = errCode;
+   ack.errMsg        = errMsg;
+   ack.latencyMs     = latencyMs;
+   ack.attempts      = 1;
+   ack.nextRetryAt   = TimeLocal();
+
+   bool retryable = false;
+   if(!TrySendAckNow(ack, retryable) && retryable)
+   {
+      EnqueuePendingAck(ack);
+   }
 }
 
 //+------------------------------------------------------------------+
