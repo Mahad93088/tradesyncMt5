@@ -21,7 +21,11 @@ export const FailedTradesTable: React.FC = () => {
 
   // Filter failed or rejected trade mappings for this trader
   const failedMappings = tradeMappings.filter(
-    (m) => m.traderId === currentUser.id && m.status !== 'EXECUTED'
+    (m) =>
+      (m.traderId === currentUser.id || (childAccount && m.childAccountId === childAccount.id)) &&
+      m.status !== 'EXECUTED' &&
+      m.status !== 'CLOSED' &&
+      m.status !== 'PENDING'
   );
 
   return (

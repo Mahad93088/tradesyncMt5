@@ -898,13 +898,35 @@ export class BridgeStore {
           if (!error.message?.toLowerCase().includes('permission denied')) {
             console.warn('[BridgeStore] Supabase getTradeMappings notice:', error.message);
           }
-        } else if (rows && rows.length > 0) {
+          return [];
+        }
+
+        if (Array.isArray(rows)) {
+          if (rows.length === 0) return [];
+
+          // Hydrate mentorId (parent user_id) & traderId (child user_id) from mt5_accounts
+          const accountOwnerMap = new Map<string, string>();
+          try {
+            const { data: accRows } = await supabaseClient
+              .from('mt5_accounts')
+              .select('id, user_id');
+            if (Array.isArray(accRows)) {
+              for (const acc of accRows) {
+                if (acc?.id && acc?.user_id) {
+                  accountOwnerMap.set(acc.id, acc.user_id);
+                }
+              }
+            }
+          } catch (_) {
+            // Non-fatal hydration fallback
+          }
+
           return rows.map((r) => ({
             id: r.id,
             parentTradeTicket: String(r.parent_trade_ticket),
             childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
-            mentorId: '',
-            traderId: '',
+            mentorId: accountOwnerMap.get(r.parent_account_id) || '',
+            traderId: accountOwnerMap.get(r.child_account_id) || '',
             parentAccountId: r.parent_account_id,
             childAccountId: r.child_account_id,
             symbol: r.symbol,
@@ -922,6 +944,7 @@ export class BridgeStore {
         if (!err.message?.toLowerCase().includes('permission denied')) {
           console.warn('[BridgeStore] Supabase getTradeMappings exception:', err.message);
         }
+        return [];
       }
     }
     return Array.from(this.tradeMappings.values());
@@ -940,7 +963,8 @@ export class BridgeStore {
           if (!error.message?.toLowerCase().includes('permission denied')) {
             console.warn('[BridgeStore] Supabase getSyncLogs notice:', error.message);
           }
-        } else if (rows && rows.length > 0) {
+          return [];
+        } else if (Array.isArray(rows)) {
           return rows.map((r) => ({
             id: r.id,
             timestamp: r.created_at,
@@ -955,6 +979,7 @@ export class BridgeStore {
         if (!err.message?.toLowerCase().includes('permission denied')) {
           console.warn('[BridgeStore] Supabase getSyncLogs exception:', err.message);
         }
+        return [];
       }
     }
     return [];

@@ -19,6 +19,7 @@ import {
   Plus
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 
@@ -33,6 +34,7 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
   onOpenConnectModal,
   onOpenInviteModal
 }) => {
+  const { isCloudMode } = useAuth();
   const {
     currentUser,
     mt5Accounts,
@@ -113,12 +115,20 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
         </div>
       </div>
 
-      {/* Demo Notice */}
+      {/* Mode Status Notice */}
       <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs flex items-center justify-between text-slate-400">
         <div className="flex items-center gap-2">
-          <Shield className="h-4 w-4 text-sky-400 shrink-0" />
+          <Shield className={`h-4 w-4 shrink-0 ${isCloudMode ? 'text-emerald-400' : 'text-sky-400'}`} />
           <span>
-            <strong>Demo Sandbox:</strong> Parent trades are executed against demo liquidity pools and mirrored with simulated latency.
+            {isCloudMode ? (
+              <>
+                <strong>Cloud Demo Bridge:</strong> Parent MT5 demo deals broadcast via authenticated WebRequest and persist in Supabase.
+              </>
+            ) : (
+              <>
+                <strong>Demo Sandbox:</strong> Parent trades are executed against demo liquidity pools and mirrored with simulated latency.
+              </>
+            )}
           </span>
         </div>
         <span className="font-mono text-[11px] text-slate-500 hidden sm:inline">
@@ -219,11 +229,13 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Open Positions On Master */}
+              {/* Open Positions / Mirrored Signals On Master */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Active Parent Deals ({openParentTrades.length})
+                    {isCloudMode && openParentTrades.length === 0
+                      ? `Mirrored Master Signals (${mentorMappings.length})`
+                      : `Active Parent Deals (${openParentTrades.length})`}
                   </span>
                   <span className="text-[10px] text-slate-500 font-mono">
                     Auto-mirrored to {activeFollowers} follower terminals
@@ -270,6 +282,40 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                           >
                             Close
                           </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : isCloudMode && mentorMappings.length > 0 ? (
+                  <div className="space-y-2">
+                    {mentorMappings.slice(0, 6).map((m) => (
+                      <div
+                        key={m.id}
+                        className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                              m.orderType.startsWith('BUY')
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                : 'bg-rose-950 text-rose-400 border border-rose-800'
+                            }`}
+                          >
+                            {m.orderType}
+                          </span>
+                          <div>
+                            <span className="font-mono font-bold text-white text-xs">{m.symbol}</span>
+                            <span className="text-slate-400 text-[11px] ml-2 font-mono">
+                              P: {m.parentLots.toFixed(2)}L • C: {m.childLots.toFixed(2)}L
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={m.status} size="sm" />
+                          <span className="text-[10px] font-mono text-slate-500">
+                            #{m.parentTradeTicket} ({m.latencyMs}ms)
+                          </span>
                         </div>
                       </div>
                     ))}

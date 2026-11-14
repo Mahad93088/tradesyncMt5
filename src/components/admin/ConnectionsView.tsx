@@ -20,13 +20,22 @@ import {
   X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { ensureValidSession } from '../../lib/sessionManager';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
 import { MT5Account } from '../../types';
 
+function formatLastSyncTime(timestamp?: string | null): string {
+  if (!timestamp) return 'Never synced';
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return 'Never synced';
+  return `${new Date(parsed).toLocaleTimeString()} UTC`;
+}
+
 export const ConnectionsView: React.FC = () => {
+  const { isCloudMode } = useAuth();
   const {
     mt5Accounts,
     users,
@@ -247,6 +256,7 @@ export const ConnectionsView: React.FC = () => {
                 const token = generatedTokens[acc.id];
                 const isCopied = copiedTokenAccId === acc.id;
                 const isConnected = acc.connectionStatus === 'connected';
+                const isStale = !isConnected && Boolean(acc.errorMessage && acc.errorMessage.toLowerCase().includes('stale'));
 
                 return (
                   <div key={acc.id} className="p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs hover:bg-slate-900/40 transition-colors">
@@ -261,9 +271,11 @@ export const ConnectionsView: React.FC = () => {
                       <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono uppercase ${
                         isConnected
                           ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/80'
+                          : isStale
+                          ? 'bg-amber-950 text-amber-300 border border-amber-800/80'
                           : 'bg-slate-800 text-slate-400 border border-slate-700'
                       }`}>
-                        {isConnected ? 'EA Online' : 'Awaiting EA'}
+                        {isConnected ? 'EA Online' : isStale ? 'Stale Heartbeat' : 'Awaiting EA'}
                       </span>
                     </div>
 
@@ -391,13 +403,17 @@ export const ConnectionsView: React.FC = () => {
                     <td className="px-4 py-3.5 font-mono">
                       <div className="font-semibold text-slate-200">#{acc.accountNumber}</div>
                       <span className="text-[10px] text-slate-500">
-                        {acc.accountType === 'live' ? 'Simulated Live' : 'Demo Testnet'}
+                        {acc.accountType === 'live'
+                          ? 'Live (Blocked)'
+                          : isCloudMode
+                          ? 'Cloud Demo MT5'
+                          : 'Demo Testnet'}
                       </span>
                     </td>
 
                     {/* Owner & Role */}
                     <td className="px-4 py-3.5">
-                      <div className="font-semibold text-slate-100">{owner?.fullName}</div>
+                      <div className="font-semibold text-slate-100">{owner?.fullName || 'Verified User'}</div>
                       <span className="text-[10px] font-mono text-slate-400 uppercase">
                         {acc.accountRole === 'parent' ? 'Parent Mentor' : 'Child Trader'}
                       </span>
@@ -421,18 +437,23 @@ export const ConnectionsView: React.FC = () => {
 
                     {/* Last Status Update */}
                     <td className="px-4 py-3.5 font-mono text-[11px] text-slate-400">
-                      {new Date(acc.lastHeartbeat).toLocaleTimeString()} UTC
+                      {formatLastSyncTime(acc.lastHeartbeat)}
                     </td>
 
                     {/* Diagnostics Message */}
                     <td className="px-4 py-3.5">
                       {acc.errorMessage ? (
-                        <span className="text-[11px] text-rose-400 font-medium" title={acc.errorMessage}>
+                        <span
+                          className={`text-[11px] font-medium ${
+                            acc.errorMessage.toLowerCase().includes('stale') ? 'text-amber-400' : 'text-rose-400'
+                          }`}
+                          title={acc.errorMessage}
+                        >
                           {acc.errorMessage}
                         </span>
                       ) : acc.connectionStatus === 'connected' ? (
                         <span className="text-[11px] text-emerald-400">
-                          Heartbeat acknowledged; zero packet loss.
+                          Heartbeat acknowledged; bridge active.
                         </span>
                       ) : (
                         <span className="text-[11px] text-slate-500 italic">

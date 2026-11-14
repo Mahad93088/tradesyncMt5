@@ -16,6 +16,7 @@ import {
   Plus
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 
@@ -30,12 +31,14 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
   onOpenConnectModal,
   onOpenLotModal
 }) => {
+  const { isCloudMode } = useAuth();
   const {
     currentUser,
     mt5Accounts,
     parentChildLinks,
     mentorProfiles,
     trades,
+    tradeMappings,
     toggleLinkStatus,
     unlinkTrader,
     disconnectMT5Account,
@@ -54,6 +57,11 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
   // Open trades on this child account
   const openTrades = trades.filter(
     (t) => childAccount && t.accountId === childAccount.id && t.status === 'OPEN'
+  );
+  const traderMappings = tradeMappings.filter(
+    (m) =>
+      (m.traderId === currentUser.id || (childAccount && m.childAccountId === childAccount.id)) &&
+      (m.status === 'EXECUTED' || m.status === 'PENDING')
   );
 
   return (
@@ -110,16 +118,24 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         </div>
       </div>
 
-      {/* Demo Notice */}
+      {/* Mode Status Notice */}
       <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs flex items-center justify-between text-slate-400">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-emerald-400 shrink-0" />
           <span>
-            <strong>Demo Sandbox Mode:</strong> Copying signals are simulated against broker demo servers. Zero real capital at risk.
+            {isCloudMode ? (
+              <>
+                <strong>Cloud Demo Bridge Mode:</strong> Authenticated child receiver polling live Supabase copy instructions (Demo-only safeguard enforced).
+              </>
+            ) : (
+              <>
+                <strong>Demo Sandbox Mode:</strong> Copying signals are simulated against broker demo servers. Zero real capital at risk.
+              </>
+            )}
           </span>
         </div>
         <span className="font-mono text-[11px] text-slate-500 hidden sm:inline">
-          FastAPI Copy Engine Active
+          {isCloudMode ? 'Cloud Bridge Active' : 'FastAPI Copy Engine Active'}
         </span>
       </div>
 
@@ -229,7 +245,9 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Live Open Positions ({openTrades.length})
+                    {isCloudMode && openTrades.length === 0
+                      ? `Live Mirrored Positions (${traderMappings.length})`
+                      : `Live Open Positions (${openTrades.length})`}
                   </span>
                   <button
                     onClick={() => onNavigateTab('copied-trades')}
@@ -269,6 +287,40 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                             {t.profit >= 0 ? '+' : ''}${t.profit.toFixed(2)}
                           </div>
                           <span className="text-[10px] text-slate-500">Ticket #{t.ticket}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : isCloudMode && traderMappings.length > 0 ? (
+                  <div className="space-y-2">
+                    {traderMappings.slice(0, 5).map((m) => (
+                      <div
+                        key={m.id}
+                        className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                              m.orderType.startsWith('BUY')
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                : 'bg-rose-950 text-rose-400 border border-rose-800'
+                            }`}
+                          >
+                            {m.orderType}
+                          </span>
+                          <div>
+                            <span className="font-mono font-bold text-white text-xs">{m.symbol}</span>
+                            <span className="text-slate-400 text-[11px] ml-2 font-mono">
+                              {m.childLots.toFixed(2)} lots (Parent #{m.parentTradeTicket})
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={m.status} size="sm" />
+                          <span className="text-[10px] font-mono text-slate-500">
+                            {m.childTradeTicket ? `#${m.childTradeTicket}` : `${m.latencyMs}ms`}
+                          </span>
                         </div>
                       </div>
                     ))}

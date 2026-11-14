@@ -21,6 +21,7 @@ import {
   Key
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
@@ -38,6 +39,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onOpenAddTrader,
   onOpenRegisterAccount
 }) => {
+  const { isCloudMode } = useAuth();
   const {
     users,
     mentorProfiles,
@@ -49,6 +51,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     syncLogs,
     auditLogs,
     systemHealth,
+    cloudBridgeTelemetry,
     notifications,
     broadcastAnnouncement
   } = useApp();
@@ -77,9 +80,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const disconnectedMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'disconnected').length;
   const errorMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'error').length;
 
-  const totalExecuted = tradeMappings.filter((m) => m.status === 'EXECUTED').length;
-  const failedTrades = tradeMappings.filter((m) => m.status !== 'EXECUTED').length;
-  const openSignals = trades.filter((t) => t.status === 'OPEN').length;
+  const totalExecuted = tradeMappings.filter(
+    (m) => m.status === 'EXECUTED' || m.status === 'CLOSED'
+  ).length;
+  const failedTrades = tradeMappings.filter(
+    (m) => m.status !== 'EXECUTED' && m.status !== 'CLOSED' && m.status !== 'PENDING'
+  ).length;
+  const openSignals = isCloudMode
+    ? tradeMappings.filter((m) => m.status === 'EXECUTED' || m.status === 'PENDING').length
+    : trades.filter((t) => t.status === 'OPEN').length;
+  const effectiveLatencyMs = isCloudMode
+    ? cloudBridgeTelemetry.averageCopyLatencyMs || systemHealth.averageCopyLatencyMs
+    : systemHealth.averageCopyLatencyMs;
 
   const handleBroadcast = (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,8 +111,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <h1 className="text-xl font-bold tracking-tight text-slate-100">
               System Administration
             </h1>
-            <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-[10px] font-mono text-slate-300">
-              Demo Environment
+            <span
+              className={`rounded border px-2 py-0.5 text-[10px] font-mono ${
+                isCloudMode
+                  ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                  : 'bg-slate-800 border-slate-700 text-slate-300'
+              }`}
+            >
+              {isCloudMode ? 'Cloud Bridge Live' : 'Demo Environment'}
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-400">
@@ -148,16 +166,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       </div>
 
-      {/* Notice on Demo Data */}
+      {/* Mode Status Notice */}
       <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2.5 text-xs flex items-center justify-between gap-3 text-slate-400">
         <div className="flex items-center gap-2">
-          <Info className="h-4 w-4 text-sky-400 shrink-0" />
+          <Info className={`h-4 w-4 shrink-0 ${isCloudMode ? 'text-emerald-400' : 'text-sky-400'}`} />
           <span>
-            <strong>Demo Data Notice:</strong> All metrics, account balances, and copy mappings displayed below represent simulated testnet data.
+            {isCloudMode ? (
+              <>
+                <strong>Cloud Demo Bridge Active:</strong> Displaying live Supabase MT5 terminals, copy mappings, and synchronization logs (Demo-only EA safeguard enforced).
+              </>
+            ) : (
+              <>
+                <strong>Demo Data Notice:</strong> All metrics, account balances, and copy mappings displayed below represent simulated testnet data.
+              </>
+            )}
           </span>
         </div>
         <span className="font-mono text-[11px] text-slate-500 hidden sm:inline">
-          Live MT5 binary bridge disarmed
+          {isCloudMode
+            ? cloudBridgeTelemetry.bridgePersistenceReady
+              ? 'Supabase Bridge Verified'
+              : 'Bridge Persistence Pending'
+            : 'Live MT5 binary bridge disarmed'}
         </span>
       </div>
 
@@ -169,7 +199,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           subtitle={`${activeMentors} Active • ${suspendedMentors} Suspended`}
           icon={Users}
           accentColor="blue"
-          isDemo={true}
+          isDemo={!isCloudMode}
           onClick={() => onNavigateTab('mentors')}
         />
         <StatsCard
@@ -178,7 +208,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           subtitle={`${activeTraders} Active • ${suspendedTraders} Suspended`}
           icon={UserCheck}
           accentColor="teal"
-          isDemo={true}
+          isDemo={!isCloudMode}
           onClick={() => onNavigateTab('traders')}
         />
         <StatsCard
@@ -187,16 +217,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           subtitle={`${activeSubs} Active • ${expiredSubs} Exp • ${cancelledSubs} Canc`}
           icon={CreditCard}
           accentColor="slate"
-          isDemo={true}
+          isDemo={!isCloudMode}
           onClick={() => onNavigateTab('plans')}
         />
         <StatsCard
-          title="Demo MT5 Terminals"
+          title={isCloudMode ? 'Cloud MT5 Terminals' : 'Demo MT5 Terminals'}
           value={connectedMT5}
           subtitle={`${connectedMT5} Connected • ${disconnectedMT5 + errorMT5} Offline`}
           icon={Server}
           accentColor={errorMT5 > 0 ? 'amber' : 'emerald'}
-          isDemo={true}
+          isDemo={!isCloudMode}
           onClick={() => onNavigateTab('connections')}
         />
       </div>
@@ -306,19 +336,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             Copy Signals & Latency
           </span>
           <div className="flex items-baseline gap-2 pt-1">
-            <span className="font-mono text-2xl font-bold text-slate-100">{trades.length}</span>
-            <span className="text-xs text-slate-400">Total Deals</span>
+            <span className="font-mono text-2xl font-bold text-slate-100">
+              {isCloudMode ? tradeMappings.length : trades.length}
+            </span>
+            <span className="text-xs text-slate-400">
+              {isCloudMode ? 'Total Bridge Mappings' : 'Total Deals'}
+            </span>
           </div>
           <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
             <div>Open Signals: <strong className="text-emerald-400">{openSignals}</strong></div>
             <div>Executed: <strong className="text-sky-400">{totalExecuted}</strong></div>
             <div>Failed: <strong className="text-rose-400">{failedTrades}</strong></div>
-            <div>Latency: <strong className="text-slate-200">{systemHealth.averageCopyLatencyMs}ms</strong></div>
+            <div>Latency: <strong className="text-slate-200">{effectiveLatencyMs}ms</strong></div>
           </div>
         </div>
       </div>
 
-      {/* Grid: Demo Account Connection Records + Recent Platform Activity */}
+      {/* Grid: Account Connection Records + Recent Platform Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* Connection Records Card */}
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
@@ -326,7 +360,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="flex items-center gap-2">
               <Server className="h-4 w-4 text-sky-400" />
               <h3 className="text-xs font-semibold text-slate-200 uppercase tracking-wider">
-                Connection Records (Demo Accounts)
+                {isCloudMode ? 'Live Bridge Terminal Records' : 'Connection Records (Demo Accounts)'}
               </h3>
             </div>
             <button
@@ -355,7 +389,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      {user?.fullName} • {acc.broker} ({acc.server})
+                      {user?.fullName || 'Verified User'} • {acc.broker} ({acc.server})
                     </p>
                     {acc.errorMessage && (
                       <p className="text-[10px] text-rose-400 truncate max-w-xs" title={acc.errorMessage}>
@@ -373,16 +407,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               );
             })}
+            {mt5Accounts.length === 0 && (
+              <div className="p-6 text-center text-xs text-slate-500">
+                No MT5 accounts registered yet.
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Recent Platform Activity & Audit Logs Card */}
+        {/* Recent Platform Activity & Bridge Sync Logs Card */}
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
           <div className="flex items-center justify-between pb-2 border-b border-slate-800">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-teal-400" />
               <h3 className="text-xs font-semibold text-slate-200 uppercase tracking-wider">
-                Recent Platform Activity & Audit
+                {isCloudMode && auditLogs.length === 0
+                  ? 'Recent Bridge Sync Events'
+                  : 'Recent Platform Activity & Audit'}
               </h3>
             </div>
             <button
@@ -394,32 +435,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {auditLogs.slice(0, 5).map((log) => (
-              <div
-                key={log.id}
-                className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs space-y-1 hover:border-slate-700 transition-colors"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full ${
-                        log.result === 'success'
-                          ? 'bg-emerald-400'
-                          : log.result === 'failure'
-                          ? 'bg-rose-400'
-                          : 'bg-amber-400'
-                      }`}
-                    />
-                    <strong className="text-slate-300">{log.action}</strong>
-                    <span className="text-slate-500">by {log.actorName}</span>
+            {isCloudMode && auditLogs.length === 0 ? (
+              syncLogs.length > 0 ? (
+                syncLogs.slice(0, 5).map((log) => (
+                  <div
+                    key={log.id}
+                    className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs space-y-1 hover:border-slate-700 transition-colors"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            log.level === 'success'
+                              ? 'bg-emerald-400'
+                              : log.level === 'error'
+                              ? 'bg-rose-400'
+                              : log.level === 'warn'
+                              ? 'bg-amber-400'
+                              : 'bg-sky-400'
+                          }`}
+                        />
+                        <strong className="text-slate-300">{log.eventType}</strong>
+                        {log.ticket && <span className="text-slate-500">#{log.ticket}</span>}
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500">
+                        {new Date(log.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-normal">{log.details}</p>
                   </div>
-                  <span className="font-mono text-[10px] text-slate-500">
-                    {new Date(log.timestamp).toLocaleTimeString()}
-                  </span>
+                ))
+              ) : (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  No bridge synchronization logs recorded yet.
                 </div>
-                <p className="text-[11px] text-slate-300 leading-normal">{log.details}</p>
-              </div>
-            ))}
+              )
+            ) : (
+              auditLogs.slice(0, 5).map((log) => (
+                <div
+                  key={log.id}
+                  className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs space-y-1 hover:border-slate-700 transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          log.result === 'success'
+                            ? 'bg-emerald-400'
+                            : log.result === 'failure'
+                            ? 'bg-rose-400'
+                            : 'bg-amber-400'
+                        }`}
+                      />
+                      <strong className="text-slate-300">{log.action}</strong>
+                      <span className="text-slate-500">by {log.actorName}</span>
+                    </div>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      {new Date(log.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-normal">{log.details}</p>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>

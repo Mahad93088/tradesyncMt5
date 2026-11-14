@@ -174,6 +174,8 @@ export const GlobalLogsView: React.FC = () => {
               >
                 <option value="all">All States</option>
                 <option value="EXECUTED">EXECUTED</option>
+                <option value="CLOSED">CLOSED</option>
+                <option value="PENDING">PENDING</option>
                 <option value="FAILED">FAILED</option>
                 <option value="REJECTED_MARGIN">Margin Rejects</option>
                 <option value="SLIPPAGE_EXCEEDED">Slippage Exceeded</option>
@@ -275,15 +277,21 @@ export const GlobalLogsView: React.FC = () => {
                     <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
                       <td className="px-4 py-3 font-mono">
                         <div className="font-semibold text-slate-200">#{map.parentTradeTicket}</div>
-                        <span className="text-[10px] text-slate-500 font-sans">{mentor?.fullName}</span>
+                        <span className="text-[10px] text-slate-500 font-sans">
+                          {mentor?.fullName || 'Verified Mentor'}
+                        </span>
                       </td>
                       <td className="px-4 py-3 font-mono">
                         {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
                           <div className="font-semibold text-emerald-400">#{map.childTradeTicket}</div>
                         ) : (
-                          <span className="text-slate-500 italic text-[11px]">Rejected</span>
+                          <span className="text-slate-500 italic text-[11px]">
+                            {map.status === 'PENDING' ? 'Pending' : 'Rejected'}
+                          </span>
                         )}
-                        <span className="text-[10px] text-slate-500 font-sans">{trader?.fullName}</span>
+                        <span className="text-[10px] text-slate-500 font-sans">
+                          {trader?.fullName || 'Verified Trader'}
+                        </span>
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5 font-mono">

@@ -38,6 +38,28 @@ import {
 } from '../data/mockData';
 import { STANDARD_DEMO_ACCOUNTS } from '../services/mt5AdminService';
 
+export interface CloudBridgeTelemetry {
+  bridgePersistenceReady: boolean;
+  hasServiceRole: boolean;
+  databaseLatencyMs: number | null;
+  databaseError: string | null;
+  tablesVerified: {
+    bridgeInstructions: boolean;
+    tradeMappings: boolean;
+    bridgeSyncLogs: boolean;
+    mt5Accounts: boolean;
+    claimPendingRpc: boolean;
+  };
+  totalTerminalsCount: number;
+  activeTerminalsCount: number;
+  staleTerminalsCount: number;
+  disconnectedTerminalsCount: number;
+  pendingInstructionsCount: number;
+  failedMappingsCount: number;
+  averageCopyLatencyMs: number;
+  lastCheckedAt: string | null;
+}
+
 interface AppContextType {
   currentUser: User;
   setCurrentUser: (user: User) => void;
@@ -52,6 +74,7 @@ interface AppContextType {
   syncLogs: SyncLog[];
   auditLogs: AuditLog[];
   systemHealth: SystemHealth;
+  cloudBridgeTelemetry: CloudBridgeTelemetry;
   notifications: PlatformNotification[];
   isArchitectureModalOpen: boolean;
   setIsArchitectureModalOpen: (open: boolean) => void;
@@ -207,6 +230,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const { user: authUser, isCloudMode, isConfigured } = useAuth();
   const [isArchitectureModalOpen, setIsArchitectureModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [cloudBridgeTelemetry, setCloudBridgeTelemetry] = useState<CloudBridgeTelemetry>({
+    bridgePersistenceReady: false,
+    hasServiceRole: false,
+    databaseLatencyMs: null,
+    databaseError: null,
+    tablesVerified: {
+      bridgeInstructions: false,
+      tradeMappings: false,
+      bridgeSyncLogs: false,
+      mt5Accounts: false,
+      claimPendingRpc: false,
+    },
+    totalTerminalsCount: 0,
+    activeTerminalsCount: 0,
+    staleTerminalsCount: 0,
+    disconnectedTerminalsCount: 0,
+    pendingInstructionsCount: 0,
+    failedMappingsCount: 0,
+    averageCopyLatencyMs: 0,
+    lastCheckedAt: null,
+  });
 
   // Synchronize currentUser with authenticated Supabase user in Cloud Mode
   useEffect(() => {
@@ -215,120 +259,318 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [isCloudMode, authUser]);
 
-  // Sync to local storage on changes
+  // Sync to local storage strictly in Local Demo Mode so Cloud Mode never pollutes or gets polluted by sandbox state
   useEffect(() => {
-    localStorage.setItem('tradesync_users', JSON.stringify(users));
-  }, [users]);
+    if (!isCloudMode) localStorage.setItem('tradesync_users', JSON.stringify(users));
+  }, [users, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(mt5Accounts));
-  }, [mt5Accounts]);
+    if (!isCloudMode) localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(mt5Accounts));
+  }, [mt5Accounts, isCloudMode]);
 
-  // Sync authoritative MT5 account statuses (connectionStatus, lastSync) from backend Supabase
+  // Authoritative Cloud Mode synchronization from Supabase + Bridge APIs (Zero mock data leakage)
   useEffect(() => {
+    if (!isCloudMode || !isConfigured) {
+      return;
+    }
+
+    // Immediately purge mock initial state when entering Cloud Mode
+    setMt5Accounts([]);
+    setTradeMappings([]);
+    setSyncLogs([]);
+    setTrades([]);
+    setParentChildLinks([]);
+    setUsers(authUser ? [authUser] : []);
+    setSystemHealth({
+      overallStatus: 'degraded',
+      backendEngineStatus: 'standby',
+      activeTerminalsCount: 0,
+      averageCopyLatencyMs: 0,
+      queueDepth: 0,
+      cpuUsagePercent: 0,
+      ramUsagePercent: 0,
+      uptimeSeconds: 0,
+      lastSyncTimestamp: new Date().toISOString(),
+    });
+
+    if (!authUser || authUser.status !== 'active') {
+      return;
+    }
+
     let isMounted = true;
 
-    const syncAccountsFromServer = async () => {
-      if (!isCloudMode || !isConfigured || authUser.role !== 'admin' || authUser.status !== 'active') {
-        return;
-      }
+    const mapServerAccount = (acc: any): MT5Account => ({
+      id: acc.id,
+      userId: acc.user_id,
+      accountRole: acc.account_role === 'parent' ? 'parent' : 'child',
+      accountNumber: String(acc.account_number),
+      broker: acc.broker_name || 'MetaTrader 5',
+      server: acc.broker_server || '',
+      accountType: acc.account_type === 'live' ? 'live' : 'demo',
+      balance: Number(acc.balance) || 0,
+      equity: Number(acc.equity) || 0,
+      margin: Number(acc.margin) || 0,
+      freeMargin: Number(acc.free_margin) || 0,
+      currency: acc.currency || 'USD',
+      leverage: Number(acc.leverage) || 100,
+      connectionStatus: acc.connection_status || 'disconnected',
+      isInvestorPassword: Boolean(acc.is_investor_password),
+      autoTradingEnabled: Boolean(acc.auto_trading_enabled),
+      pingMs: Number(acc.ping_ms) || 15,
+      lastHeartbeat: acc.last_sync || acc.created_at || new Date().toISOString(),
+      lastStatusUpdate: acc.last_sync || acc.created_at || undefined,
+      errorMessage: acc.error_message || undefined,
+    });
+
+    const mapAssignmentsToLinks = (assignments: any[], profilesList: any[]): ParentChildLink[] => {
+      const profMap = new Map<string, any>(profilesList.map((p: any) => [p.id, p]));
+      return assignments.map((a: any) => {
+        const mentorProf = profMap.get(a.mentor_id);
+        const traderProf = profMap.get(a.trader_id);
+        const lotMode = String(a.lot_mode || 'parent_lot').toLowerCase();
+        const isFixed = lotMode === 'fixed' || lotMode === 'fixed_lot';
+        const isMult = lotMode === 'multiplier';
+        return {
+          id: a.id,
+          mentorId: a.mentor_id,
+          traderId: a.trader_id,
+          mentorName: mentorProf?.full_name || mentorProf?.email || 'Verified Mentor',
+          traderName: traderProf?.full_name || traderProf?.email || 'Trader Follower',
+          parentAccountId: a.parent_account_id || '',
+          childAccountId: a.child_account_id || '',
+          status: a.status === 'active' ? 'active' : 'paused',
+          lotSettings: {
+            mode: isFixed || isMult || lotMode === 'equity_ratio' || lotMode === 'risk_percent' ? 'custom_lot' : 'parent_lot',
+            customType: isFixed ? 'fixed' : lotMode === 'equity_ratio' ? 'equity_ratio' : lotMode === 'risk_percent' ? 'risk_percent' : 'multiplier',
+            fixedLot: Number(a.fixed_lot || 0.1),
+            multiplier: Number(a.lot_multiplier || 1.0),
+            riskPercent: 1.0,
+            maxLotCap: 50,
+            minLotClamp: 0.01,
+            maxDrawdownProtectionPercent: 20,
+            copyPendingOrders: true,
+            syncSlTp: true,
+            slippageMaxPips: 30,
+          },
+          linkedAt: a.assigned_at || new Date().toISOString(),
+          totalTradesCopied: 0,
+          totalProfitUSD: 0,
+          lastSyncAt: a.assigned_at || new Date().toISOString(),
+        };
+      });
+    };
+
+    const mapMappingsToTrades = (mappingsList: TradeMapping[]): Trade[] => {
+      return mappingsList
+        .filter((m) => m.status === 'EXECUTED' || m.status === 'CLOSED' || m.status === 'PENDING')
+        .map((m) => ({
+          id: m.id,
+          ticket: m.childTradeTicket && m.childTradeTicket !== '0' && m.childTradeTicket !== 0 ? m.childTradeTicket : m.parentTradeTicket,
+          accountId: m.childAccountId,
+          symbol: m.symbol,
+          type: m.orderType,
+          lots: m.childLots,
+          openPrice: 0,
+          currentPrice: 0,
+          profit: 0,
+          openTime: m.openTime,
+          status: m.status === 'CLOSED' ? 'CLOSED' : m.status === 'EXECUTED' ? 'OPEN' : 'PENDING',
+          comment: `Parent #${m.parentTradeTicket}`,
+        }));
+    };
+
+    const syncCloudDashboard = async () => {
       try {
         const sessionCheck = await ensureValidSession();
-        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
-          return;
-        }
-        const res = await fetch('/api/v1/admin/accounts', {
-          headers: {
-            Authorization: `Bearer ${sessionCheck.session.access_token}`,
-          },
-        });
-        if (!res.ok) return;
-        const json = await res.json();
-        if (!isMounted || !json?.success || !Array.isArray(json.accounts) || json.accounts.length === 0) {
-          return;
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+
+        const headers = { Authorization: `Bearer ${token}` };
+
+        const [healthRes, verifyRes, mappingsRes] = await Promise.all([
+          fetch('/api/health').catch(() => null),
+          fetch('/api/supabase/verify').catch(() => null),
+          fetch('/api/v1/bridge/mappings', { headers }).catch(() => null),
+        ]);
+
+        const healthJson = healthRes && healthRes.ok ? await healthRes.json().catch(() => null) : null;
+        const verifyJson = verifyRes && verifyRes.ok ? await verifyRes.json().catch(() => null) : null;
+        const mappingsJson = mappingsRes && mappingsRes.ok ? await mappingsRes.json().catch(() => null) : null;
+
+        let loadedMappings: TradeMapping[] = [];
+        if (mappingsJson?.success && Array.isArray(mappingsJson.mappings)) {
+          loadedMappings = mappingsJson.mappings;
+          if (isMounted) {
+            setTradeMappings(loadedMappings);
+            setTrades(mapMappingsToTrades(loadedMappings));
+          }
         }
 
-        const serverAccounts: MT5Account[] = json.accounts.map((acc: any) => ({
-          id: acc.id,
-          userId: acc.user_id,
-          accountRole: acc.account_role === 'parent' ? 'parent' : 'child',
-          accountNumber: String(acc.account_number),
-          broker: acc.broker_name || 'MetaTrader 5',
-          server: acc.broker_server || '',
-          accountType: acc.account_type === 'live' ? 'live' : 'demo',
-          balance: Number(acc.balance) || 0,
-          equity: Number(acc.equity) || 0,
-          margin: Number(acc.margin) || 0,
-          freeMargin: Number(acc.free_margin) || 0,
-          currency: acc.currency || 'USD',
-          leverage: Number(acc.leverage) || 100,
-          connectionStatus: acc.connection_status || 'disconnected',
-          isInvestorPassword: Boolean(acc.is_investor_password),
-          autoTradingEnabled: Boolean(acc.auto_trading_enabled),
-          pingMs: Number(acc.ping_ms) || 12,
-          lastSync: acc.last_sync || new Date().toISOString(),
-          errorMessage: acc.error_message || undefined,
-        }));
+        if (authUser.role === 'admin') {
+          const [accRes, logsRes, statusRes] = await Promise.all([
+            fetch('/api/v1/admin/accounts', { headers }).catch(() => null),
+            fetch('/api/v1/bridge/logs', { headers }).catch(() => null),
+            fetch('/api/v1/bridge/status', { headers }).catch(() => null),
+          ]);
 
-        setMt5Accounts((prev) => {
-          const serverById = new Map(serverAccounts.map((sa) => [sa.id, sa]));
-          const merged = [...serverAccounts];
-          for (const existing of prev) {
-            if (!serverById.has(existing.id)) {
-              merged.push(existing);
+          const accJson = accRes && accRes.ok ? await accRes.json().catch(() => null) : null;
+          const logsJson = logsRes && logsRes.ok ? await logsRes.json().catch(() => null) : null;
+          const statusJson = statusRes && statusRes.ok ? await statusRes.json().catch(() => null) : null;
+
+          if (!isMounted) return;
+
+          if (accJson?.success && Array.isArray(accJson.accounts)) {
+            const serverAccounts = accJson.accounts.map(mapServerAccount);
+            setMt5Accounts(serverAccounts);
+
+            if (Array.isArray(accJson.profiles)) {
+              setUsers(
+                accJson.profiles.map((p: any) => ({
+                  id: p.id,
+                  email: p.email || '',
+                  fullName: p.full_name || p.email?.split('@')[0] || 'User',
+                  role: p.role || 'trader',
+                  status: p.status || 'active',
+                  avatarUrl: p.avatar_url,
+                  createdAt: p.created_at || new Date().toISOString(),
+                }))
+              );
+            }
+            if (Array.isArray(accJson.assignments)) {
+              setParentChildLinks(mapAssignmentsToLinks(accJson.assignments, accJson.profiles || []));
             }
           }
-          return merged;
-        });
+
+          if (logsJson?.success && Array.isArray(logsJson.logs)) {
+            setSyncLogs(logsJson.logs);
+          }
+
+          const bt = statusJson?.bridgeTelemetry;
+          const diag = statusJson?.databaseDiagnostics;
+          const persistenceReady = Boolean(statusJson?.databasePersistence ?? healthJson?.bridgePersistenceReady);
+
+          setCloudBridgeTelemetry({
+            bridgePersistenceReady: persistenceReady,
+            hasServiceRole: Boolean(healthJson?.hasServiceRole ?? verifyJson?.hasServiceRole ?? true),
+            databaseLatencyMs: diag?.latencyMs ?? null,
+            databaseError: diag?.error || verifyJson?.rpcs?.claim_pending_instructions?.error || null,
+            tablesVerified: diag?.tablesVerified || {
+              bridgeInstructions: Boolean(verifyJson?.tables?.bridge_instructions?.accessible),
+              tradeMappings: Boolean(verifyJson?.tables?.trade_mappings?.accessible),
+              bridgeSyncLogs: Boolean(verifyJson?.tables?.bridge_sync_logs?.accessible),
+              mt5Accounts: Boolean(verifyJson?.tables?.mt5_accounts?.accessible),
+              claimPendingRpc: Boolean(verifyJson?.rpcs?.claim_pending_instructions?.verified),
+            },
+            totalTerminalsCount: bt?.totalTerminalsCount ?? 0,
+            activeTerminalsCount: bt?.activeTerminalsCount ?? 0,
+            staleTerminalsCount: bt?.staleTerminalsCount ?? 0,
+            disconnectedTerminalsCount: bt?.disconnectedTerminalsCount ?? 0,
+            pendingInstructionsCount: bt?.pendingInstructionsCount ?? 0,
+            failedMappingsCount: bt?.failedMappingsCount ?? 0,
+            averageCopyLatencyMs: bt?.averageCopyLatencyMs ?? 0,
+            lastCheckedAt: new Date().toISOString(),
+          });
+
+          setSystemHealth((prev) => ({
+            ...prev,
+            overallStatus: !persistenceReady
+              ? 'critical'
+              : (bt?.staleTerminalsCount || 0) > 0 || (bt?.failedMappingsCount || 0) > 0
+              ? 'degraded'
+              : 'healthy',
+            backendEngineStatus: persistenceReady ? 'running' : 'offline',
+            activeTerminalsCount: bt?.activeTerminalsCount ?? 0,
+            averageCopyLatencyMs: bt?.averageCopyLatencyMs ?? 0,
+            queueDepth: bt?.pendingInstructionsCount ?? 0,
+            lastSyncTimestamp: statusJson?.timestamp || new Date().toISOString(),
+          }));
+        } else {
+          // Non-admin Cloud Mode user (mentor / trader): tenant-scoped endpoint only
+          const myRes = await fetch('/api/v1/bridge/my-accounts', { headers }).catch(() => null);
+          const myJson = myRes && myRes.ok ? await myRes.json().catch(() => null) : null;
+          if (!isMounted) return;
+
+          if (myJson?.success && Array.isArray(myJson.accounts)) {
+            const myAccounts = myJson.accounts.map(mapServerAccount);
+            setMt5Accounts(myAccounts);
+
+            if (Array.isArray(myJson.profiles)) {
+              setUsers(
+                myJson.profiles.map((p: any) => ({
+                  id: p.id,
+                  email: p.email || '',
+                  fullName: p.full_name || p.email?.split('@')[0] || 'User',
+                  role: p.role || 'trader',
+                  status: p.status || 'active',
+                  avatarUrl: p.avatar_url,
+                  createdAt: p.created_at || new Date().toISOString(),
+                }))
+              );
+            }
+            if (Array.isArray(myJson.assignments)) {
+              setParentChildLinks(mapAssignmentsToLinks(myJson.assignments, myJson.profiles || []));
+            }
+
+            const activeCount = myAccounts.filter((a: MT5Account) => a.connectionStatus === 'connected').length;
+            const persistenceReady = Boolean(healthJson?.bridgePersistenceReady);
+            setSystemHealth((prev) => ({
+              ...prev,
+              overallStatus: persistenceReady ? 'healthy' : 'critical',
+              backendEngineStatus: persistenceReady ? 'running' : 'offline',
+              activeTerminalsCount: activeCount,
+              lastSyncTimestamp: new Date().toISOString(),
+            }));
+          }
+        }
       } catch {
-        // Silently ignore transient network/API errors so dashboard remains stable
+        // Keep Cloud Mode free of mock fallbacks during transient polling errors
       }
     };
 
-    syncAccountsFromServer();
-    const intervalId = setInterval(syncAccountsFromServer, 12000);
+    syncCloudDashboard();
+    const intervalId = setInterval(syncCloudDashboard, 10000);
 
     return () => {
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [isCloudMode, isConfigured, authUser.role, authUser.status]);
+  }, [isCloudMode, isConfigured, authUser?.id, authUser?.role, authUser?.status]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_links', JSON.stringify(parentChildLinks));
-  }, [parentChildLinks]);
+    if (!isCloudMode) localStorage.setItem('tradesync_links', JSON.stringify(parentChildLinks));
+  }, [parentChildLinks, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_trades', JSON.stringify(trades));
-  }, [trades]);
+    if (!isCloudMode) localStorage.setItem('tradesync_trades', JSON.stringify(trades));
+  }, [trades, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_sync_logs', JSON.stringify(syncLogs));
-  }, [syncLogs]);
+    if (!isCloudMode) localStorage.setItem('tradesync_sync_logs', JSON.stringify(syncLogs));
+  }, [syncLogs, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_audit_logs', JSON.stringify(auditLogs));
-  }, [auditLogs]);
+    if (!isCloudMode) localStorage.setItem('tradesync_audit_logs', JSON.stringify(auditLogs));
+  }, [auditLogs, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_mentor_profiles', JSON.stringify(mentorProfiles));
-  }, [mentorProfiles]);
+    if (!isCloudMode) localStorage.setItem('tradesync_mentor_profiles', JSON.stringify(mentorProfiles));
+  }, [mentorProfiles, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_subscriptions', JSON.stringify(subscriptions));
-  }, [subscriptions]);
+    if (!isCloudMode) localStorage.setItem('tradesync_subscriptions', JSON.stringify(subscriptions));
+  }, [subscriptions, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_trade_mappings', JSON.stringify(tradeMappings));
-  }, [tradeMappings]);
+    if (!isCloudMode) localStorage.setItem('tradesync_trade_mappings', JSON.stringify(tradeMappings));
+  }, [tradeMappings, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_health', JSON.stringify(systemHealth));
-  }, [systemHealth]);
+    if (!isCloudMode) localStorage.setItem('tradesync_health', JSON.stringify(systemHealth));
+  }, [systemHealth, isCloudMode]);
 
   useEffect(() => {
-    localStorage.setItem('tradesync_notifications', JSON.stringify(notifications));
-  }, [notifications]);
+    if (!isCloudMode) localStorage.setItem('tradesync_notifications', JSON.stringify(notifications));
+  }, [notifications, isCloudMode]);
 
   // Switch role helper
   const switchRole = (role: UserRole, specificUserId?: string) => {
@@ -883,6 +1125,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then((sessionCheck) => {
+        if (sessionCheck.valid && sessionCheck.session?.access_token) {
+          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${sessionCheck.session.access_token}`,
+            },
+            body: JSON.stringify({ connectionStatus: 'disconnected' }),
+          }).catch(() => {});
+        }
+      });
+    }
+
     // Pause any active links attached to this account
     setParentChildLinks((prev) =>
       prev.map((l) => {
@@ -893,14 +1150,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    const log: SyncLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      eventType: 'MT5_TERMINAL_DISCONNECTED',
-      level: 'warn',
-      details: `MT5 Account ${accountId} disconnected. Associated copy streams paused.`
-    };
-    setSyncLogs((prev) => [log, ...prev]);
+    if (!isCloudMode) {
+      const log: SyncLog = {
+        id: `log_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        eventType: 'MT5_TERMINAL_DISCONNECTED',
+        level: 'warn',
+        details: `MT5 Account ${accountId} disconnected. Associated copy streams paused.`
+      };
+      setSyncLogs((prev) => [log, ...prev]);
+    }
   };
 
   const reconnectMT5Account = (accountId: string) => {
@@ -920,6 +1179,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then((sessionCheck) => {
+        if (sessionCheck.valid && sessionCheck.session?.access_token) {
+          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${sessionCheck.session.access_token}`,
+            },
+            body: JSON.stringify({ connectionStatus: 'connected' }),
+          }).catch(() => {});
+        }
+      });
+    }
+
     setParentChildLinks((prev) =>
       prev.map((l) => {
         if (l.parentAccountId === accountId || l.childAccountId === accountId) {
@@ -929,25 +1203,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    const log: SyncLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      eventType: 'MT5_TERMINAL_RESTORED',
-      level: 'success',
-      details: `MT5 Account ${accountId} reconnection verified. Active heartbeat restored (${ping}ms).`
-    };
-    setSyncLogs((prev) => [log, ...prev]);
+    if (!isCloudMode) {
+      const log: SyncLog = {
+        id: `log_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        eventType: 'MT5_TERMINAL_RESTORED',
+        level: 'success',
+        details: `MT5 Account ${accountId} reconnection verified. Active heartbeat restored (${ping}ms).`
+      };
+      setSyncLogs((prev) => [log, ...prev]);
+    }
   };
 
   const toggleAutoTrading = (accountId: string) => {
+    let nextEnabled = true;
     setMt5Accounts((prev) =>
       prev.map((acc) => {
         if (acc.id === accountId) {
-          return { ...acc, autoTradingEnabled: !acc.autoTradingEnabled };
+          nextEnabled = !acc.autoTradingEnabled;
+          return { ...acc, autoTradingEnabled: nextEnabled };
         }
         return acc;
       })
     );
+
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then((sessionCheck) => {
+        if (sessionCheck.valid && sessionCheck.session?.access_token) {
+          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/auto-trading`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${sessionCheck.session.access_token}`,
+            },
+            body: JSON.stringify({ enabled: nextEnabled }),
+          }).catch(() => {});
+        }
+      });
+    }
   };
 
   // Trader Link actions
@@ -1740,6 +2033,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         syncLogs,
         auditLogs,
         systemHealth,
+        cloudBridgeTelemetry,
         notifications,
         isArchitectureModalOpen,
         setIsArchitectureModalOpen,

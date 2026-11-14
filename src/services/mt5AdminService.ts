@@ -425,86 +425,84 @@ export const mt5AdminService = {
           });
           if (apiRes.ok) {
             const json = await apiRes.json();
-        if (json.success && Array.isArray(json.accounts) && json.accounts.length > 0) {
-          const profileMap = new Map<string, any>();
-          (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
+            if (json.success && Array.isArray(json.accounts)) {
+              const profileMap = new Map<string, any>();
+              (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
 
-          const parentAccounts = json.accounts.filter((a: any) => a.account_role === 'parent');
-          const assignments = json.assignments || [];
+              const parentAccounts = json.accounts.filter((a: any) => a.account_role === 'parent');
+              const assignments = json.assignments || [];
 
-          if (parentAccounts.length > 0) {
-            const parents: ParentAccountItem[] = parentAccounts.map((acc: any) => {
-              const prof = profileMap.get(acc.user_id);
-              const isMentorVerified = Boolean(prof && prof.role === 'mentor' && prof.status === 'active');
-              const mentorName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isMentorVerified ? 'Verified Mentor' : 'Registered Mentor'));
-              const mentorEmail = prof?.email || (isMentorVerified ? 'mentor@tradesync.io' : 'No profile associated');
-              const mentorStatus = prof?.status || (isMentorVerified ? 'active' : 'pending');
+              const parents: ParentAccountItem[] = parentAccounts.map((acc: any) => {
+                const prof = profileMap.get(acc.user_id);
+                const isMentorVerified = Boolean(prof && prof.role === 'mentor' && prof.status === 'active');
+                const mentorName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isMentorVerified ? 'Verified Mentor' : 'Registered Mentor'));
+                const mentorEmail = prof?.email || (isMentorVerified ? 'mentor@tradesync.io' : 'No profile associated');
+                const mentorStatus = prof?.status || (isMentorVerified ? 'active' : 'pending');
 
-              const assigned = assignments.filter(
-                (as: any) =>
-                  (as.parent_account_id === acc.id || as.mentor_id === acc.user_id) &&
-                  as.status === 'active'
-              );
-
-              const assignedChildren: LinkedChildItem[] = assigned.map((as: any) => {
-                const childProf = profileMap.get(as.trader_id);
-                const childAcc = json.accounts.find(
-                  (a: any) => a.id === as.child_account_id || a.user_id === as.trader_id
+                const assigned = assignments.filter(
+                  (as: any) =>
+                    (as.parent_account_id === acc.id || as.mentor_id === acc.user_id) &&
+                    as.status === 'active'
                 );
+
+                const assignedChildren: LinkedChildItem[] = assigned.map((as: any) => {
+                  const childProf = profileMap.get(as.trader_id);
+                  const childAcc = json.accounts.find(
+                    (a: any) => a.id === as.child_account_id || a.user_id === as.trader_id
+                  );
+                  return {
+                    assignmentId: as.id,
+                    childAccountId: childAcc?.id || as.child_account_id || as.trader_id,
+                    childAccountNumber: childAcc?.account_number || 'Linked Follower',
+                    traderId: as.trader_id,
+                    traderName: childProf?.full_name || (childProf?.email ? childProf.email.split('@')[0] : 'Follower Trader'),
+                    traderEmail: childProf?.email || '',
+                    traderAvatar: childProf?.avatar_url,
+                    brokerName: childAcc?.broker_name || 'XM',
+                    brokerServer: childAcc?.broker_server || 'xmglobal_mt5 2',
+                    connectionStatus: childAcc?.connection_status || 'disconnected',
+                    assignedAt: as.assigned_at,
+                    assignmentStatus: as.status,
+                    lotCopyMode: as.lot_mode || 'multiplier',
+                    lotMultiplier: Number(as.lot_multiplier || 1.0),
+                    fixedLot: Number(as.fixed_lot || 0.1),
+                  };
+                });
+
                 return {
-                  assignmentId: as.id,
-                  childAccountId: childAcc?.id || as.child_account_id || as.trader_id,
-                  childAccountNumber: childAcc?.account_number || 'Linked Follower',
-                  traderId: as.trader_id,
-                  traderName: childProf?.full_name || (childProf?.email ? childProf.email.split('@')[0] : 'Follower Trader'),
-                  traderEmail: childProf?.email || '',
-                  traderAvatar: childProf?.avatar_url,
-                  brokerName: childAcc?.broker_name || 'XM',
-                  brokerServer: childAcc?.broker_server || 'xmglobal_mt5 2',
-                  connectionStatus: childAcc?.connection_status || 'disconnected',
-                  assignedAt: as.assigned_at,
-                  assignmentStatus: as.status,
-                  lotCopyMode: as.lot_mode || as.lot_copy_mode || 'multiplier',
-                  lotMultiplier: Number(as.lot_multiplier || 1.0),
-                  fixedLot: Number(as.fixed_lot || 0.1),
+                  id: acc.id,
+                  userId: acc.user_id,
+                  accountNumber: acc.account_number,
+                  brokerName: acc.broker_name,
+                  brokerServer: acc.broker_server,
+                  accountRole: 'parent',
+                  accountType: acc.account_type,
+                  balance: Number(acc.balance || 0),
+                  equity: Number(acc.equity || 0),
+                  margin: Number(acc.margin || 0),
+                  freeMargin: Number(acc.free_margin || 0),
+                  currency: acc.currency || 'USD',
+                  leverage: acc.leverage || 100,
+                  connectionStatus: acc.connection_status,
+                  pingMs: acc.ping_ms || 15,
+                  autoTradingEnabled: acc.auto_trading_enabled ?? true,
+                  lastSync: acc.last_sync || acc.created_at,
+                  createdAt: acc.created_at,
+                  errorMessage: acc.error_message,
+                  mentorName,
+                  mentorEmail,
+                  mentorAvatar: prof?.avatar_url,
+                  mentorStatus,
+                  isMentorVerified,
+                  assignedChildCount: assignedChildren.length,
+                  assignedChildren,
+                  isLiveBroker: acc.account_type === 'live',
+                  isSimulatedDemo: acc.account_type !== 'live',
+                  dataSource: 'supabase',
                 };
               });
 
-              return {
-                id: acc.id,
-                userId: acc.user_id,
-                accountNumber: acc.account_number,
-                brokerName: acc.broker_name,
-                brokerServer: acc.broker_server,
-                accountRole: 'parent',
-                accountType: acc.account_type,
-                balance: Number(acc.balance || 0),
-                equity: Number(acc.equity || 0),
-                margin: Number(acc.margin || 0),
-                freeMargin: Number(acc.free_margin || 0),
-                currency: acc.currency || 'USD',
-                leverage: acc.leverage || 100,
-                connectionStatus: acc.connection_status,
-                pingMs: acc.ping_ms || 15,
-                autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                lastSync: acc.last_sync || acc.created_at,
-                createdAt: acc.created_at,
-                errorMessage: acc.error_message,
-                mentorName,
-                mentorEmail,
-                mentorAvatar: prof?.avatar_url,
-                mentorStatus,
-                isMentorVerified,
-                assignedChildCount: assignedChildren.length,
-                assignedChildren,
-                isLiveBroker: acc.account_type === 'live',
-                isSimulatedDemo: acc.account_type !== 'live',
-                dataSource: 'supabase',
-              };
-            });
-
-            return { data: parents, error: null, source: 'supabase' };
-              }
+              return { data: parents, error: null, source: 'supabase' };
             }
           }
         }
@@ -630,9 +628,12 @@ export const mt5AdminService = {
 
             return { data: parents, error: null, source: 'supabase' };
           }
+          return { data: [], error: null, source: 'supabase' };
         }
+        return { data: [], error: 'Authentication required in Cloud Mode.', source: 'supabase' };
       } catch (err: any) {
         console.warn('[mt5AdminService] Supabase parent accounts query notice:', err.message);
+        return { data: [], error: err.message || 'Failed to load Supabase parent accounts.', source: 'supabase' };
       }
     }
 
@@ -779,104 +780,77 @@ export const mt5AdminService = {
           });
           if (apiRes.ok) {
             const json = await apiRes.json();
-        if (json.success && Array.isArray(json.accounts) && json.accounts.length > 0) {
-          const profileMap = new Map<string, any>();
-          (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
+            if (json.success && Array.isArray(json.accounts)) {
+              const profileMap = new Map<string, any>();
+              (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
 
-          const childAccounts = json.accounts.filter((a: any) => a.account_role === 'child');
-          const assignments = json.assignments || [];
+              const childAccounts = json.accounts.filter((a: any) => a.account_role === 'child');
+              const assignments = json.assignments || [];
 
-          if (childAccounts.length > 0) {
-            const children: ChildAccountItem[] = childAccounts.map((acc: any) => {
-              const prof = profileMap.get(acc.user_id);
-              const isTraderVerified = Boolean(prof && prof.status === 'active' && prof.role === 'trader');
-              const traderName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isTraderVerified ? 'Follower Trader' : 'Registered Trader'));
-              const traderEmail = prof?.email || '';
-              const traderStatus = prof?.status || (isTraderVerified ? 'active' : 'pending');
+              const children: ChildAccountItem[] = childAccounts.map((acc: any) => {
+                const prof = profileMap.get(acc.user_id);
+                const isTraderVerified = Boolean(prof && prof.status === 'active' && prof.role === 'trader');
+                const traderName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isTraderVerified ? 'Follower Trader' : 'Registered Trader'));
+                const traderEmail = prof?.email || '';
+                const traderStatus = prof?.status || (isTraderVerified ? 'active' : 'pending');
 
-              const assignment = assignments.find(
-                (as: any) =>
-                  ((as.child_account_id && as.child_account_id === acc.id) || as.trader_id === acc.user_id) &&
-                  as.status === 'active'
-              );
+                const assignment = assignments.find(
+                  (as: any) =>
+                    ((as.child_account_id && as.child_account_id === acc.id) || as.trader_id === acc.user_id) &&
+                    as.status === 'active'
+                );
 
-              const parentAcc = json.accounts.find(
-                (a: any) =>
-                  (assignment?.parent_account_id && a.id === assignment.parent_account_id) ||
-                  (assignment && a.user_id === assignment.mentor_id && a.account_role === 'parent')
-              );
-              const mentorProf = assignment ? profileMap.get(assignment.mentor_id) : undefined;
+                const parentAcc = json.accounts.find(
+                  (a: any) =>
+                    (assignment?.parent_account_id && a.id === assignment.parent_account_id) ||
+                    (assignment && a.user_id === assignment.mentor_id && a.account_role === 'parent')
+                );
+                const mentorProf = assignment ? profileMap.get(assignment.mentor_id) : undefined;
 
-              return {
-                id: acc.id,
-                userId: acc.user_id,
-                accountNumber: acc.account_number,
-                brokerName: acc.broker_name,
-                brokerServer: acc.broker_server,
-                accountRole: 'child',
-                accountType: acc.account_type,
-                balance: Number(acc.balance || 0),
-                equity: Number(acc.equity || 0),
-                margin: Number(acc.margin || 0),
-                freeMargin: Number(acc.free_margin || 0),
-                currency: acc.currency || 'USD',
-                leverage: acc.leverage || 100,
-                connectionStatus: acc.connection_status,
-                pingMs: acc.ping_ms || 18,
-                autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                lastSync: acc.last_sync || acc.created_at,
-                createdAt: acc.created_at,
-                errorMessage: acc.error_message,
-                traderName,
-                traderEmail,
-                traderAvatar: prof?.avatar_url,
-                traderStatus,
-                isTraderVerified,
-                assignedParent: parentAcc
-                  ? {
-                      id: parentAcc.id,
-                      accountNumber: parentAcc.account_number,
-                      mentorName: mentorProf?.full_name || (mentorProf?.email ? mentorProf.email.split('@')[0] : 'Assigned Mentor'),
-                      brokerName: parentAcc.broker_name,
-                      connectionStatus: parentAcc.connection_status,
-                    }
-                  : undefined,
-                lotSettings: assignment
-                  ? {
-                      mode: (assignment.lot_mode || assignment.lot_copy_mode || 'parent_lot') as any,
-                      customType: 'fixed',
-                      fixedLot: Number(assignment.fixed_lot || 0.1),
-                      multiplier: Number(assignment.lot_multiplier || 1.0),
-                      riskPercent: 1.0,
-                      maxLotCap: 5.0,
-                      minLotClamp: 0.01,
-                      maxDrawdownProtectionPercent: 15,
-                      copyPendingOrders: true,
-                      syncSlTp: true,
-                      slippageMaxPips: 3,
-                    }
-                  : {
-                      mode: 'parent_lot',
-                      customType: 'fixed',
-                      fixedLot: 0.1,
-                      multiplier: 1.0,
-                      riskPercent: 1.0,
-                      maxLotCap: 5.0,
-                      minLotClamp: 0.01,
-                      maxDrawdownProtectionPercent: 15,
-                      copyPendingOrders: true,
-                      syncSlTp: true,
-                      slippageMaxPips: 3,
-                    },
-                assignedAt: assignment?.assigned_at,
-                isLiveBroker: acc.account_type === 'live',
-                isSimulatedDemo: acc.account_type !== 'live',
-                dataSource: 'supabase',
-              };
-            });
+                return {
+                  id: acc.id,
+                  userId: acc.user_id,
+                  accountNumber: acc.account_number,
+                  brokerName: acc.broker_name,
+                  brokerServer: acc.broker_server,
+                  accountRole: 'child',
+                  accountType: acc.account_type,
+                  balance: Number(acc.balance || 0),
+                  equity: Number(acc.equity || 0),
+                  margin: Number(acc.margin || 0),
+                  freeMargin: Number(acc.free_margin || 0),
+                  currency: acc.currency || 'USD',
+                  leverage: acc.leverage || 100,
+                  connectionStatus: acc.connection_status,
+                  pingMs: acc.ping_ms || 18,
+                  autoTradingEnabled: acc.auto_trading_enabled ?? true,
+                  lastSync: acc.last_sync || acc.created_at,
+                  createdAt: acc.created_at,
+                  errorMessage: acc.error_message,
+                  traderName,
+                  traderEmail,
+                  traderAvatar: prof?.avatar_url,
+                  traderStatus,
+                  isTraderVerified,
+                  isAssigned: Boolean(assignment),
+                  assignedMentorId: assignment?.mentor_id,
+                  assignedMentorName: mentorProf?.full_name || (mentorProf?.email ? mentorProf.email.split('@')[0] : 'Assigned Mentor'),
+                  assignedParentAccountId: parentAcc?.id || assignment?.parent_account_id || acc.assigned_parent_id,
+                  assignedParentAccountNumber: parentAcc?.account_number,
+                  assignmentId: assignment?.id,
+                  assignmentStatus: assignment?.status,
+                  assignedAt: assignment?.assigned_at,
+                  copyMode: (assignment?.lot_mode as any) || (assignment ? 'multiplier' : 'unassigned'),
+                  lotMultiplier: assignment?.lot_multiplier !== undefined ? Number(assignment.lot_multiplier) : 1.0,
+                  fixedLot: assignment?.fixed_lot !== undefined ? Number(assignment.fixed_lot) : 0.1,
+                  riskPercent: 1.0,
+                  isLiveBroker: acc.account_type === 'live',
+                  isSimulatedDemo: acc.account_type !== 'live',
+                  dataSource: 'supabase',
+                };
+              });
 
-            return { data: children, error: null, source: 'supabase' };
-              }
+              return { data: children, error: null, source: 'supabase' };
             }
           }
         }
@@ -983,9 +957,12 @@ export const mt5AdminService = {
 
             return { data: children, error: null, source: 'supabase' };
           }
+          return { data: [], error: null, source: 'supabase' };
         }
+        return { data: [], error: 'Authentication required in Cloud Mode.', source: 'supabase' };
       } catch (err: any) {
         console.warn('[mt5AdminService] Supabase child accounts query notice:', err.message);
+        return { data: [], error: err.message || 'Failed to load Supabase child accounts.', source: 'supabase' };
       }
     }
 
@@ -1299,7 +1276,7 @@ export const mt5AdminService = {
     userName?: string;
     parentAccountId?: string;
     lotSettings?: {
-      copyMode?: 'multiplier' | 'fixed' | 'parent_lot';
+      copyMode?: 'multiplier' | 'fixed' | 'fixed_lot' | 'parent_lot';
       multiplier?: number;
       fixedLot?: number;
       riskPercent?: number;
@@ -1318,6 +1295,7 @@ export const mt5AdminService = {
       tokenParam: string;
     };
     error?: string;
+    code?: string;
   }> {
     try {
       const sessionCheck = await ensureValidSession();
@@ -1346,61 +1324,66 @@ export const mt5AdminService = {
         }),
       });
 
-      const result = await response.json();
+      const parsed = await this.safeParseApiResponse(response);
+      const result = parsed.data;
 
-      if (result.success && result.account) {
-        const rawToken = result.terminalToken;
-        const newAccount: MT5Account = {
-          id: result.account.id,
-          userId: result.account.userId,
-          accountRole: result.account.accountRole,
-          accountNumber: result.account.accountNumber,
-          broker: result.account.brokerName,
-          server: result.account.brokerServer,
-          accountType: result.account.accountType,
-          balance: result.account.balance,
-          equity: result.account.equity,
-          margin: 0,
-          freeMargin: result.account.balance,
-          currency: result.account.currency,
-          leverage: result.account.leverage,
-          connectionStatus: 'disconnected', // Initial state is disconnected until EA connects
-          pingMs: 15,
-          lastHeartbeat: new Date().toISOString(),
-          isInvestorPassword: true,
-          autoTradingEnabled: true,
-        };
-
-        // Update local storage cache
-        if (typeof localStorage !== 'undefined') {
-          const storedRaw = localStorage.getItem('tradesync_mt5_accounts');
-          const localAccounts: MT5Account[] = storedRaw ? JSON.parse(storedRaw) : [];
-          localStorage.setItem(
-            'tradesync_mt5_accounts',
-            JSON.stringify([newAccount, ...localAccounts.filter((a) => a.id !== newAccount.id)])
-          );
-        }
-
-        // If database persistence failed on the server, report the error directly
-        if (result.account.isDurableDb === false && result.account.dbError) {
-          return {
-            success: false,
-            error: `Database persistence error: ${result.account.dbError}. Ensure migration 03 has been executed.`,
-          };
-        }
-
+      if (!parsed.ok || !result?.success || !result?.account) {
         return {
-          success: true,
-          account: newAccount,
-          terminalToken: rawToken,
-          tokenPrefix: result.tokenPrefix,
-          instructions: result.instructions,
+          success: false,
+          code: result?.code,
+          error:
+            result?.error ||
+            parsed.error ||
+            `HTTP ${response.status}: Server rejected MT5 account registration`,
+        };
+      }
+
+      const rawToken = result.terminalToken;
+      const newAccount: MT5Account = {
+        id: result.account.id,
+        userId: result.account.userId,
+        accountRole: result.account.accountRole,
+        accountNumber: result.account.accountNumber,
+        broker: result.account.brokerName,
+        server: result.account.brokerServer,
+        accountType: result.account.accountType,
+        balance: result.account.balance,
+        equity: result.account.equity,
+        margin: 0,
+        freeMargin: result.account.balance ?? 0,
+        currency: result.account.currency,
+        leverage: result.account.leverage,
+        connectionStatus: 'disconnected', // Initial state is disconnected until EA connects
+        pingMs: 15,
+        lastHeartbeat: new Date().toISOString(),
+        isInvestorPassword: true,
+        autoTradingEnabled: true,
+      };
+
+      // Update local storage cache
+      if (typeof localStorage !== 'undefined') {
+        const storedRaw = localStorage.getItem('tradesync_mt5_accounts');
+        const localAccounts: MT5Account[] = storedRaw ? JSON.parse(storedRaw) : [];
+        localStorage.setItem(
+          'tradesync_mt5_accounts',
+          JSON.stringify([newAccount, ...localAccounts.filter((a) => a.id !== newAccount.id)])
+        );
+      }
+
+      // If database persistence failed on the server, report the error directly
+      if (result.account.isDurableDb === false && result.account.dbError) {
+        return {
+          success: false,
+          error: `Database persistence error: ${result.account.dbError}. Ensure migration 03 has been executed.`,
         };
       }
 
       return {
-        success: false,
-        error: result.error || 'Server rejected MT5 account registration',
+        success: true,
+        account: newAccount,
+        terminalToken: rawToken,
+        tokenPrefix: result.tokenPrefix,
+        instructions: result.instructions,
       };
     } catch (err: any) {
       console.error('[mt5AdminService] Registration failed:', err);

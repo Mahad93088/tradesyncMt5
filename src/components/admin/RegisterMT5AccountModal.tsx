@@ -35,7 +35,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   onSuccess,
 }) => {
   const { isCloudMode } = useAuth();
-  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts } = useApp();
+  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, users } = useApp();
 
   const [accountRole, setAccountRole] = useState<'parent' | 'child'>(defaultRole);
   const [brokerName, setBrokerName] = useState<string>('XM');
@@ -47,6 +47,11 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   const [balance, setBalance] = useState<string | number>(defaultRole === 'parent' ? 50000 : 10000);
   const [currency, setCurrency] = useState<string>('USD');
   const [leverage, setLeverage] = useState<number>(100);
+
+  // Verified profile owner selection (mentor for parent, trader for child)
+  const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string }>>([]);
+  const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string }>>([]);
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string>('');
 
   // Child linkage settings
   const [parentAccountId, setParentAccountId] = useState<string>('');
@@ -71,27 +76,46 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   const parentAccounts = mt5Accounts.filter((a) => a.accountRole === 'parent');
 
   useEffect(() => {
-    if (isOpen) {
-      setAccountRole(defaultRole);
-      setBrokerName('XM');
-      setBrokerServer(defaultRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
-      setAccountNumber('');
-      setAccountType('demo');
-      setBalance(defaultRole === 'parent' ? 50000 : 10000);
-      setErrorMessage(null);
-      setRegisteredResult(null);
-      setCopiedToken(false);
-      setCopiedUrl(false);
-      if (parentAccounts.length > 0) {
-        setParentAccountId(parentAccounts[0].id);
-      }
+    if (!isOpen) return;
+    setAccountRole(defaultRole);
+    setBrokerName('XM');
+    setBrokerServer(defaultRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
+    setAccountNumber('');
+    setAccountType('demo');
+    setBalance(defaultRole === 'parent' ? 50000 : 10000);
+    setErrorMessage(null);
+    setRegisteredResult(null);
+    setCopiedToken(false);
+    setCopiedUrl(false);
+    if (parentAccounts.length > 0) {
+      setParentAccountId(parentAccounts[0].id);
     }
+
+    let active = true;
+    Promise.all([
+      mt5AdminService.getVerifiedMentors(isCloudMode, users),
+      mt5AdminService.getVerifiedTraders(isCloudMode, users),
+    ])
+      .then(([mentors, traders]) => {
+        if (!active) return;
+        setVerifiedMentors(mentors);
+        setVerifiedTraders(traders);
+        const pool = defaultRole === 'parent' ? mentors : traders;
+        setSelectedOwnerId(pool[0]?.id || '');
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
   }, [isOpen, defaultRole]);
 
   const handleRoleChange = (role: 'parent' | 'child') => {
     setAccountRole(role);
     setBrokerServer(role === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
     setBalance(role === 'parent' ? 50000 : 10000);
+    const pool = role === 'parent' ? verifiedMentors : verifiedTraders;
+    setSelectedOwnerId(pool[0]?.id || '');
   };
 
   const handleCopy = (text: string, type: 'token' | 'url') => {
@@ -134,6 +158,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         equity: parsedBalance,
         currency,
         leverage: Number(leverage) || 100,
+        userId: selectedOwnerId || undefined,
         parentAccountId: accountRole === 'child' ? parentAccountId : undefined,
         lotSettings:
           accountRole === 'child'
@@ -404,6 +429,40 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                   </span>
                 </button>
               </div>
+            </div>
+
+            {/* Verified Owner Selection (Mentor for Parent, Trader for Child) */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                <span>
+                  {accountRole === 'parent'
+                    ? 'Assigned Verified Active Mentor'
+                    : 'Assigned Active Follower Trader'}
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  {accountRole === 'parent' ? 'role = mentor' : 'role = trader'}
+                </span>
+              </label>
+              <select
+                value={selectedOwnerId}
+                onChange={(e) => setSelectedOwnerId(e.target.value)}
+                required
+                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+              >
+                {(accountRole === 'parent' ? verifiedMentors : verifiedTraders).length === 0 ? (
+                  <option value="">
+                    {accountRole === 'parent'
+                      ? '-- No verified active mentors available --'
+                      : '-- No active traders available --'}
+                  </option>
+                ) : (
+                  (accountRole === 'parent' ? verifiedMentors : verifiedTraders).map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.fullName} ({u.email})
+                    </option>
+                  ))
+                )}
+              </select>
             </div>
 
             {/* Broker & Server Selection */}
