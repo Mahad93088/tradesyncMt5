@@ -363,10 +363,10 @@ async function runTests() {
   ]);
 
   const app = createApiApp({
-    supabaseUrl: 'https://mock.supabase.co',
-    serviceRoleKey: 'mock-service-role-key',
-    serviceRoleClient: mockSupabase as any,
-    verifyAuthToken: async (token: string) => {
+    supabaseUrlOverride: 'https://mock.supabase.co',
+    serviceRoleKeyOverride: 'mock-service-role-key',
+    serviceRoleClientOverride: mockSupabase as any,
+    authUserResolverOverride: async (token: string) => {
       const uid = tokenToUser.get(token);
       if (!uid) return { user: null, error: 'Invalid token' };
       const profile = state.profiles.find((p) => p.id === uid);

@@ -35,23 +35,27 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   onSuccess,
 }) => {
   const { isCloudMode } = useAuth();
-  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, users } = useApp();
+  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, followerAccounts, users, refreshCloudData } = useApp();
 
-  const [accountRole, setAccountRole] = useState<'parent' | 'child'>(defaultRole);
+  const isAdminCaller = currentUser.role === 'admin';
+  const lockedRole: 'parent' | 'child' =
+    isAdminCaller ? defaultRole : currentUser.role === 'mentor' ? 'parent' : 'child';
+
+  const [accountRole, setAccountRole] = useState<'parent' | 'child'>(lockedRole);
   const [brokerName, setBrokerName] = useState<string>('XM');
   const [brokerServer, setBrokerServer] = useState<string>(
-    defaultRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2'
+    lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2'
   );
   const [accountNumber, setAccountNumber] = useState<string>('');
   const [accountType, setAccountType] = useState<'demo' | 'live'>('demo');
-  const [balance, setBalance] = useState<string | number>(defaultRole === 'parent' ? 50000 : 10000);
+  const [balance, setBalance] = useState<string | number>(lockedRole === 'parent' ? 50000 : 10000);
   const [currency, setCurrency] = useState<string>('USD');
   const [leverage, setLeverage] = useState<number>(100);
 
-  // Verified profile owner selection (mentor for parent, trader for child)
+  // Verified profile owner selection (mentor for parent, trader for child) — admin only
   const [verifiedMentors, setVerifiedMentors] = useState<Array<{ id: string; fullName: string; email: string }>>([]);
   const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string }>>([]);
-  const [selectedOwnerId, setSelectedOwnerId] = useState<string>('');
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string>(isAdminCaller ? '' : currentUser.id);
 
   // Child linkage settings
   const [parentAccountId, setParentAccountId] = useState<string>('');
@@ -73,20 +77,29 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
 
   // Filter available parent accounts for child link dropdown
-  const parentAccounts = mt5Accounts.filter((a) => a.accountRole === 'parent');
+  const parentAccounts = (isAdminCaller ? mt5Accounts : followerAccounts).filter(
+    (a) => a.accountRole === 'parent'
+  );
 
   useEffect(() => {
     if (!isOpen) return;
-    setAccountRole(defaultRole);
+    setAccountRole(lockedRole);
     setBrokerName('XM');
-    setBrokerServer(defaultRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
+    setBrokerServer(lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
     setAccountNumber('');
     setAccountType('demo');
-    setBalance(defaultRole === 'parent' ? 50000 : 10000);
+    setBalance(lockedRole === 'parent' ? 50000 : 10000);
     setErrorMessage(null);
     setRegisteredResult(null);
     setCopiedToken(false);
     setCopiedUrl(false);
+
+    if (!isAdminCaller) {
+      setSelectedOwnerId(currentUser.id);
+      setParentAccountId(parentAccounts[0]?.id || '');
+      return;
+    }
+
     if (parentAccounts.length > 0) {
       setParentAccountId(parentAccounts[0].id);
     }
@@ -100,7 +113,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         if (!active) return;
         setVerifiedMentors(mentors);
         setVerifiedTraders(traders);
-        const pool = defaultRole === 'parent' ? mentors : traders;
+        const pool = lockedRole === 'parent' ? mentors : traders;
         setSelectedOwnerId(pool[0]?.id || '');
       })
       .catch(() => {});
@@ -108,7 +121,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
     return () => {
       active = false;
     };
-  }, [isOpen, defaultRole]);
+  }, [isOpen, defaultRole, currentUser.id, currentUser.role]);
 
   const handleRoleChange = (role: 'parent' | 'child') => {
     setAccountRole(role);
@@ -148,6 +161,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
 
     try {
       const parsedBalance = balance !== '' && !isNaN(Number(balance)) ? Number(balance) : 10000;
+      const effectiveOwnerId = isAdminCaller ? selectedOwnerId || undefined : currentUser.id;
       const res = await mt5AdminService.registerMT5Account({
         accountRole,
         brokerName: brokerName.trim() || 'XM',
@@ -158,8 +172,8 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         equity: parsedBalance,
         currency,
         leverage: Number(leverage) || 100,
-        userId: selectedOwnerId || undefined,
-        parentAccountId: accountRole === 'child' ? parentAccountId : undefined,
+        userId: effectiveOwnerId,
+        parentAccountId: accountRole === 'child' && parentAccountId ? parentAccountId : undefined,
         lotSettings:
           accountRole === 'child'
             ? {
@@ -169,6 +183,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
               }
             : undefined,
         isCloudMode,
+        useSelfServiceEndpoint: isCloudMode && !isAdminCaller,
       });
 
       if (!res.success || !res.account || !res.terminalToken) {
@@ -184,7 +199,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
       addAuditLog({
         actorId: currentUser.id,
         actorName: currentUser.fullName,
-        actorRole: 'admin',
+        actorRole: currentUser.role,
         action: 'CREATE_DEMO_ACCOUNT',
         targetResource: 'mt5_accounts',
         targetId: accountNumber.trim(),
@@ -200,6 +215,9 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         instructions: res.instructions,
       });
 
+      if (isCloudMode) {
+        await refreshCloudData();
+      }
       onSuccess();
     } catch (err: any) {
       setErrorMessage(err.message || 'An unexpected error occurred during account registration.');
@@ -385,85 +403,99 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         ) : (
           /* VIEW 2: Registration Form */
           <form onSubmit={handleSubmit} className="p-5 space-y-4">
-            {/* Account Role Selector */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300">Account Execution Role</label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => handleRoleChange('parent')}
-                  className={`p-3 rounded-xl border text-left flex flex-col gap-1 transition-all ${
-                    accountRole === 'parent'
-                      ? 'border-amber-500 bg-amber-950/40 text-amber-200'
-                      : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">Parent Account</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/60 border border-amber-700 text-amber-300 font-mono">
-                      Signal Provider
+            {/* Account Role Selector (Admin only; Mentor/Trader roles are strictly locked) */}
+            {isAdminCaller ? (
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300">Account Execution Role</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleRoleChange('parent')}
+                    className={`p-3 rounded-xl border text-left flex flex-col gap-1 transition-all ${
+                      accountRole === 'parent'
+                        ? 'border-amber-500 bg-amber-950/40 text-amber-200'
+                        : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">Parent Account</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/60 border border-amber-700 text-amber-300 font-mono">
+                        Signal Provider
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      Broadcaster EA runs here. Trades copied out to assigned children.
                     </span>
-                  </div>
-                  <span className="text-[11px] text-slate-400">
-                    Broadcaster EA runs here. Trades copied out to assigned children.
-                  </span>
-                </button>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => handleRoleChange('child')}
-                  className={`p-3 rounded-xl border text-left flex flex-col gap-1 transition-all ${
-                    accountRole === 'child'
-                      ? 'border-cyan-500 bg-cyan-950/40 text-cyan-200'
-                      : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">Child Account</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/60 border border-cyan-700 text-cyan-300 font-mono">
-                      Follower
+                  <button
+                    type="button"
+                    onClick={() => handleRoleChange('child')}
+                    className={`p-3 rounded-xl border text-left flex flex-col gap-1 transition-all ${
+                      accountRole === 'child'
+                        ? 'border-cyan-500 bg-cyan-950/40 text-cyan-200'
+                        : 'border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">Child Account</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/60 border border-cyan-700 text-cyan-300 font-mono">
+                        Follower
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      Receiver EA runs here. Executes copied trades with lot risk multiplier.
                     </span>
-                  </div>
-                  <span className="text-[11px] text-slate-400">
-                    Receiver EA runs here. Executes copied trades with lot risk multiplier.
-                  </span>
-                </button>
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3.5 py-2.5 flex items-center justify-between text-xs">
+                <div>
+                  <span className="text-slate-400">Account Owner: </span>
+                  <strong className="text-white">{currentUser.fullName}</strong>
+                </div>
+                <span className="font-mono text-[10px] text-cyan-300 uppercase">
+                  {accountRole === 'parent' ? 'Mentor Master (Broadcaster EA)' : 'Student Follower (Receiver EA)'}
+                </span>
+              </div>
+            )}
 
-            {/* Verified Owner Selection (Mentor for Parent, Trader for Child) */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
-                <span>
-                  {accountRole === 'parent'
-                    ? 'Assigned Verified Active Mentor'
-                    : 'Assigned Active Follower Trader'}
-                </span>
-                <span className="text-[10px] font-mono text-slate-400">
-                  {accountRole === 'parent' ? 'role = mentor' : 'role = trader'}
-                </span>
-              </label>
-              <select
-                value={selectedOwnerId}
-                onChange={(e) => setSelectedOwnerId(e.target.value)}
-                required
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
-              >
-                {(accountRole === 'parent' ? verifiedMentors : verifiedTraders).length === 0 ? (
-                  <option value="">
+            {/* Verified Owner Selection (Admin only) */}
+            {isAdminCaller && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                  <span>
                     {accountRole === 'parent'
-                      ? '-- No verified active mentors available --'
-                      : '-- No active traders available --'}
-                  </option>
-                ) : (
-                  (accountRole === 'parent' ? verifiedMentors : verifiedTraders).map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.fullName} ({u.email})
+                      ? 'Assigned Verified Active Mentor'
+                      : 'Assigned Active Follower Trader'}
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {accountRole === 'parent' ? 'role = mentor' : 'role = trader'}
+                  </span>
+                </label>
+                <select
+                  value={selectedOwnerId}
+                  onChange={(e) => setSelectedOwnerId(e.target.value)}
+                  required
+                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                >
+                  {(accountRole === 'parent' ? verifiedMentors : verifiedTraders).length === 0 ? (
+                    <option value="">
+                      {accountRole === 'parent'
+                        ? '-- No verified active mentors available --'
+                        : '-- No active traders available --'}
                     </option>
-                  ))
-                )}
-              </select>
-            </div>
+                  ) : (
+                    (accountRole === 'parent' ? verifiedMentors : verifiedTraders).map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.fullName} ({u.email})
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+            )}
 
             {/* Broker & Server Selection */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -602,8 +634,8 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
               </div>
             </div>
 
-            {/* If Child Account: Parent Linkage Options */}
-            {accountRole === 'child' && (
+            {/* If Child Account: Parent Linkage Options (shown when Admin or parent accounts are already linked) */}
+            {accountRole === 'child' && (isAdminCaller || parentAccounts.length > 0) && (
               <div className="rounded-xl border border-cyan-800/60 bg-cyan-950/20 p-3.5 space-y-3">
                 <div className="flex items-center gap-2 text-cyan-300 text-xs font-semibold">
                   <Link2 className="h-4 w-4 text-cyan-400" />
@@ -618,7 +650,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                       onChange={(e) => setParentAccountId(e.target.value)}
                       className="w-full rounded-lg border border-slate-750 bg-slate-900 px-2.5 py-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none"
                     >
-                      <option value="">-- Select Parent Account --</option>
+                      <option value="">-- Optional: Link via Invite Code later --</option>
                       {parentAccounts.map((p) => (
                         <option key={p.id} value={p.id}>
                           #{p.accountNumber} ({p.broker} - {p.server})

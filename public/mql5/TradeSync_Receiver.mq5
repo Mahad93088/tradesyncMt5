@@ -26,10 +26,11 @@ input string   InpComment           = "TradeSync Copy";                // Order 
 input bool     InpVerboseLogs       = true;                            // Output detailed execution logs
 
 //--- Reliability & Duplicate Protection Constants
-#define MAX_PROCESSED_CACHE 256
-#define MAX_PENDING_ACKS    64
-#define MAX_ACK_RETRIES     30
-#define ACK_RETRY_DELAY_SEC 2
+#define MAX_PROCESSED_CACHE           256
+#define MAX_PENDING_ACKS              64
+#define MAX_ACK_RETRIES               30
+#define ACK_RETRY_DELAY_SEC           2
+#define RECEIVER_HEARTBEAT_INTERVAL_SEC 60
 
 struct ProcessedInstructionRecord
 {
@@ -62,6 +63,7 @@ bool     g_IsPollInFlight = false;
 datetime g_LastPollSuccessLog = 0;
 datetime g_LastPollErrorLog = 0;
 int      g_LastPollErrorCode = 0;
+datetime g_LastHeartbeat = 0;
 
 ProcessedInstructionRecord g_ProcessedCache[];
 int      g_ProcessedWriteIdx = 0;
@@ -136,6 +138,8 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   SendReceiverHeartbeat();
+
    PrintFormat("[TradeSync Receiver] Running. Polling interval: %d ms. Server: %s", InpPollingIntervalMs, InpServerUrl);
    Print("[TradeSync Receiver] Ensure '" + InpServerUrl + "' is listed in Tools -> Options -> Expert Advisors -> Allow WebRequest");
    return(INIT_SUCCEEDED);
@@ -160,7 +164,52 @@ void OnTimer()
    g_IsPollInFlight = true;
    FlushPendingAcks();
    PollAndExecuteInstructions();
+
+   datetime now = TimeLocal();
+   if(g_LastHeartbeat == 0 || (now - g_LastHeartbeat) >= RECEIVER_HEARTBEAT_INTERVAL_SEC)
+   {
+      SendReceiverHeartbeat();
+   }
+
    g_IsPollInFlight = false;
+}
+
+//+------------------------------------------------------------------+
+//| Throttled 60s child terminal health & telemetry heartbeat        |
+//+------------------------------------------------------------------+
+void SendReceiverHeartbeat()
+{
+   if(!EnsureDemoAccount("SendReceiverHeartbeat")) return;
+
+   g_LastHeartbeat = TimeLocal();
+   string url = InpServerUrl + "/api/v1/bridge/heartbeat";
+   string autoTradingStr = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0) ? "true" : "false";
+   string payload = StringFormat(
+      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s}",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_MARGIN),
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+      autoTradingStr
+   );
+
+   char postData[];
+   char resultData[];
+   string resultHeaders;
+   string headers = "Content-Type: application/json\r\n" +
+                    "X-Terminal-Token: " + InpTerminalToken + "\r\n" +
+                    "X-Account-Number: " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
+
+   StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(postData, ArraySize(postData) - 1);
+
+   ResetLastError();
+   int res = WebRequest("POST", url, headers, InpRequestTimeoutMs, postData, resultData, resultHeaders);
+   if(res != 200 && res != 201 && InpVerboseLogs)
+   {
+      PrintFormat("[TradeSync Receiver] Heartbeat telemetry notice (HTTP %d, Err %d)", res, GetLastError());
+   }
 }
 
 //+------------------------------------------------------------------+

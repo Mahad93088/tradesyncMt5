@@ -20,6 +20,7 @@ import {
   X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface SidebarProps {
   currentTab: string;
@@ -34,6 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isMobileOpen = false,
   onCloseMobile
 }) => {
+  const { isCloudMode } = useAuth();
   const { currentUser, parentChildLinks } = useApp();
 
   const role = currentUser.role;
@@ -186,7 +188,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className={navItemClass(currentTab === 'connections')}
                 >
                   <Server className="h-4 w-4" />
-                  <span>Connections (Demo)</span>
+                  <span>{isCloudMode ? 'Terminal Connections' : 'Connections (Demo)'}</span>
                 </button>
 
                 <button
@@ -345,12 +347,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-xs space-y-1">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-medium text-slate-400">Environment</span>
-          <span className="text-[10px] text-amber-400 font-mono font-semibold">
-            DEMO SANDBOX
+          <span
+            className={`text-[10px] font-mono font-semibold ${
+              isCloudMode ? 'text-emerald-400' : 'text-amber-400'
+            }`}
+          >
+            {isCloudMode ? 'CLOUD DEMO BRIDGE' : 'DEMO SANDBOX'}
           </span>
         </div>
         <p className="text-[10px] text-slate-500 leading-tight">
-          Simulated accounts and trade mirroring events. No real funds deployed.
+          {isCloudMode
+            ? 'Demo-only EA bridge active via Supabase. Live real-money accounts blocked.'
+            : 'Simulated accounts and trade mirroring events. No real funds deployed.'}
         </p>
       </div>
     </aside>

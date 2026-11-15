@@ -6,19 +6,13 @@ import {
   Eye,
   Edit2,
   X,
-  Mail,
-  Calendar,
-  Layers,
   Link,
-  Shield,
-  Activity,
   Server,
-  DollarSign,
-  TrendingUp,
-  User as UserIcon,
-  Phone
+  AlertCircle,
+  CheckCircle2
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AddTraderModal } from './AddTraderModal';
@@ -34,6 +28,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   isAddOpen: externalIsAddOpen,
   setIsAddOpen: externalSetIsAddOpen
 }) => {
+  const { isCloudMode } = useAuth();
   const { users, mt5Accounts, parentChildLinks, toggleUserStatus } = useApp();
 
   // Internal modal state if not passed from parent
@@ -42,7 +37,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   const setIsAddOpen = externalSetIsAddOpen !== undefined ? externalSetIsAddOpen : setInternalIsAddOpen;
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'suspended'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'pending' | 'suspended'>('all');
   const [filterSub, setFilterSub] = useState<'all' | 'active' | 'unlinked'>('all');
 
   // Trader detail modal state
@@ -50,12 +45,13 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
 
   // Edit trader modal state
   const [editingTrader, setEditingTrader] = useState<User | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
-  // Confirmation modal state for suspend / reactivate
+  // Confirmation modal state for approve / suspend / reactivate
   const [confirmModalData, setConfirmModalData] = useState<{
     isOpen: boolean;
     trader: User | null;
-    action: 'suspend' | 'reactivate';
+    action: 'approve' | 'suspend' | 'reactivate';
   }>({
     isOpen: false,
     trader: null,
@@ -80,9 +76,27 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
     return matchesSearch && matchesStatus && matchesSub;
   });
 
+  const handleConfirmStatus = async () => {
+    if (!confirmModalData.trader) return;
+    const target = confirmModalData.trader;
+    setActionFeedback(null);
+    const res = await toggleUserStatus(target.id);
+    if (!res.success) {
+      setActionFeedback({
+        type: 'error',
+        message: res.message || `Failed to update status for ${target.fullName}.`,
+      });
+    } else {
+      setActionFeedback({
+        type: 'success',
+        message: res.message || `Updated ${target.fullName} account status.`,
+      });
+    }
+  };
+
   return (
     <div className="space-y-6">
-      {/* Top Header with Add Trader Button */}
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
@@ -96,14 +110,38 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={() => setIsAddOpen(true)}
-          className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Add Trader</span>
-        </button>
+        {!isCloudMode && (
+          <button
+            onClick={() => setIsAddOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Add Trader</span>
+          </button>
+        )}
       </div>
+
+      {actionFeedback && (
+        <div
+          className={`rounded-xl border p-3 text-xs flex items-center justify-between ${
+            actionFeedback.type === 'error'
+              ? 'border-rose-800/60 bg-rose-950/40 text-rose-300'
+              : 'border-emerald-800/60 bg-emerald-950/40 text-emerald-300'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {actionFeedback.type === 'error' ? (
+              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{actionFeedback.message}</span>
+          </div>
+          <button onClick={() => setActionFeedback(null)} className="text-slate-400 hover:text-white">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {/* Filters and Search */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
@@ -128,20 +166,21 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
             >
               <option value="all">All Statuses</option>
               <option value="active">Active Only</option>
+              <option value="pending">Pending Approval</option>
               <option value="suspended">Suspended Only</option>
             </select>
           </div>
 
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-slate-400">Subscription:</span>
+            <span className="text-xs text-slate-400">Copy Link:</span>
             <select
               value={filterSub}
               onChange={(e) => setFilterSub(e.target.value as any)}
               className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-teal-500"
             >
-              <option value="all">All Subs</option>
-              <option value="active">Active Sub</option>
-              <option value="unlinked">Unlinked</option>
+              <option value="all">All Links</option>
+              <option value="active">Active Linked</option>
+              <option value="unlinked">Unlinked / Paused</option>
             </select>
           </div>
         </div>
@@ -155,7 +194,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
               <tr>
                 <th className="px-4 py-3">Trader</th>
                 <th className="px-4 py-3">Assigned Mentor</th>
-                <th className="px-4 py-3">Subscription</th>
+                <th className="px-4 py-3">{isCloudMode ? 'Copy Entitlement' : 'Subscription'}</th>
                 <th className="px-4 py-3">Demo Terminal</th>
                 <th className="px-4 py-3">Copy Sizing</th>
                 <th className="px-4 py-3">Created</th>
@@ -217,9 +256,20 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                         )}
                       </td>
 
-                      {/* Subscription Status */}
+                      {/* Copy Entitlement / Subscription Status */}
                       <td className="px-4 py-3.5">
-                        {link ? (
+                        {isCloudMode ? (
+                          link ? (
+                            <div className="space-y-0.5">
+                              <StatusBadge status={link.status === 'active' ? 'active' : 'paused'} size="sm" />
+                              <div className="text-[10px] font-mono text-slate-500">
+                                Billing unprovisioned
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-slate-500 text-[11px] font-mono">Unlinked</span>
+                          )
+                        ) : link ? (
                           <div className="space-y-0.5">
                             <span className="text-[11px] font-medium text-slate-200">
                               Follower Tier
@@ -264,6 +314,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                                 {link.lotSettings.customType === 'fixed' && `${link.lotSettings.fixedLot} lots`}
                                 {link.lotSettings.customType === 'multiplier' && `${link.lotSettings.multiplier}x ratio`}
                                 {link.lotSettings.customType === 'risk_percent' && `${link.lotSettings.riskPercent}% risk`}
+                                {link.lotSettings.customType === 'equity_ratio' && 'Proportional'}
                               </span>
                             )}
                           </div>
@@ -282,7 +333,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                         <StatusBadge status={trader.status} size="sm" />
                       </td>
 
-                      {/* Actions: View, Edit, Suspend, Reactivate */}
+                      {/* Actions: View, Edit (Demo), Approve / Suspend / Reactivate */}
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
@@ -293,20 +344,28 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                             <Eye className="h-4 w-4" />
                           </button>
 
-                          <button
-                            onClick={() => setEditingTrader(trader)}
-                            className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
-                            title="Edit trader profile"
-                          >
-                            <Edit2 className="h-4 w-4" />
-                          </button>
+                          {!isCloudMode && (
+                            <button
+                              onClick={() => setEditingTrader(trader)}
+                              className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+                              title="Edit trader profile (Demo)"
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </button>
+                          )}
 
                           <button
                             onClick={() => {
+                              const action: 'approve' | 'suspend' | 'reactivate' =
+                                trader.status === 'active'
+                                  ? 'suspend'
+                                  : trader.status === 'pending'
+                                  ? 'approve'
+                                  : 'reactivate';
                               setConfirmModalData({
                                 isOpen: true,
                                 trader,
-                                action: trader.status === 'active' ? 'suspend' : 'reactivate'
+                                action
                               });
                             }}
                             className={`rounded px-2 py-1 text-[11px] font-medium border transition-colors ${
@@ -315,7 +374,11 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                                 : 'border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50'
                             }`}
                           >
-                            {trader.status === 'active' ? 'Suspend' : 'Reactivate'}
+                            {trader.status === 'active'
+                              ? 'Suspend'
+                              : trader.status === 'pending'
+                              ? 'Approve'
+                              : 'Reactivate'}
                           </button>
                         </div>
                       </td>
@@ -403,38 +466,55 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
               <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-3 space-y-2 text-xs">
                 <span className="font-semibold text-slate-300 flex items-center gap-1.5">
                   <Link className="h-3.5 w-3.5 text-sky-400" />
-                  Mentor Association & Subscription
+                  Mentor Association &amp; Copy Telemetry
                 </span>
                 {link ? (
                   <div className="space-y-1.5 font-mono text-[11px] text-slate-400">
                     <div>Mentor: <strong className="text-sky-300 font-sans">{link.mentorName}</strong></div>
                     <div>Copy Link Status: <StatusBadge status={link.status} size="sm" /></div>
-                    <div>Subscription Tier: <strong className="text-slate-200">Follower Standard (${link.status === 'active' ? 'Active' : 'Paused'})</strong></div>
+                    <div>
+                      Billing / Plan:{' '}
+                      <strong className="text-slate-200">
+                        {isCloudMode ? 'Unprovisioned (Schema pending)' : `Follower Standard (${link.status === 'active' ? 'Active' : 'Paused'})`}
+                      </strong>
+                    </div>
                     <div>Linked Since: <strong className="text-slate-200">{new Date(link.linkedAt).toLocaleDateString()}</strong></div>
-                    <div>Lot Mode: <strong className="text-slate-200">{link.lotSettings.mode}</strong></div>
-                    <div>Max Lot Cap: <strong className="text-slate-200">{link.lotSettings.maxLotCap} lots</strong></div>
-                    <div>Slippage Guard: <strong className="text-slate-200">{link.lotSettings.slippageMaxPips} pips</strong></div>
+                    <div>Lot Mode: <strong className="text-slate-200">{link.lotSettings.mode === 'parent_lot' ? 'parent_lot' : link.lotSettings.customType}</strong></div>
                     <div>Total Deals Copied: <strong className="text-slate-200">{link.totalTradesCopied}</strong></div>
-                    <div>Total Copied Profit: <strong className="text-emerald-400">${link.totalProfitUSD.toLocaleString()}</strong></div>
+                    <div>
+                      Total Copied Profit:{' '}
+                      {isCloudMode && link.totalProfitAvailable === false ? (
+                        <span className="text-slate-400 italic font-sans">Deal P&amp;L awaiting EA sync</span>
+                      ) : (
+                        <strong className={link.totalProfitUSD >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                          ${link.totalProfitUSD.toLocaleString()}
+                        </strong>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-1 text-slate-500 italic">
                     <p>Not linked to any mentor.</p>
-                    <p className="font-mono text-[10px] text-slate-400">Subscription: Free Demo Follower Account</p>
                   </div>
                 )}
               </div>
 
               <div className="flex justify-between items-center pt-2 border-t border-slate-800">
-                <button
-                  onClick={() => {
-                    setDetailsTrader(null);
-                    setEditingTrader(detailsTrader);
-                  }}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white"
-                >
-                  Edit Trader
-                </button>
+                {!isCloudMode ? (
+                  <button
+                    onClick={() => {
+                      setDetailsTrader(null);
+                      setEditingTrader(detailsTrader);
+                    }}
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white"
+                  >
+                    Edit Trader
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-slate-500">
+                    Profile status controlled via Admin actions.
+                  </span>
+                )}
                 <button
                   onClick={() => setDetailsTrader(null)}
                   className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-1.5 text-xs font-medium text-slate-300 hover:text-white"
@@ -447,35 +527,47 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
         );
       })()}
 
-      {/* Edit Trader Modal */}
+      {/* Edit Trader Modal (Demo Mode Only) */}
       <EditTraderModal
-        isOpen={Boolean(editingTrader)}
+        isOpen={!isCloudMode && Boolean(editingTrader)}
         trader={editingTrader}
         onClose={() => setEditingTrader(null)}
       />
 
-      {/* Confirmation Modal for Suspend / Reactivate */}
+      {/* Confirmation Modal for Approve / Suspend / Reactivate */}
       <ConfirmationModal
         isOpen={confirmModalData.isOpen}
         onClose={() => setConfirmModalData({ isOpen: false, trader: null, action: 'suspend' })}
         onConfirm={() => {
-          if (confirmModalData.trader) {
-            toggleUserStatus(confirmModalData.trader.id);
-          }
+          void handleConfirmStatus();
         }}
-        title={confirmModalData.action === 'suspend' ? 'Suspend Trader Account' : 'Reactivate Trader Account'}
+        title={
+          confirmModalData.action === 'suspend'
+            ? 'Suspend Trader Account'
+            : confirmModalData.action === 'approve'
+            ? 'Approve Trader Account'
+            : 'Reactivate Trader Account'
+        }
         description={
           confirmModalData.action === 'suspend'
             ? `Are you sure you want to suspend trader ${confirmModalData.trader?.fullName}? Automated trade mirroring to their child terminal will be paused immediately.`
+            : confirmModalData.action === 'approve'
+            ? `Approve ${confirmModalData.trader?.fullName} as an active follower trader? They will be able to register a Child MT5 account and follow mentors.`
             : `Are you sure you want to reactivate trader ${confirmModalData.trader?.fullName}?`
         }
-        confirmLabel={confirmModalData.action === 'suspend' ? 'Suspend Trader' : 'Reactivate Trader'}
+        confirmLabel={
+          confirmModalData.action === 'suspend'
+            ? 'Suspend Trader'
+            : confirmModalData.action === 'approve'
+            ? 'Approve Trader'
+            : 'Reactivate Trader'
+        }
         variant={confirmModalData.action === 'suspend' ? 'danger' : 'primary'}
       />
 
-      {/* Add Trader Modal */}
+      {/* Add Trader Modal (Demo Mode Only) */}
       <AddTraderModal
-        isOpen={isAddOpen}
+        isOpen={!isCloudMode && isAddOpen}
         onClose={() => setIsAddOpen(false)}
       />
     </div>

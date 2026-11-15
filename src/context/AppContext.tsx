@@ -8,6 +8,7 @@ import {
   AccountStatus,
   MT5Account,
   MentorProfile,
+  MentorDirectoryEntry,
   SubscriptionPlan,
   Subscription,
   ParentChildLink,
@@ -22,6 +23,13 @@ import {
   MentorEditPayload,
   TraderEditPayload
 } from '../types';
+import {
+  mapServerAccountToMT5Account,
+  buildCloudTrades,
+  mapAssignmentsToLinks,
+  buildCloudAuditLogs,
+  buildCloudNotifications
+} from './cloudStateUtils';
 import {
   INITIAL_USERS,
   INITIAL_MT5_ACCOUNTS,
@@ -65,7 +73,9 @@ interface AppContextType {
   setCurrentUser: (user: User) => void;
   users: User[];
   mt5Accounts: MT5Account[];
+  followerAccounts: MT5Account[];
   mentorProfiles: MentorProfile[];
+  mentorDirectory: MentorDirectoryEntry[];
   subscriptionPlans: SubscriptionPlan[];
   subscriptions: Subscription[];
   parentChildLinks: ParentChildLink[];
@@ -76,6 +86,8 @@ interface AppContextType {
   systemHealth: SystemHealth;
   cloudBridgeTelemetry: CloudBridgeTelemetry;
   notifications: PlatformNotification[];
+  isCloudMode: boolean;
+  refreshCloudData: () => Promise<void>;
   isArchitectureModalOpen: boolean;
   setIsArchitectureModalOpen: (open: boolean) => void;
   isAuthModalOpen: boolean;
@@ -86,7 +98,7 @@ interface AppContextType {
   updateCurrentUserProfile: (data: Partial<User>) => void;
 
   // User Actions
-  toggleUserStatus: (userId: string) => void;
+  toggleUserStatus: (userId: string) => Promise<{ success: boolean; message?: string }>;
   createMentor: (
     user: { fullName: string; email: string; username?: string; phone?: string; status?: AccountStatus },
     profile?: { strategyName?: string; description?: string; monthlyFee?: number },
@@ -107,10 +119,19 @@ interface AppContextType {
   toggleAutoTrading: (accountId: string) => void;
 
   // Trader Link & Lot Actions
-  updateLotSettings: (linkId: string, settings: LotSettings) => void;
-  toggleLinkStatus: (linkId: string) => void;
-  unlinkTrader: (linkId: string) => void;
-  linkToMentorByCode: (traderId: string, childAccountId: string, inviteCode: string, lotSettings: LotSettings) => { success: boolean; message: string };
+  updateLotSettings: (
+    linkId: string,
+    settings: LotSettings
+  ) => Promise<{ success: boolean; message?: string; persistedFields?: string[]; unpersistedSchemaFields?: string[] }>;
+  toggleLinkStatus: (linkId: string) => Promise<{ success: boolean; message?: string }>;
+  unlinkTrader: (linkId: string) => Promise<{ success: boolean; message?: string }>;
+  linkToMentorByCode: (
+    traderId: string,
+    childAccountId: string,
+    inviteCode: string,
+    lotSettings: LotSettings
+  ) => Promise<{ success: boolean; message: string }>;
+  emergencyCloseParentTicket: (parentTicket: number | string) => Promise<{ success: boolean; message: string }>;
 
   // Subscriptions
   createSubscriptionPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void;
@@ -228,6 +249,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const { user: authUser, isCloudMode, isConfigured } = useAuth();
+  const [followerAccounts, setFollowerAccounts] = useState<MT5Account[]>([]);
+  const [mentorDirectory, setMentorDirectory] = useState<MentorDirectoryEntry[]>([]);
+  const [cloudRefreshNonce, setCloudRefreshNonce] = useState(0);
   const [isArchitectureModalOpen, setIsArchitectureModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [cloudBridgeTelemetry, setCloudBridgeTelemetry] = useState<CloudBridgeTelemetry>({
@@ -268,18 +292,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isCloudMode) localStorage.setItem('tradesync_mt5_accounts', JSON.stringify(mt5Accounts));
   }, [mt5Accounts, isCloudMode]);
 
+  const refreshCloudData = async () => {
+    setCloudRefreshNonce((n) => n + 1);
+  };
+
   // Authoritative Cloud Mode synchronization from Supabase + Bridge APIs (Zero mock data leakage)
   useEffect(() => {
     if (!isCloudMode || !isConfigured) {
+      setFollowerAccounts([]);
+      setMentorDirectory([]);
       return;
     }
 
-    // Immediately purge mock initial state when entering Cloud Mode
+    // Immediately purge ALL mock initial state when entering Cloud Mode
     setMt5Accounts([]);
+    setFollowerAccounts([]);
+    setMentorDirectory([]);
     setTradeMappings([]);
     setSyncLogs([]);
     setTrades([]);
     setParentChildLinks([]);
+    setSubscriptions([]);
+    setSubscriptionPlans([]);
+    setMentorProfiles([]);
+    setAuditLogs([]);
+    setNotifications([]);
     setUsers(authUser ? [authUser] : []);
     setSystemHealth({
       overallStatus: 'degraded',
@@ -299,86 +336,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let isMounted = true;
 
-    const mapServerAccount = (acc: any): MT5Account => ({
-      id: acc.id,
-      userId: acc.user_id,
-      accountRole: acc.account_role === 'parent' ? 'parent' : 'child',
-      accountNumber: String(acc.account_number),
-      broker: acc.broker_name || 'MetaTrader 5',
-      server: acc.broker_server || '',
-      accountType: acc.account_type === 'live' ? 'live' : 'demo',
-      balance: Number(acc.balance) || 0,
-      equity: Number(acc.equity) || 0,
-      margin: Number(acc.margin) || 0,
-      freeMargin: Number(acc.free_margin) || 0,
-      currency: acc.currency || 'USD',
-      leverage: Number(acc.leverage) || 100,
-      connectionStatus: acc.connection_status || 'disconnected',
-      isInvestorPassword: Boolean(acc.is_investor_password),
-      autoTradingEnabled: Boolean(acc.auto_trading_enabled),
-      pingMs: Number(acc.ping_ms) || 15,
-      lastHeartbeat: acc.last_sync || acc.created_at || new Date().toISOString(),
-      lastStatusUpdate: acc.last_sync || acc.created_at || undefined,
-      errorMessage: acc.error_message || undefined,
-    });
-
-    const mapAssignmentsToLinks = (assignments: any[], profilesList: any[]): ParentChildLink[] => {
-      const profMap = new Map<string, any>(profilesList.map((p: any) => [p.id, p]));
-      return assignments.map((a: any) => {
-        const mentorProf = profMap.get(a.mentor_id);
-        const traderProf = profMap.get(a.trader_id);
-        const lotMode = String(a.lot_mode || 'parent_lot').toLowerCase();
-        const isFixed = lotMode === 'fixed' || lotMode === 'fixed_lot';
-        const isMult = lotMode === 'multiplier';
-        return {
-          id: a.id,
-          mentorId: a.mentor_id,
-          traderId: a.trader_id,
-          mentorName: mentorProf?.full_name || mentorProf?.email || 'Verified Mentor',
-          traderName: traderProf?.full_name || traderProf?.email || 'Trader Follower',
-          parentAccountId: a.parent_account_id || '',
-          childAccountId: a.child_account_id || '',
-          status: a.status === 'active' ? 'active' : 'paused',
-          lotSettings: {
-            mode: isFixed || isMult || lotMode === 'equity_ratio' || lotMode === 'risk_percent' ? 'custom_lot' : 'parent_lot',
-            customType: isFixed ? 'fixed' : lotMode === 'equity_ratio' ? 'equity_ratio' : lotMode === 'risk_percent' ? 'risk_percent' : 'multiplier',
-            fixedLot: Number(a.fixed_lot || 0.1),
-            multiplier: Number(a.lot_multiplier || 1.0),
-            riskPercent: 1.0,
-            maxLotCap: 50,
-            minLotClamp: 0.01,
-            maxDrawdownProtectionPercent: 20,
-            copyPendingOrders: true,
-            syncSlTp: true,
-            slippageMaxPips: 30,
-          },
-          linkedAt: a.assigned_at || new Date().toISOString(),
-          totalTradesCopied: 0,
-          totalProfitUSD: 0,
-          lastSyncAt: a.assigned_at || new Date().toISOString(),
-        };
-      });
-    };
-
-    const mapMappingsToTrades = (mappingsList: TradeMapping[]): Trade[] => {
-      return mappingsList
-        .filter((m) => m.status === 'EXECUTED' || m.status === 'CLOSED' || m.status === 'PENDING')
-        .map((m) => ({
-          id: m.id,
-          ticket: m.childTradeTicket && m.childTradeTicket !== '0' && m.childTradeTicket !== 0 ? m.childTradeTicket : m.parentTradeTicket,
-          accountId: m.childAccountId,
-          symbol: m.symbol,
-          type: m.orderType,
-          lots: m.childLots,
-          openPrice: 0,
-          currentPrice: 0,
-          profit: 0,
-          openTime: m.openTime,
-          status: m.status === 'CLOSED' ? 'CLOSED' : m.status === 'EXECUTED' ? 'OPEN' : 'PENDING',
-          comment: `Parent #${m.parentTradeTicket}`,
-        }));
-    };
-
     const syncCloudDashboard = async () => {
       try {
         const sessionCheck = await ensureValidSession();
@@ -387,41 +344,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const headers = { Authorization: `Bearer ${token}` };
 
-        const [healthRes, verifyRes, mappingsRes] = await Promise.all([
+        const [healthRes, verifyRes, mappingsRes, logsRes, tradesRes, dirRes] = await Promise.all([
           fetch('/api/health').catch(() => null),
           fetch('/api/supabase/verify').catch(() => null),
           fetch('/api/v1/bridge/mappings', { headers }).catch(() => null),
+          fetch(authUser.role === 'admin' ? '/api/v1/bridge/logs' : '/api/v1/bridge/my-logs', { headers }).catch(() => null),
+          fetch('/api/v1/bridge/trades', { headers }).catch(() => null),
+          fetch('/api/v1/bridge/mentors/directory', { headers }).catch(() => null),
         ]);
 
         const healthJson = healthRes && healthRes.ok ? await healthRes.json().catch(() => null) : null;
         const verifyJson = verifyRes && verifyRes.ok ? await verifyRes.json().catch(() => null) : null;
         const mappingsJson = mappingsRes && mappingsRes.ok ? await mappingsRes.json().catch(() => null) : null;
+        const logsJson = logsRes && logsRes.ok ? await logsRes.json().catch(() => null) : null;
+        const tradesJson = tradesRes && tradesRes.ok ? await tradesRes.json().catch(() => null) : null;
+        const dirJson = dirRes && dirRes.ok ? await dirRes.json().catch(() => null) : null;
 
-        let loadedMappings: TradeMapping[] = [];
-        if (mappingsJson?.success && Array.isArray(mappingsJson.mappings)) {
-          loadedMappings = mappingsJson.mappings;
-          if (isMounted) {
-            setTradeMappings(loadedMappings);
-            setTrades(mapMappingsToTrades(loadedMappings));
-          }
+        if (!isMounted) return;
+
+        const loadedMappings: TradeMapping[] =
+          mappingsJson?.success && Array.isArray(mappingsJson.mappings) ? mappingsJson.mappings : [];
+        const loadedLogs: SyncLog[] =
+          logsJson?.success && Array.isArray(logsJson.logs) ? logsJson.logs : [];
+        const dbTradesRaw: any[] =
+          tradesJson?.success && Array.isArray(tradesJson.trades) ? tradesJson.trades : [];
+
+        const combinedTrades = buildCloudTrades(dbTradesRaw, loadedMappings);
+        setTradeMappings(loadedMappings);
+        setTrades(combinedTrades);
+        setSyncLogs(loadedLogs);
+        setAuditLogs(buildCloudAuditLogs(loadedLogs));
+        setNotifications((prev) => {
+          const readIds = new Set(prev.filter((n) => n.read).map((n) => n.id));
+          return buildCloudNotifications(loadedLogs, authUser.role).map((n) =>
+            readIds.has(n.id) ? { ...n, read: true } : n
+          );
+        });
+
+        if (dirJson?.success && Array.isArray(dirJson.mentors)) {
+          setMentorDirectory(dirJson.mentors);
         }
 
         if (authUser.role === 'admin') {
-          const [accRes, logsRes, statusRes] = await Promise.all([
+          const [accRes, statusRes] = await Promise.all([
             fetch('/api/v1/admin/accounts', { headers }).catch(() => null),
-            fetch('/api/v1/bridge/logs', { headers }).catch(() => null),
             fetch('/api/v1/bridge/status', { headers }).catch(() => null),
           ]);
 
           const accJson = accRes && accRes.ok ? await accRes.json().catch(() => null) : null;
-          const logsJson = logsRes && logsRes.ok ? await logsRes.json().catch(() => null) : null;
           const statusJson = statusRes && statusRes.ok ? await statusRes.json().catch(() => null) : null;
 
           if (!isMounted) return;
 
           if (accJson?.success && Array.isArray(accJson.accounts)) {
-            const serverAccounts = accJson.accounts.map(mapServerAccount);
+            const serverAccounts = accJson.accounts.map(mapServerAccountToMT5Account);
             setMt5Accounts(serverAccounts);
+            setFollowerAccounts([]);
 
             if (Array.isArray(accJson.profiles)) {
               setUsers(
@@ -437,12 +415,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               );
             }
             if (Array.isArray(accJson.assignments)) {
-              setParentChildLinks(mapAssignmentsToLinks(accJson.assignments, accJson.profiles || []));
+              setParentChildLinks(
+                mapAssignmentsToLinks(accJson.assignments, accJson.profiles || [], loadedMappings, combinedTrades)
+              );
             }
-          }
-
-          if (logsJson?.success && Array.isArray(logsJson.logs)) {
-            setSyncLogs(logsJson.logs);
           }
 
           const bt = statusJson?.bridgeTelemetry;
@@ -490,9 +466,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const myJson = myRes && myRes.ok ? await myRes.json().catch(() => null) : null;
           if (!isMounted) return;
 
+          const persistenceReady = Boolean(healthJson?.bridgePersistenceReady);
+          setCloudBridgeTelemetry((prev) => ({
+            ...prev,
+            bridgePersistenceReady: persistenceReady,
+            hasServiceRole: Boolean(healthJson?.hasServiceRole ?? verifyJson?.hasServiceRole ?? false),
+            tablesVerified: {
+              bridgeInstructions: Boolean(verifyJson?.tables?.bridge_instructions?.accessible),
+              tradeMappings: Boolean(verifyJson?.tables?.trade_mappings?.accessible),
+              bridgeSyncLogs: Boolean(verifyJson?.tables?.bridge_sync_logs?.accessible),
+              mt5Accounts: Boolean(verifyJson?.tables?.mt5_accounts?.accessible),
+              claimPendingRpc: Boolean(verifyJson?.rpcs?.claim_pending_instructions?.verified),
+            },
+            lastCheckedAt: new Date().toISOString(),
+          }));
+
           if (myJson?.success && Array.isArray(myJson.accounts)) {
-            const myAccounts = myJson.accounts.map(mapServerAccount);
+            const myAccounts = myJson.accounts.map(mapServerAccountToMT5Account);
+            const linked = Array.isArray(myJson.linkedAccounts)
+              ? myJson.linkedAccounts.map(mapServerAccountToMT5Account)
+              : [];
             setMt5Accounts(myAccounts);
+            setFollowerAccounts(linked);
+
+            if (Array.isArray(myJson.trades) && myJson.trades.length > 0 && dbTradesRaw.length === 0) {
+              setTrades(buildCloudTrades(myJson.trades, loadedMappings));
+            }
 
             if (Array.isArray(myJson.profiles)) {
               setUsers(
@@ -508,11 +507,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               );
             }
             if (Array.isArray(myJson.assignments)) {
-              setParentChildLinks(mapAssignmentsToLinks(myJson.assignments, myJson.profiles || []));
+              const allTradesForAgg =
+                Array.isArray(myJson.trades) && myJson.trades.length > 0 && dbTradesRaw.length === 0
+                  ? buildCloudTrades(myJson.trades, loadedMappings)
+                  : combinedTrades;
+              setParentChildLinks(
+                mapAssignmentsToLinks(myJson.assignments, myJson.profiles || [], loadedMappings, allTradesForAgg)
+              );
             }
 
             const activeCount = myAccounts.filter((a: MT5Account) => a.connectionStatus === 'connected').length;
-            const persistenceReady = Boolean(healthJson?.bridgePersistenceReady);
             setSystemHealth((prev) => ({
               ...prev,
               overallStatus: persistenceReady ? 'healthy' : 'critical',
@@ -534,7 +538,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [isCloudMode, isConfigured, authUser?.id, authUser?.role, authUser?.status]);
+  }, [isCloudMode, isConfigured, authUser?.id, authUser?.role, authUser?.status, cloudRefreshNonce]);
 
   useEffect(() => {
     if (!isCloudMode) localStorage.setItem('tradesync_links', JSON.stringify(parentChildLinks));
@@ -610,30 +614,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // User Actions
-  const toggleUserStatus = (userId: string) => {
+  const toggleUserStatus = async (userId: string): Promise<{ success: boolean; message?: string }> => {
+    const target = users.find((u) => u.id === userId);
+    const nextStatus: AccountStatus = target?.status === 'active' ? 'suspended' : 'active';
+
     setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const newStatus = u.status === 'active' ? 'suspended' : 'active';
-          return { ...u, status: newStatus };
-        }
-        return u;
-      })
+      prev.map((u) => (u.id === userId ? { ...u, status: nextStatus } : u))
     );
 
-    // If suspended, also pause their links
-    setParentChildLinks((prev) =>
-      prev.map((link) => {
-        if (link.mentorId === userId || link.traderId === userId) {
-          return {
-            ...link,
-            status: link.status === 'active' ? 'paused' : link.status,
-            errorMessage: 'User account suspended by Super Admin'
-          };
+    if (nextStatus !== 'active') {
+      setParentChildLinks((prev) =>
+        prev.map((link) => {
+          if (link.mentorId === userId || link.traderId === userId) {
+            return {
+              ...link,
+              status: link.status === 'active' ? 'paused' : link.status,
+              errorMessage: 'User account suspended by Super Admin'
+            };
+          }
+          return link;
+        })
+      );
+    }
+
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          throw new Error('Authentication expired.');
         }
-        return link;
-      })
-    );
+        const res = await fetch('/api/admin/user-status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ targetUserId: userId, status: nextStatus }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Status update rejected.` };
+        }
+        await refreshCloudData();
+        return { success: true, message: json.message };
+      } catch (err: any) {
+        await refreshCloudData();
+        return { success: false, message: err.message || 'Failed to persist user status.' };
+      }
+    }
+
+    return { success: true };
   };
 
   const createMentor = (
@@ -1244,7 +1276,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Trader Link actions
-  const updateLotSettings = (linkId: string, settings: LotSettings) => {
+  const updateLotSettings = async (
+    linkId: string,
+    settings: LotSettings
+  ): Promise<{ success: boolean; message?: string; persistedFields?: string[]; unpersistedSchemaFields?: string[] }> => {
     setParentChildLinks((prev) =>
       prev.map((l) => {
         if (l.id === linkId) {
@@ -1254,6 +1289,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return { success: false, message: 'Session expired. Please sign in again.' };
+        }
+        const copyMode =
+          settings.mode === 'parent_lot'
+            ? 'parent_lot'
+            : settings.customType === 'fixed'
+            ? 'fixed'
+            : settings.customType === 'equity_ratio'
+            ? 'equity_ratio'
+            : settings.customType === 'risk_percent'
+            ? 'risk_percent'
+            : 'multiplier';
+
+        const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(linkId)}/lot-settings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            copyMode,
+            multiplier: settings.multiplier,
+            fixedLot: settings.fixedLot,
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to save lot settings.` };
+        }
+        await refreshCloudData();
+        return {
+          success: true,
+          message: 'Saved persisted lot sizing configuration to Supabase.',
+          persistedFields: json.persistedFields,
+          unpersistedSchemaFields: json.unpersistedSchemaFields,
+        };
+      } catch (err: any) {
+        await refreshCloudData();
+        return { success: false, message: err.message || 'Network error saving lot settings.' };
+      }
+    }
+
     const log: SyncLog = {
       id: `log_${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -1262,22 +1345,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details: `Copy link ${linkId} lot settings configured: Mode=${settings.mode.toUpperCase()} (CustomType: ${settings.customType}, MaxCap: ${settings.maxLotCap} lots)`
     };
     setSyncLogs((prev) => [log, ...prev]);
+    return { success: true };
   };
 
-  const toggleLinkStatus = (linkId: string) => {
+  const toggleLinkStatus = async (linkId: string): Promise<{ success: boolean; message?: string }> => {
+    const existing = parentChildLinks.find((l) => l.id === linkId);
+    const nextStatus = existing?.status === 'active' ? 'paused' : 'active';
+
     setParentChildLinks((prev) =>
-      prev.map((l) => {
-        if (l.id === linkId) {
-          const nextStatus = l.status === 'active' ? 'paused' : 'active';
-          return { ...l, status: nextStatus };
-        }
-        return l;
-      })
+      prev.map((l) => (l.id === linkId ? { ...l, status: nextStatus } : l))
     );
+
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          await refreshCloudData();
+          return { success: false, message: 'Session expired.' };
+        }
+        const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(linkId)}/status`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ status: nextStatus === 'active' ? 'active' : 'inactive' }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update link status.` };
+        }
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        await refreshCloudData();
+        return { success: false, message: err.message || 'Network error updating link status.' };
+      }
+    }
+
+    return { success: true };
   };
 
-  const unlinkTrader = (linkId: string) => {
+  const unlinkTrader = async (linkId: string): Promise<{ success: boolean; message?: string }> => {
     setParentChildLinks((prev) => prev.filter((l) => l.id !== linkId));
+
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          await refreshCloudData();
+          return { success: false, message: 'Session expired.' };
+        }
+        const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(linkId)}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to remove link.` };
+        }
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        await refreshCloudData();
+        return { success: false, message: err.message || 'Network error removing link.' };
+      }
+    }
+
     const log: SyncLog = {
       id: `log_${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -1286,14 +1426,63 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details: `Copy link ${linkId} removed. All future trade mirroring halted.`
     };
     setSyncLogs((prev) => [log, ...prev]);
+    return { success: true };
   };
 
-  const linkToMentorByCode = (
+  const linkToMentorByCode = async (
     traderId: string,
     childAccountId: string,
     inviteCode: string,
     lotSettings: LotSettings
-  ): { success: boolean; message: string } => {
+  ): Promise<{ success: boolean; message: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return { success: false, message: 'Session expired. Please sign in again.' };
+        }
+        const copyMode =
+          lotSettings.mode === 'parent_lot'
+            ? 'parent_lot'
+            : lotSettings.customType === 'fixed'
+            ? 'fixed'
+            : lotSettings.customType === 'equity_ratio'
+            ? 'equity_ratio'
+            : lotSettings.customType === 'risk_percent'
+            ? 'risk_percent'
+            : 'multiplier';
+
+        const res = await fetch('/api/v1/bridge/assignments/join', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            inviteCodeOrMentorId: inviteCode.trim(),
+            childAccountId: childAccountId || undefined,
+            lotSettings: {
+              copyMode,
+              multiplier: lotSettings.multiplier,
+              fixedLot: lotSettings.fixedLot,
+            },
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to link mentor.` };
+        }
+        await refreshCloudData();
+        return {
+          success: true,
+          message: `Successfully linked to ${json.mentorName || 'Verified Mentor'}!`,
+        };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error linking to mentor.' };
+      }
+    }
+
     const mentorProfile = mentorProfiles.find(
       (m) => m.inviteCode.trim().toLowerCase() === inviteCode.trim().toLowerCase()
     );
@@ -1337,7 +1526,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setParentChildLinks((prev) => [newLink, ...prev]);
 
-    // Update followers count
     setMentorProfiles((prev) =>
       prev.map((m) => {
         if (m.id === mentorProfile.id) {
@@ -1359,6 +1547,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSyncLogs((prev) => [log, ...prev]);
 
     return { success: true, message: `Successfully connected to ${mentorUser?.fullName}!` };
+  };
+
+  const emergencyCloseParentTicket = async (
+    parentTicket: number | string
+  ): Promise<{ success: boolean; message: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return { success: false, message: 'Session expired. Please sign in again.' };
+        }
+        const res = await fetch('/api/v1/bridge/mentor/emergency-close', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ parentTicket: String(parentTicket), confirm: true }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Emergency close failed.` };
+        }
+        await refreshCloudData();
+        return {
+          success: true,
+          message: `Queued CLOSE instruction for Parent #${parentTicket} across ${json.closeInstructionsQueued || 0} follower terminal(s).`,
+        };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error during emergency close.' };
+      }
+    }
+
+    const res = simulateParentClose(parentTicket);
+    return { success: res.success, message: res.message };
   };
 
   // Subscriptions
@@ -2022,8 +2246,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         users,
         setUsers,
         mt5Accounts,
+        followerAccounts,
         setMt5Accounts,
         mentorProfiles,
+        mentorDirectory,
         subscriptionPlans,
         subscriptions,
         parentChildLinks,
@@ -2035,6 +2261,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         systemHealth,
         cloudBridgeTelemetry,
         notifications,
+        isCloudMode,
+        refreshCloudData,
         isArchitectureModalOpen,
         setIsArchitectureModalOpen,
         isAuthModalOpen,
@@ -2054,6 +2282,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleLinkStatus,
         unlinkTrader,
         linkToMentorByCode,
+        emergencyCloseParentTicket,
         createSubscriptionPlan,
         updateSubscriptionPlan,
         renewOrChangeSubscription,

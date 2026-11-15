@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { AuthProvider } from './contexts/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
@@ -46,12 +46,12 @@ import { NotificationsView } from './components/common/NotificationsView';
 const AppContent: React.FC = () => {
   const {
     currentUser,
+    isCloudMode,
     isArchitectureModalOpen,
     setIsArchitectureModalOpen,
     isAuthModalOpen,
     setIsAuthModalOpen,
-    parentChildLinks,
-    switchRole
+    parentChildLinks
   } = useApp();
 
   const [currentTab, setCurrentTab] = useState<string>('overview');
@@ -68,8 +68,11 @@ const AppContent: React.FC = () => {
   // Active link for lot settings modal
   const traderLink = parentChildLinks.find((l) => l.traderId === currentUser.id);
 
-  // When role changes, if the tab is not applicable, default to overview
+  // When role or Cloud/Demo mode changes, reset tab safely to overview
   const role = currentUser.role;
+  useEffect(() => {
+    setCurrentTab('overview');
+  }, [role, isCloudMode]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-200">
@@ -80,8 +83,8 @@ const AppContent: React.FC = () => {
         onTabChange={(tab) => setCurrentTab(tab)}
       />
 
-      {/* Interactive Simulation Harness Toolbar */}
-      <SimulationToolbar />
+      {/* Interactive Simulation Harness Toolbar (Strictly Local Demo Mode) */}
+      {!isCloudMode && <SimulationToolbar />}
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden">
@@ -204,23 +207,23 @@ const AppContent: React.FC = () => {
               </>
             )}
 
-            {/* Super Admin MT5 Accounts Guard & Quick Jump */}
+            {/* Super Admin MT5 Accounts Guard */}
             {role !== 'admin' && (currentTab === 'parent-accounts' || currentTab === 'child-accounts') && (
-              <div className="rounded-2xl border border-sky-800 bg-slate-900/90 p-8 text-center space-y-4 shadow-xl">
-                <div className="h-12 w-12 rounded-xl bg-sky-950 border border-sky-800 text-sky-400 mx-auto flex items-center justify-center">
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-8 text-center space-y-4 shadow-xl">
+                <div className="h-12 w-12 rounded-xl bg-slate-950 border border-slate-800 text-slate-400 mx-auto flex items-center justify-center">
                   <ShieldCheck className="h-6 w-6" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-white">Super Admin Access Required</h3>
+                  <h3 className="text-lg font-bold text-white">Restricted Route</h3>
                   <p className="text-xs text-slate-300 max-w-md mx-auto mt-1 leading-relaxed">
-                    {currentTab === 'parent-accounts' ? 'Parent MT5 Accounts' : 'Child MT5 Accounts'} management is part of the Super Admin Portal. Click below to switch to your Super Admin workspace.
+                    Platform-wide {currentTab === 'parent-accounts' ? 'Parent' : 'Child'} MT5 Account administration is restricted to verified administrators.
                   </p>
                 </div>
                 <button
-                  onClick={() => switchRole('admin')}
+                  onClick={() => setCurrentTab('overview')}
                   className="rounded-lg bg-sky-600 hover:bg-sky-500 px-5 py-2.5 text-xs font-semibold text-white shadow-md transition-colors"
                 >
-                  Switch to Super Admin View
+                  Return to Overview
                 </button>
               </div>
             )}

@@ -39,6 +39,7 @@ export interface MT5Account {
   autoTradingEnabled: boolean;
   errorMessage?: string;
   lastStatusUpdate?: string;
+  isStale?: boolean;
 }
 
 export interface MentorProfile {
@@ -120,8 +121,25 @@ export interface ParentChildLink {
   linkedAt: string;
   totalTradesCopied: number;
   totalProfitUSD: number;
+  totalProfitAvailable?: boolean;
   lastSyncAt: string;
   errorMessage?: string;
+}
+
+export interface MentorDirectoryEntry {
+  id: string;
+  fullName: string;
+  avatarUrl?: string | null;
+  inviteCode: string;
+  parentAccountId: string | null;
+  parentAccountNumber: string | null;
+  brokerName: string | null;
+  brokerServer: string | null;
+  accountType: string | null;
+  connectionStatus: ConnectionStatus;
+  isStale: boolean;
+  lastSync: string | null;
+  activeFollowersCount: number;
 }
 
 export type OrderType = 'BUY' | 'SELL' | 'BUY_LIMIT' | 'SELL_LIMIT' | 'BUY_STOP' | 'SELL_STOP';
@@ -145,6 +163,7 @@ export interface Trade {
   status: OrderStatus;
   magicNumber?: number | string;
   comment?: string;
+  isMappingFallback?: boolean;
 }
 
 export type MappingExecutionStatus =

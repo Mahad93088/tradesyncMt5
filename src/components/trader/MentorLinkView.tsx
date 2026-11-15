@@ -1,23 +1,26 @@
 import React, { useState } from 'react';
 import {
-  Link,
-  Search,
   Ticket,
   CheckCircle2,
   AlertTriangle,
-  UserCheck,
-  TrendingUp,
-  ShieldCheck,
-  DollarSign,
-  ArrowRight
+  Server
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
+import { ConfirmationModal } from '../common/ConfirmationModal';
+import {
+  formatLotRuleLabel,
+  formatLinkProfitDisplay,
+  formatHeartbeatAge
+} from '../common/dashboardHelpers';
 
 export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ onOpenLotSettings }) => {
+  const { isCloudMode } = useAuth();
   const {
     currentUser,
     mentorProfiles,
+    mentorDirectory,
     parentChildLinks,
     mt5Accounts,
     linkToMentorByCode,
@@ -25,6 +28,8 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
   } = useApp();
 
   const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [unlinkConfirmOpen, setUnlinkConfirmOpen] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
 
   const childAccount = mt5Accounts.find(
@@ -32,14 +37,21 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
   );
 
   const activeLink = parentChildLinks.find((l) => l.traderId === currentUser.id);
+  const activeLinkProfit = activeLink
+    ? formatLinkProfitDisplay(activeLink, isCloudMode)
+    : { text: '$0.00', available: true, isPositive: true };
 
-  const handleConnectByCode = (e: React.FormEvent) => {
+  const sampleInvitePlaceholder = isCloudMode
+    ? mentorDirectory[0]?.inviteCode || 'TS-XXXXXXXX'
+    : mentorProfiles[0]?.inviteCode || 'TS-DEMO-01';
+
+  const handleConnectByCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteCodeInput.trim()) return;
+    if (!inviteCodeInput.trim() || submitting) return;
 
     if (!childAccount) {
       setFeedback({
-        message: 'Please connect your Child MT5 terminal first before linking to a mentor.',
+        message: 'Please connect your Child MT5 Demo terminal first before linking to a mentor.',
         isError: true
       });
       return;
@@ -59,18 +71,34 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
       slippageMaxPips: 3.0
     };
 
-    const res = linkToMentorByCode(
+    setSubmitting(true);
+    setFeedback(null);
+    const res = await linkToMentorByCode(
       currentUser.id,
       childAccount.id,
       inviteCodeInput.trim(),
       defaultLotSettings
     );
+    setSubmitting(false);
 
     if (res.success) {
       setFeedback({ message: res.message, isError: false });
       setInviteCodeInput('');
     } else {
       setFeedback({ message: res.message, isError: true });
+    }
+  };
+
+  const handleConfirmUnlink = async () => {
+    if (!activeLink) return;
+    setSubmitting(true);
+    setFeedback(null);
+    const res = await unlinkTrader(activeLink.id);
+    setSubmitting(false);
+    if (res && !res.success) {
+      setFeedback({ message: res.message || 'Failed to disconnect mentor.', isError: true });
+    } else {
+      setFeedback({ message: 'Disconnected from mentor. Trade copying halted.', isError: false });
     }
   };
 
@@ -81,9 +109,26 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
           Mentor Link & Copy Network
         </h2>
         <p className="text-xs text-slate-400 mt-1">
-          Connect your Child MT5 terminal to a verified strategy mentor using an invitation referral code.
+          Connect your Child MT5 Demo terminal to a verified active mentor using their referral invite code.
         </p>
       </div>
+
+      {feedback && (
+        <div
+          className={`rounded-lg p-3 text-xs flex items-start gap-2 ${
+            feedback.isError
+              ? 'border border-rose-900/60 bg-rose-950/50 text-rose-300'
+              : 'border border-emerald-900/60 bg-emerald-950/50 text-emerald-300'
+          }`}
+        >
+          {feedback.isError ? (
+            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-400" />
+          )}
+          <span>{feedback.message}</span>
+        </div>
+      )}
 
       {/* Currently Linked Mentor Card */}
       {activeLink ? (
@@ -101,8 +146,9 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             <div className="flex items-center gap-2">
               <StatusBadge status={activeLink.status} size="md" />
               <button
-                onClick={() => unlinkTrader(activeLink.id)}
-                className="rounded-lg border border-rose-900/60 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 px-3 py-1.5 text-xs font-semibold transition-colors"
+                onClick={() => setUnlinkConfirmOpen(true)}
+                disabled={submitting}
+                className="rounded-lg border border-rose-900/60 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
               >
                 Disconnect
               </button>
@@ -113,9 +159,7 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
               <span className="text-slate-400 text-[10px] uppercase font-mono">Lot Mode</span>
               <p className="font-bold text-slate-100 mt-1">
-                {activeLink.lotSettings.mode === 'parent_lot'
-                  ? 'Mode A: 1:1 Copy'
-                  : `Mode B: ${activeLink.lotSettings.customType.toUpperCase()}`}
+                {formatLotRuleLabel(activeLink.lotSettings)}
               </p>
               <button
                 onClick={onOpenLotSettings}
@@ -130,8 +174,16 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
               <p className="font-mono text-xl font-bold text-slate-100 mt-1">
                 {activeLink.totalTradesCopied}
               </p>
-              <span className="text-[10px] text-emerald-400 font-mono">
-                {activeLink.totalProfitUSD >= 0 ? '+' : ''}${activeLink.totalProfitUSD.toLocaleString()}
+              <span
+                className={`text-[10px] font-mono ${
+                  !activeLinkProfit.available
+                    ? 'text-slate-400'
+                    : activeLinkProfit.isPositive
+                    ? 'text-emerald-400'
+                    : 'text-rose-400'
+                }`}
+              >
+                {activeLinkProfit.text}
               </span>
             </div>
 
@@ -140,7 +192,9 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
               <p className="font-mono text-sm font-bold text-slate-100 mt-1">
                 {activeLink.lotSettings.slippageMaxPips} Pips Max
               </p>
-              <span className="text-[10px] text-slate-400 font-mono">SL/TP Sync Active</span>
+              <span className="text-[10px] text-slate-400 font-mono">
+                {activeLink.lotSettings.syncSlTp ? 'SL/TP Sync Enabled' : 'SL/TP Sync Disabled'}
+              </span>
             </div>
           </div>
         </div>
@@ -152,42 +206,30 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             <h3 className="text-base font-bold text-slate-100">Enter Mentor Invite Code</h3>
           </div>
           <p className="text-xs text-slate-400">
-            Paste the code provided by your mentor (for example: <code className="text-sky-300 bg-slate-950 px-1 py-0.5 rounded font-mono">ALPHA-XAU-2026</code> or <code className="text-sky-300 bg-slate-950 px-1 py-0.5 rounded font-mono">SCALP-QUEEN-77</code>).
+            Paste the referral code provided by your mentor (for example:{' '}
+            <code className="text-sky-300 bg-slate-950 px-1.5 py-0.5 rounded font-mono">
+              {sampleInvitePlaceholder}
+            </code>
+            ) or pick a verified mentor from the directory below.
           </p>
 
           <form onSubmit={handleConnectByCode} className="space-y-3">
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder="e.g. ALPHA-XAU-2026"
+                placeholder={`e.g. ${sampleInvitePlaceholder}`}
                 value={inviteCodeInput}
                 onChange={(e) => setInviteCodeInput(e.target.value)}
                 className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder-slate-500 font-mono tracking-wider focus:border-sky-500 focus:outline-none uppercase"
               />
               <button
                 type="submit"
-                className="rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-2 text-xs font-semibold text-white transition-colors shrink-0"
+                disabled={submitting || !inviteCodeInput.trim()}
+                className="rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white transition-colors shrink-0"
               >
-                Connect to Mentor
+                {submitting ? 'Linking...' : 'Connect to Mentor'}
               </button>
             </div>
-
-            {feedback && (
-              <div
-                className={`rounded-lg p-3 text-xs flex items-start gap-2 ${
-                  feedback.isError
-                    ? 'border border-rose-900/60 bg-rose-950/50 text-rose-300'
-                    : 'border border-emerald-900/60 bg-emerald-950/50 text-emerald-300'
-                }`}
-              >
-                {feedback.isError ? (
-                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
-                ) : (
-                  <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-400" />
-                )}
-                <span>{feedback.message}</span>
-              </div>
-            )}
           </form>
         </div>
       )}
@@ -195,58 +237,146 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
       {/* Directory of Verified Mentors on Platform */}
       <div className="space-y-3">
         <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 font-mono">
-          Available Platform Mentors Directory
+          {isCloudMode ? 'Verified Active Cloud Mentors Directory' : 'Available Platform Mentors Directory'}
         </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {mentorProfiles.map((m) => (
-            <div
-              key={m.id}
-              className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 space-y-3 hover:border-slate-750 transition-colors shadow-sm"
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <h4 className="font-semibold text-slate-100 text-sm">{m.displayName}</h4>
-                  <p className="text-sky-400 text-xs font-medium">{m.strategyName}</p>
-                </div>
-                <span className="font-mono text-xs font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded">
-                  ${m.monthlyFee}/mo
-                </span>
-              </div>
 
-              <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
-                {m.description}
-              </p>
-
-              <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
-                <div>
-                  <span className="text-[10px] text-slate-400 uppercase font-sans">Win Rate</span>
-                  <p className="font-semibold text-emerald-400 mt-0.5">{m.winRate}%</p>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-400 uppercase font-sans">Profit Factor</span>
-                  <p className="font-semibold text-slate-200 mt-0.5">{m.profitFactor}</p>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-400 uppercase font-sans">Followers</span>
-                  <p className="font-semibold text-slate-200 mt-0.5">{m.totalFollowers}/{m.maxFollowers}</p>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-1">
-                <span className="font-mono text-xs text-slate-400">
-                  Code: <strong className="text-slate-200 font-mono">{m.inviteCode}</strong>
-                </span>
-                <button
-                  onClick={() => setInviteCodeInput(m.inviteCode)}
-                  className="text-xs text-sky-400 hover:text-sky-300 font-medium"
+        {isCloudMode ? (
+          mentorDirectory.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {mentorDirectory.map((m) => (
+                <div
+                  key={m.id}
+                  className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 space-y-3 hover:border-slate-700 transition-colors shadow-sm"
                 >
-                  Apply Code →
-                </button>
-              </div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <h4 className="font-semibold text-slate-100 text-sm">{m.fullName}</h4>
+                      <p className="text-sky-400 text-xs font-mono">
+                        {m.parentAccountNumber
+                          ? `Master #${m.parentAccountNumber} (${m.brokerName})`
+                          : 'Master MT5 Pending'}
+                      </p>
+                      {m.brokerServer && (
+                        <p className="text-[11px] text-slate-500 font-mono">{m.brokerServer}</p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <StatusBadge status={m.connectionStatus} size="sm" />
+                      {m.isStale && (
+                        <span className="text-[10px] font-mono text-amber-400">Stale Heartbeat</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-sans">Mode</span>
+                      <p className="font-semibold text-emerald-400 mt-0.5 uppercase">
+                        {m.accountType || 'DEMO'}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-sans">Last Sync</span>
+                      <p className="font-semibold text-slate-200 mt-0.5">
+                        {formatHeartbeatAge(m.lastSync)}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-sans">Followers</span>
+                      <p className="font-semibold text-slate-200 mt-0.5">{m.activeFollowersCount}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="font-mono text-xs text-slate-400">
+                      Code: <strong className="text-slate-200 font-mono">{m.inviteCode}</strong>
+                    </span>
+                    <button
+                      onClick={() => setInviteCodeInput(m.inviteCode)}
+                      disabled={Boolean(activeLink)}
+                      className="text-xs text-sky-400 hover:text-sky-300 disabled:opacity-40 font-medium"
+                    >
+                      Apply Code →
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 p-8 text-center space-y-2">
+              <Server className="h-7 w-7 text-slate-600 mx-auto" />
+              <p className="text-xs text-slate-400">
+                No verified active mentors with registered Parent MT5 Demo terminals are currently listed.
+              </p>
+            </div>
+          )
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {mentorProfiles.map((m) => (
+              <div
+                key={m.id}
+                className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 space-y-3 hover:border-slate-750 transition-colors shadow-sm"
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h4 className="font-semibold text-slate-100 text-sm">{m.displayName}</h4>
+                    <p className="text-sky-400 text-xs font-medium">{m.strategyName}</p>
+                  </div>
+                  <span className="font-mono text-xs font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded">
+                    ${m.monthlyFee}/mo
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
+                  {m.description}
+                </p>
+
+                <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-sans">Win Rate</span>
+                    <p className="font-semibold text-emerald-400 mt-0.5">{m.winRate}%</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-sans">Profit Factor</span>
+                    <p className="font-semibold text-slate-200 mt-0.5">{m.profitFactor}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-sans">Followers</span>
+                    <p className="font-semibold text-slate-200 mt-0.5">{m.totalFollowers}/{m.maxFollowers}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="font-mono text-xs text-slate-400">
+                    Code: <strong className="text-slate-200 font-mono">{m.inviteCode}</strong>
+                  </span>
+                  <button
+                    onClick={() => setInviteCodeInput(m.inviteCode)}
+                    disabled={Boolean(activeLink)}
+                    className="text-xs text-sky-400 hover:text-sky-300 disabled:opacity-40 font-medium"
+                  >
+                    Apply Code →
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      <ConfirmationModal
+        isOpen={unlinkConfirmOpen}
+        onClose={() => setUnlinkConfirmOpen(false)}
+        onConfirm={() => {
+          void handleConfirmUnlink();
+        }}
+        title="Disconnect From Mentor?"
+        description={`Disconnecting from ${activeLink?.mentorName || 'this mentor'} immediately stops new trades from being copied to your Child MT5 account.`}
+        confirmLabel="Disconnect"
+        variant="danger"
+        isLoading={submitting}
+      />
     </div>
   );
 };
+

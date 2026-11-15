@@ -26,12 +26,13 @@ import { AccountDetailsModal } from './AccountDetailsModal';
 import { AssignParentModal } from './AssignParentModal';
 import { CreateDemoAccountModal } from './CreateDemoAccountModal';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
+import { ConfirmationModal } from '../common/ConfirmationModal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../context/AppContext';
 
 export const ParentAccountsView: React.FC = () => {
   const { isCloudMode } = useAuth();
-  const { mt5Accounts, users, parentChildLinks, unlinkTrader, addAuditLog, currentUser } = useApp();
+  const { mt5Accounts, users, parentChildLinks, unlinkTrader, addAuditLog, currentUser, refreshCloudData } = useApp();
 
   const [parents, setParents] = useState<ParentAccountItem[]>([]);
   const [children, setChildren] = useState<ChildAccountItem[]>([]);
@@ -47,6 +48,11 @@ export const ParentAccountsView: React.FC = () => {
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
   const [isCreateDemoModalOpen, setIsCreateDemoModalOpen] = useState(false);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
+  const [pendingUnlink, setPendingUnlink] = useState<{
+    childAccountId: string;
+    traderId: string;
+    assignmentId?: string;
+  } | null>(null);
 
   // Toast & notification state
   const [successToast, setSuccessToast] = useState<string | null>(null);
@@ -110,17 +116,26 @@ export const ParentAccountsView: React.FC = () => {
   };
 
   const handleUnlinkChild = async (childAccountId: string, traderId: string, assignmentId?: string) => {
-    if (!window.confirm('Are you sure you want to unlink this child account from the master parent?')) {
-      return;
-    }
+    setPendingUnlink({ childAccountId, traderId, assignmentId });
+  };
 
+  const executeUnlinkChild = async () => {
+    if (!pendingUnlink) return;
+    const { childAccountId, traderId, assignmentId } = pendingUnlink;
     try {
-      await mt5AdminService.unassignChild({ assignmentId, traderId, isCloudMode });
-
-      // Also unlink in local state if link exists
       const link = parentChildLinks.find((l) => l.childAccountId === childAccountId || l.traderId === traderId);
-      if (link) {
-        unlinkTrader(link.id);
+      const effectiveAssignmentId = assignmentId || link?.id;
+
+      if (isCloudMode && effectiveAssignmentId) {
+        const res = await unlinkTrader(effectiveAssignmentId);
+        if (!res.success) {
+          throw new Error(res.message || 'Failed to unlink child account.');
+        }
+      } else {
+        await mt5AdminService.unassignChild({ assignmentId: effectiveAssignmentId, traderId, isCloudMode });
+        if (link) {
+          await unlinkTrader(link.id);
+        }
       }
 
       addAuditLog({
@@ -134,14 +149,12 @@ export const ParentAccountsView: React.FC = () => {
         details: `Unlinked child account #${childAccountId} from parent stream.`,
       });
 
-      // Refresh list
       await fetchAccounts();
 
       setSuccessToast(`Successfully unlinked child account #${childAccountId} from parent stream.`);
       setErrorToast(null);
       setTimeout(() => setSuccessToast(null), 5000);
 
-      // If details modal was open, refresh its data
       if (selectedAccountForDetails) {
         const updated = parents.find((p) => p.id === selectedAccountForDetails.id);
         if (updated) setSelectedAccountForDetails(updated);
@@ -150,6 +163,8 @@ export const ParentAccountsView: React.FC = () => {
       console.error('Failed to unlink child:', err);
       setErrorToast(err.message || 'Failed to unlink child account.');
       setTimeout(() => setErrorToast(null), 5000);
+    } finally {
+      setPendingUnlink(null);
     }
   };
 
@@ -194,15 +209,17 @@ export const ParentAccountsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleSeedDemoAccounts}
-            disabled={isSeeding || isLoading}
-            className="flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
-            title="Seed sandbox demo parent and child accounts for testing"
-          >
-            <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
-            <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
-          </button>
+          {!isCloudMode && (
+            <button
+              onClick={handleSeedDemoAccounts}
+              disabled={isSeeding || isLoading}
+              className="flex items-center gap-1.5 rounded-lg border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
+              title="Seed sandbox demo parent and child accounts for testing"
+            >
+              <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
+              <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
+            </button>
+          )}
 
           <button
             onClick={() => setIsRegisterModalOpen(true)}
@@ -212,16 +229,21 @@ export const ParentAccountsView: React.FC = () => {
             <span>Register Parent (XM / Custom)</span>
           </button>
 
-          <button
-            onClick={() => setIsCreateDemoModalOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-300 border border-slate-700 shadow-sm transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Sandbox Demo</span>
-          </button>
+          {!isCloudMode && (
+            <button
+              onClick={() => setIsCreateDemoModalOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-300 border border-slate-700 shadow-sm transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Sandbox Demo</span>
+            </button>
+          )}
 
           <button
-            onClick={fetchAccounts}
+            onClick={() => {
+              void refreshCloudData();
+              void fetchAccounts();
+            }}
             disabled={isLoading}
             className="flex items-center gap-1.5 rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
           >
@@ -561,8 +583,22 @@ export const ParentAccountsView: React.FC = () => {
         onClose={() => setIsRegisterModalOpen(false)}
         defaultRole="parent"
         onSuccess={async () => {
+          await refreshCloudData();
           await fetchAccounts();
         }}
+      />
+
+      {/* Confirm Unlink Child Modal */}
+      <ConfirmationModal
+        isOpen={Boolean(pendingUnlink)}
+        onClose={() => setPendingUnlink(null)}
+        onConfirm={() => {
+          void executeUnlinkChild();
+        }}
+        title="Unlink Child MT5 Account"
+        description="Are you sure you want to unlink this child account from the master parent? Trade synchronization for this stream will pause immediately."
+        confirmLabel="Unlink Child"
+        variant="danger"
       />
     </div>
   );

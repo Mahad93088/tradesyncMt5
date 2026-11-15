@@ -159,7 +159,7 @@ export interface ChildAccountItem {
   assignmentStatus?: 'active' | 'inactive';
   assignedAt?: string;
   // Sizing & copy parameters
-  copyMode: 'multiplier' | 'fixed' | 'parent_lot' | 'unassigned';
+  copyMode: 'multiplier' | 'fixed' | 'parent_lot' | 'equity_ratio' | 'risk_percent' | 'unassigned';
   lotMultiplier: number;
   fixedLot: number;
   riskPercent: number;
@@ -1276,12 +1276,13 @@ export const mt5AdminService = {
     userName?: string;
     parentAccountId?: string;
     lotSettings?: {
-      copyMode?: 'multiplier' | 'fixed' | 'fixed_lot' | 'parent_lot';
+      copyMode?: 'multiplier' | 'fixed' | 'fixed_lot' | 'parent_lot' | 'equity_ratio' | 'risk_percent';
       multiplier?: number;
       fixedLot?: number;
       riskPercent?: number;
     };
     isCloudMode?: boolean;
+    useSelfServiceEndpoint?: boolean;
   }): Promise<{
     success: boolean;
     account?: MT5Account;
@@ -1298,14 +1299,70 @@ export const mt5AdminService = {
     code?: string;
   }> {
     try {
+      // Explicit Local Demo Mode sandbox registration (no Supabase session required)
+      if (params.isCloudMode === false) {
+        const cleanAccNumber = params.accountNumber.trim();
+        const cleanServer = params.brokerServer.trim();
+        const cleanBroker = (params.brokerName || 'XM').trim();
+        const parsedBalance = Number(params.balance) || 10000;
+        const safeUserId = params.userId || toValidUUID(`user_${params.accountRole}_${Date.now()}`);
+        const newAccount: MT5Account = {
+          id: toValidUUID(`acc_${params.accountRole}_${Date.now()}`),
+          userId: safeUserId,
+          accountRole: params.accountRole,
+          accountNumber: cleanAccNumber,
+          broker: cleanBroker,
+          server: cleanServer,
+          accountType: params.accountType || 'demo',
+          balance: parsedBalance,
+          equity: Number(params.equity || parsedBalance) || parsedBalance,
+          margin: 0,
+          freeMargin: parsedBalance,
+          currency: params.currency || 'USD',
+          leverage: Number(params.leverage) || 100,
+          connectionStatus: 'disconnected',
+          pingMs: 0,
+          lastHeartbeat: new Date().toISOString(),
+          isInvestorPassword: true,
+          autoTradingEnabled: true,
+        };
+        const demoToken = `ts_demo_${params.accountRole}_${Math.random().toString(36).slice(2, 14)}`;
+        if (typeof localStorage !== 'undefined') {
+          const storedRaw = localStorage.getItem('tradesync_mt5_accounts');
+          const localAccounts: MT5Account[] = storedRaw ? JSON.parse(storedRaw) : [];
+          localStorage.setItem(
+            'tradesync_mt5_accounts',
+            JSON.stringify([newAccount, ...localAccounts.filter((a) => a.id !== newAccount.id)])
+          );
+        }
+        return {
+          success: true,
+          account: newAccount,
+          terminalToken: demoToken,
+          tokenPrefix: demoToken.substring(0, 12) + '...',
+          instructions: {
+            serverUrl: typeof window !== 'undefined' ? window.location.origin : 'https://tradesync-mt5.vercel.app',
+            eaFileName: params.accountRole === 'parent' ? 'TradeSync_Broadcaster.mq5' : 'TradeSync_Receiver.mq5',
+            eaDownloadUrl:
+              params.accountRole === 'parent' ? '/api/mql5/download/broadcaster' : '/api/mql5/download/receiver',
+            serverParam: 'InpServerUrl',
+            tokenParam: 'InpTerminalToken',
+          },
+        };
+      }
+
       const sessionCheck = await ensureValidSession();
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (sessionCheck.valid && sessionCheck.session?.access_token) {
         headers['Authorization'] = `Bearer ${sessionCheck.session.access_token}`;
       }
 
+      const targetEndpoint = params.useSelfServiceEndpoint
+        ? '/api/v1/bridge/accounts/register'
+        : '/api/v1/admin/accounts/register';
+
       // 1. Try server endpoint
-      const response = await fetch('/api/v1/admin/accounts/register', {
+      const response = await fetch(targetEndpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify({

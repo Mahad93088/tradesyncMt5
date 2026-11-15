@@ -20,10 +20,26 @@ input ulong    InpMagicFilter     = 0;                                       // 
 input bool     InpSyncSLTP        = true;                                    // Broadcast Stop Loss & Take Profit modifications
 input bool     InpVerboseLogs     = true;                                    // Output detailed logs to MT5 Experts tab
 
+//--- Reliability & Telemetry Constants
+#define MAX_PENDING_EVENTS     64
+#define MAX_EVENT_RETRIES      20
+#define EVENT_RETRY_DELAY_SEC  2
+#define HEARTBEAT_INTERVAL_SEC 30
+
+struct PendingEventRecord
+{
+   string   url;
+   string   payload;
+   string   eventTag;
+   int      attempts;
+   datetime nextRetryAt;
+};
+
 //--- Internal State
-ulong    g_ProcessedDeals[];
-int      g_ProcessedDealsCount = 0;
-datetime g_LastHeartbeat = 0;
+ulong              g_ProcessedDeals[];
+int                g_ProcessedDealsCount = 0;
+datetime           g_LastHeartbeat = 0;
+PendingEventRecord g_PendingEvents[];
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -89,13 +105,13 @@ int OnInit()
    SendHeartbeat();
 
    ResetLastError();
-   if(!EventSetTimer(30))
+   if(!EventSetTimer(1))
    {
-      PrintFormat("[TradeSync Broadcaster] ERROR: EventSetTimer(30) failed (Error %d). Periodic heartbeats will NOT run.", GetLastError());
+      PrintFormat("[TradeSync Broadcaster] ERROR: EventSetTimer(1) failed (Error %d). Retry queue and periodic heartbeats will NOT run.", GetLastError());
    }
    else
    {
-      Print("[TradeSync Broadcaster] Timer registered successfully (interval: 30s).");
+      Print("[TradeSync Broadcaster] Timer registered successfully (1s event retry pump, 30s throttled heartbeat).");
    }
 
    PrintFormat("[TradeSync Broadcaster] Initialized successfully. Server: %s", InpServerUrl);
@@ -113,12 +129,21 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| Timer function: periodic heartbeat and sync maintenance          |
+//| Timer function: flush queued retries and throttled heartbeat     |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   Print("[TradeSync Broadcaster] OnTimer() triggered - executing periodic heartbeat...");
-   SendHeartbeat();
+   FlushPendingEvents();
+
+   datetime now = TimeLocal();
+   if(g_LastHeartbeat == 0 || (now - g_LastHeartbeat) >= HEARTBEAT_INTERVAL_SEC)
+   {
+      if(InpVerboseLogs)
+      {
+         Print("[TradeSync Broadcaster] Periodic telemetry heartbeat interval reached...");
+      }
+      SendHeartbeat();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -185,16 +210,49 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       // 2. POSITION CLOSE (DEAL_ENTRY_OUT)
       else if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_OUT_BY)
       {
-         if(InpVerboseLogs)
+         double remainingLots = 0.0;
+         string closeType = "FULL";
+         if(PositionSelectByTicket(position))
          {
-            PrintFormat("[TradeSync Broadcaster] Parent CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f",
-                        dealTicket, position, symbol, volume, price);
+            remainingLots = PositionGetDouble(POSITION_VOLUME);
+            if(remainingLots > 0.00001)
+            {
+               closeType = "PARTIAL";
+            }
          }
 
-         BroadcastTradeClose(position, price);
+         if(InpVerboseLogs)
+         {
+            PrintFormat("[TradeSync Broadcaster] Parent %s CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f (Remaining: %.2f)",
+                        closeType, dealTicket, position, symbol, volume, price, remainingLots);
+         }
+
+         BroadcastTradeClose(position, price, closeType, volume, remainingLots, dealTicket);
       }
    }
-   // 3. SL/TP MODIFICATIONS
+   // 3. PENDING ORDER PLACEMENT NOTICE (Fill-Based Copy Protocol)
+   else if(trans.type == TRADE_TRANSACTION_ORDER_ADD)
+   {
+      if(InpVerboseLogs && trans.order > 0 && OrderSelect(trans.order))
+      {
+         ulong ordMagic = (ulong)OrderGetInteger(ORDER_MAGIC);
+         if(InpMagicFilter == 0 || ordMagic == InpMagicFilter)
+         {
+            ENUM_ORDER_TYPE ordType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if(ordType == ORDER_TYPE_BUY_LIMIT || ordType == ORDER_TYPE_SELL_LIMIT ||
+               ordType == ORDER_TYPE_BUY_STOP  || ordType == ORDER_TYPE_SELL_STOP  ||
+               ordType == ORDER_TYPE_BUY_STOP_LIMIT || ordType == ORDER_TYPE_SELL_STOP_LIMIT)
+            {
+               PrintFormat("[TradeSync Broadcaster] Pending order #%I64u (%s %s %.2f lots) placed — fill-based mirroring active; child copies execute when triggered (DEAL_ENTRY_IN).",
+                           trans.order,
+                           OrderGetString(ORDER_SYMBOL),
+                           EnumToString(ordType),
+                           OrderGetDouble(ORDER_VOLUME_CURRENT));
+            }
+         }
+      }
+   }
+   // 4. SL/TP MODIFICATIONS
    else if(trans.type == TRADE_TRANSACTION_POSITION && InpSyncSLTP)
    {
       ulong posTicket = trans.position;
@@ -229,23 +287,29 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
       magic
    );
 
-   SendJsonRequest("POST", url, json);
+   DispatchOrQueueEvent(url, json, StringFormat("OPEN#%I64u", parentTicket));
 }
 
 //+------------------------------------------------------------------+
-//| HTTP POST: Broadcast Trade Close                                 |
+//| HTTP POST: Broadcast Trade Close (supports FULL vs PARTIAL tags) |
 //+------------------------------------------------------------------+
-void BroadcastTradeClose(ulong parentTicket, double closePrice)
+void BroadcastTradeClose(ulong parentTicket, double closePrice,
+                         string closeType = "FULL", double closedLots = 0.0,
+                         double remainingLots = 0.0, ulong dealTicket = 0)
 {
    string url = InpServerUrl + "/api/v1/bridge/events/trade-close";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"closePrice\":%.5f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"closePrice\":%.5f,\"closeType\":\"%s\",\"closedLots\":%.2f,\"remainingLots\":%.2f}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
-      closePrice
+      dealTicket,
+      closePrice,
+      EscapeJsonString(closeType),
+      closedLots,
+      remainingLots
    );
 
-   SendJsonRequest("POST", url, json);
+   DispatchOrQueueEvent(url, json, StringFormat("%s_CLOSE#%I64u", closeType, parentTicket));
 }
 
 //+------------------------------------------------------------------+
@@ -262,20 +326,126 @@ void BroadcastTradeModify(ulong parentTicket, double sl, double tp)
       tp
    );
 
-   SendJsonRequest("POST", url, json);
+   DispatchOrQueueEvent(url, json, StringFormat("MODIFY#%I64u", parentTicket));
 }
 
 //+------------------------------------------------------------------+
-//| Heartbeat to announce parent terminal health                     |
+//| Dispatch event now or enqueue for bounded retry on transient fail |
+//+------------------------------------------------------------------+
+void DispatchOrQueueEvent(string url, string json, string eventTag)
+{
+   bool retryable = false;
+   if(!TrySendJsonRequest("POST", url, json, retryable))
+   {
+      if(retryable)
+      {
+         PendingEventRecord ev;
+         ev.url         = url;
+         ev.payload     = json;
+         ev.eventTag    = eventTag;
+         ev.attempts    = 1;
+         ev.nextRetryAt = TimeLocal() + EVENT_RETRY_DELAY_SEC;
+         EnqueuePendingEvent(ev);
+         PrintFormat("[TradeSync Broadcaster] Event %s queued for automatic retry after transient failure.", eventTag);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Queue event for retry if not already queued                      |
+//+------------------------------------------------------------------+
+void EnqueuePendingEvent(const PendingEventRecord &ev)
+{
+   int count = ArraySize(g_PendingEvents);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_PendingEvents[i].url == ev.url && g_PendingEvents[i].payload == ev.payload)
+      {
+         return;
+      }
+   }
+
+   if(count >= MAX_PENDING_EVENTS)
+   {
+      PrintFormat("[TradeSync Broadcaster] WARNING: Pending event queue full (%d). Dropping oldest event %s.",
+                  MAX_PENDING_EVENTS, g_PendingEvents[0].eventTag);
+      for(int k = 1; k < count; k++)
+      {
+         g_PendingEvents[k - 1] = g_PendingEvents[k];
+      }
+      count = MAX_PENDING_EVENTS - 1;
+      ArrayResize(g_PendingEvents, count);
+   }
+
+   ArrayResize(g_PendingEvents, count + 1);
+   g_PendingEvents[count] = ev;
+   g_PendingEvents[count].nextRetryAt = TimeLocal() + EVENT_RETRY_DELAY_SEC;
+}
+
+//+------------------------------------------------------------------+
+//| Flush pending trade events whose retry backoff has elapsed       |
+//+------------------------------------------------------------------+
+void FlushPendingEvents()
+{
+   int count = ArraySize(g_PendingEvents);
+   if(count == 0) return;
+   if(!EnsureDemoAccount("FlushPendingEvents")) return;
+
+   datetime now = TimeLocal();
+   for(int i = count - 1; i >= 0; i--)
+   {
+      if(g_PendingEvents[i].nextRetryAt > now) continue;
+
+      g_PendingEvents[i].attempts++;
+      bool retryable = false;
+      if(TrySendJsonRequest("POST", g_PendingEvents[i].url, g_PendingEvents[i].payload, retryable))
+      {
+         if(InpVerboseLogs)
+         {
+            PrintFormat("[TradeSync Broadcaster] Event retry SUCCEEDED for %s on attempt #%d",
+                        g_PendingEvents[i].eventTag, g_PendingEvents[i].attempts);
+         }
+         int last = ArraySize(g_PendingEvents) - 1;
+         if(i != last) g_PendingEvents[i] = g_PendingEvents[last];
+         ArrayResize(g_PendingEvents, last);
+      }
+      else if(!retryable || g_PendingEvents[i].attempts >= MAX_EVENT_RETRIES)
+      {
+         PrintFormat("[TradeSync Broadcaster] Event DROPPED for %s after %d attempts (retryable=%s)",
+                     g_PendingEvents[i].eventTag, g_PendingEvents[i].attempts, retryable ? "true" : "false");
+         int last = ArraySize(g_PendingEvents) - 1;
+         if(i != last) g_PendingEvents[i] = g_PendingEvents[last];
+         ArrayResize(g_PendingEvents, last);
+      }
+      else
+      {
+         int backoff = EVENT_RETRY_DELAY_SEC * MathMin(g_PendingEvents[i].attempts, 15);
+         g_PendingEvents[i].nextRetryAt = now + backoff;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Heartbeat to announce parent terminal health & telemetry         |
 //+------------------------------------------------------------------+
 void SendHeartbeat()
 {
    if(!EnsureDemoAccount("SendHeartbeat")) return;
 
+   g_LastHeartbeat = TimeLocal();
    string url = InpServerUrl + "/api/v1/bridge/heartbeat";
    PrintFormat("[TradeSync Broadcaster] Sending heartbeat: POST %s", url);
 
-   string payload = StringFormat("{\"account_number\":\"%I64u\"}", AccountInfoInteger(ACCOUNT_LOGIN));
+   string autoTradingStr = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0) ? "true" : "false";
+   string payload = StringFormat(
+      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s}",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_MARGIN),
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+      autoTradingStr
+   );
    char postData[];
    char resultData[];
    string resultHeaders;
@@ -308,10 +478,11 @@ void SendHeartbeat()
 }
 
 //+------------------------------------------------------------------+
-//| Core WebRequest Dispatcher with Authentication Headers           |
+//| Core WebRequest Dispatcher with retryability classification      |
 //+------------------------------------------------------------------+
-bool SendJsonRequest(string method, string url, string payload)
+bool TrySendJsonRequest(string method, string url, string payload, bool &retryable)
 {
+   retryable = false;
    if(!EnsureDemoAccount("SendJsonRequest")) return false;
 
    char postData[];
@@ -334,6 +505,7 @@ bool SendJsonRequest(string method, string url, string payload)
    if(res == -1)
    {
       int err = GetLastError();
+      retryable = true;
       PrintFormat("[TradeSync Broadcaster] WebRequest FAILED (Error %d). Check WebRequest URL allowlist: %s", err, url);
       return false;
    }
@@ -341,11 +513,22 @@ bool SendJsonRequest(string method, string url, string payload)
    if(res != 200 && res != 201)
    {
       string responseText = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
-      PrintFormat("[TradeSync Broadcaster] HTTP %d on %s %s | Response: %s", res, method, url, responseText);
+      retryable = (res == 408 || res == 429 || (res >= 500 && res <= 599));
+      PrintFormat("[TradeSync Broadcaster] HTTP %d on %s %s | Retryable=%s | Response: %s",
+                  res, method, url, retryable ? "true" : "false", responseText);
       return false;
    }
 
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Backwards-compatible wrapper for immediate JSON dispatch         |
+//+------------------------------------------------------------------+
+bool SendJsonRequest(string method, string url, string payload)
+{
+   bool retryable = false;
+   return TrySendJsonRequest(method, url, payload, retryable);
 }
 
 //+------------------------------------------------------------------+

@@ -6,7 +6,12 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { RiskEngine } from './riskEngine.ts';
-import { BridgeStore, RegisteredTerminal } from './bridgeStore.ts';
+import {
+  BridgeStore,
+  RegisteredTerminal,
+  type AuthenticateTerminalOptions,
+  type TerminalHeartbeatTelemetry,
+} from './bridgeStore.ts';
 import type { MappingExecutionStatus } from '../types';
 
 dotenv.config();
@@ -745,6 +750,109 @@ export function createApiApp(deps?: ApiAppDependencies) {
     }
   });
 
+  // Protected Server-Side Admin User Status Control (Approve, Activate, Suspend, Reactivate)
+  registerRoute('post', '/api/admin/user-status', async (req: Request, res: Response) => {
+    try {
+      const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+      if (!caller) return;
+
+      const dbClient = requireServiceRoleClient(res);
+      if (!dbClient) return;
+
+      const { targetUserId, status } = req.body || {};
+      if (!targetUserId || !isValidUUID(targetUserId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122).',
+        });
+      }
+
+      if (targetUserId === caller.user.id) {
+        return res.status(400).json({
+          success: false,
+          error: 'Security constraint violation: Administrators cannot suspend or alter their own account status.',
+        });
+      }
+
+      const normalizedStatus = String(status || '').trim().toLowerCase();
+      if (!['active', 'suspended', 'pending'].includes(normalizedStatus)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid status: must be active, suspended, or pending.',
+        });
+      }
+
+      const { data: targetProfile, error: targetError } = await dbClient
+        .from('profiles')
+        .select('id, email, full_name, role, status')
+        .eq('id', targetUserId)
+        .maybeSingle();
+
+      if (targetError) {
+        return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
+      }
+
+      if (!targetProfile) {
+        return res.status(404).json({ success: false, error: 'Target user profile not found in public.profiles.' });
+      }
+
+      if (targetProfile.role === 'admin' && normalizedStatus !== 'active') {
+        return res.status(403).json({
+          success: false,
+          error: 'Security constraint violation: Super Administrator accounts cannot be suspended via the dashboard API.',
+        });
+      }
+
+      const { data: updatedProfile, error: updateError } = await dbClient
+        .from('profiles')
+        .update({
+          status: normalizedStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', targetUserId)
+        .select('id, email, full_name, role, status, updated_at')
+        .single();
+
+      if (updateError) {
+        return res.status(403).json({
+          success: false,
+          error: updateError.message || 'Database update denied.',
+        });
+      }
+
+      // When suspending or moving to pending, deactivate active copy-trading assignments for safety
+      let pausedAssignments = 0;
+      if (normalizedStatus !== 'active') {
+        const { data: affected } = await dbClient
+          .from('mentor_assignments')
+          .update({ status: 'inactive' })
+          .or(`mentor_id.eq.${targetUserId},trader_id.eq.${targetUserId}`)
+          .eq('status', 'active')
+          .select('id');
+        pausedAssignments = Array.isArray(affected) ? affected.length : 0;
+      }
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'ADMIN_USER_STATUS_CHANGED',
+          level: normalizedStatus === 'suspended' ? 'warn' : 'info',
+          details: `Admin ${caller.profile?.email || caller.user.id} updated user ${targetProfile.email || targetUserId} (${targetProfile.role}) status from '${targetProfile.status}' to '${normalizedStatus}'${pausedAssignments > 0 ? ` and paused ${pausedAssignments} active assignment(s)` : ''}.`,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({
+        success: true,
+        profile: updatedProfile,
+        pausedAssignments,
+        message: `User ${targetProfile.email || targetUserId} status updated to ${normalizedStatus}.`,
+      });
+    } catch (err: any) {
+      console.error('[AdminAPI] User status update error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal server error updating user status' });
+    }
+  });
+
   // ==============================================================================
   // MT5 Expert Advisor Bridge Architecture Endpoints (Durable Persistence Required)
   // ==============================================================================
@@ -758,7 +866,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
    * Requires server-side SUPABASE_SERVICE_ROLE_KEY for durable database validation.
    */
   const authenticateTerminal = async (
-    req: Request
+    req: Request,
+    options?: AuthenticateTerminalOptions
   ): Promise<{ terminal: RegisteredTerminal | null; dbClient?: SupabaseClient; error?: string; code?: string; status?: number }> => {
     if (typeof req.query?.token === 'string' && req.query.token.trim().length > 0 && !req.headers['x-terminal-token']) {
       return {
@@ -793,7 +902,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       };
     }
 
-    const terminal = await bridgeStore.authenticateTerminal(rawToken, dbClient);
+    const terminal = await bridgeStore.authenticateTerminal(rawToken, dbClient, options);
     if (!terminal) {
       return {
         terminal: null,
@@ -810,22 +919,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
         error: `Security violation: Claimed account number (${claimedAccountNumber}) does not match authenticated terminal record (${terminal.accountNumber}).`,
         status: 403,
       };
-    }
-
-    // Ensure authoritative database record is marked connected and synced
-    if (terminal.accountId) {
-      const { error: syncErr } = await dbClient
-        .from('mt5_accounts')
-        .update({
-          connection_status: 'connected',
-          last_sync: new Date().toISOString(),
-          error_message: null,
-        })
-        .eq('id', terminal.accountId);
-
-      if (syncErr) {
-        console.warn('[Bridge] Sync status update notice:', syncErr.message);
-      }
     }
 
     return { terminal, dbClient };
@@ -1006,10 +1099,40 @@ export function createApiApp(deps?: ApiAppDependencies) {
   /**
    * 1b. Authenticated Terminal Heartbeat
    * POST /api/v1/bridge/heartbeat
-   * Enforces terminal-token authentication and updates connection_status = 'connected' + last_sync.
+   * Enforces terminal-token authentication, Demo-only tradeMode guard, and persists optional account telemetry.
    */
   registerRoute('post', '/api/v1/bridge/heartbeat', async (req: Request, res: Response) => {
-    const auth = await authenticateTerminal(req);
+    const rawTradeMode = req.body?.tradeMode ?? req.body?.trade_mode;
+    if (rawTradeMode != null && String(rawTradeMode).trim() !== '' && String(rawTradeMode).trim().toLowerCase() !== 'demo') {
+      return res.status(403).json({
+        success: false,
+        code: 'DEMO_ONLY_SAFETY_BLOCK',
+        error: `Safety block: TradeSync bridge only accepts DEMO terminal heartbeats (received ${String(rawTradeMode)}).`,
+      });
+    }
+
+    const telemetry: TerminalHeartbeatTelemetry = {};
+    const parseFiniteNum = (val: unknown): number | undefined => {
+      if (val === null || val === undefined || val === '') return undefined;
+      const n = Number(val);
+      return Number.isFinite(n) ? n : undefined;
+    };
+
+    const balanceVal = parseFiniteNum(req.body?.balance);
+    const equityVal = parseFiniteNum(req.body?.equity);
+    const marginVal = parseFiniteNum(req.body?.margin);
+    const freeMarginVal = parseFiniteNum(req.body?.freeMargin ?? req.body?.free_margin);
+    const pingVal = parseFiniteNum(req.body?.pingMs ?? req.body?.ping_ms);
+    const autoTradeRaw = req.body?.autoTradingEnabled ?? req.body?.auto_trading_enabled;
+
+    if (balanceVal !== undefined && balanceVal >= 0) telemetry.balance = balanceVal;
+    if (equityVal !== undefined && equityVal >= 0) telemetry.equity = equityVal;
+    if (marginVal !== undefined && marginVal >= 0) telemetry.margin = marginVal;
+    if (freeMarginVal !== undefined) telemetry.freeMargin = freeMarginVal;
+    if (pingVal !== undefined && pingVal >= 0) telemetry.pingMs = Math.round(pingVal);
+    if (typeof autoTradeRaw === 'boolean') telemetry.autoTradingEnabled = autoTradeRaw;
+
+    const auth = await authenticateTerminal(req, { touchDb: 'always', telemetry });
     if (!auth.terminal) {
       return res.status(auth.status || 401).json({
         success: false,
@@ -1025,7 +1148,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
       accountNumber: auth.terminal.accountNumber,
       brokerServer: auth.terminal.brokerServer,
       connectionStatus: 'connected',
-      lastSync: new Date().toISOString(),
+      lastSync: auth.terminal.lastSeenAt,
+      telemetry,
     });
   });
 
@@ -1520,6 +1644,330 @@ export function createApiApp(deps?: ApiAppDependencies) {
   });
 
   /**
+   * 2b-bis. Authenticated Tenant Self-Service MT5 Account Registration
+   * POST /api/v1/bridge/accounts/register
+   * Protected: Verified active Supabase user + durable service-role DB required.
+   * Enforces strict self-ownership and role matching (mentor -> parent, trader -> child).
+   */
+  registerRoute('post', '/api/v1/bridge/accounts/register', async (req: Request, res: Response) => {
+    try {
+      const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+      if (!caller) return;
+
+      const dbClient = requireServiceRoleClient(res);
+      if (!dbClient) return;
+
+      const {
+        accountRole,
+        brokerName = 'XM',
+        brokerServer,
+        accountNumber,
+        accountType = 'demo',
+        balance = 10000,
+        equity = 10000,
+        currency = 'USD',
+        leverage = 100,
+        userId,
+        parentAccountId,
+        lotSettings,
+      } = req.body || {};
+
+      if (!accountNumber || !String(accountNumber).trim()) {
+        return res.status(400).json({ success: false, error: 'Account number is required' });
+      }
+      if (!brokerServer || !String(brokerServer).trim()) {
+        return res.status(400).json({ success: false, error: 'MT5 Broker Server name is required' });
+      }
+      if (!['demo', 'live'].includes(String(accountType))) {
+        return res.status(400).json({ success: false, error: 'Invalid accountType: must be demo or live' });
+      }
+
+      if (!caller.isVerifiedAdmin && userId && String(userId).trim() !== caller.user.id) {
+        return res.status(403).json({
+          success: false,
+          code: 'TENANT_OWNERSHIP_FORBIDDEN',
+          error: 'Forbidden: Non-admin users can only register MT5 accounts for their own profile.',
+        });
+      }
+
+      let role: 'parent' | 'child';
+      if (caller.isVerifiedAdmin) {
+        role = accountRole === 'parent' ? 'parent' : 'child';
+      } else if (caller.profile?.role === 'mentor') {
+        if (accountRole && accountRole !== 'parent') {
+          return res.status(403).json({
+            success: false,
+            code: 'ROLE_MISMATCH',
+            error: 'Forbidden: Mentor profiles can only register Parent/Master MT5 accounts.',
+          });
+        }
+        role = 'parent';
+      } else if (caller.profile?.role === 'trader') {
+        if (accountRole && accountRole !== 'child') {
+          return res.status(403).json({
+            success: false,
+            code: 'ROLE_MISMATCH',
+            error: 'Forbidden: Student/Trader profiles can only register Child/Follower MT5 accounts.',
+          });
+        }
+        role = 'child';
+      } else {
+        return res.status(403).json({ success: false, error: 'Forbidden: Unsupported account role.' });
+      }
+
+      const targetUserId = caller.isVerifiedAdmin && userId && isValidUUID(userId) ? String(userId).trim() : caller.user.id;
+      const cleanAccNumber = String(accountNumber).trim();
+      const cleanBrokerServer = String(brokerServer).trim();
+      const cleanBrokerName = String(brokerName || 'XM').trim();
+
+      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'parent_lot';
+      let validatedMultiplier = 1.0;
+      let validatedFixedLot = 0.1;
+
+      if (role === 'child' && lotSettings) {
+        const rawCopyMode = String(lotSettings.copyMode || lotSettings.mode || 'parent_lot').trim().toLowerCase();
+        if (rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot') {
+          normalizedLotMode = 'fixed';
+        } else if (rawCopyMode === 'multiplier') {
+          normalizedLotMode = 'multiplier';
+        } else if (rawCopyMode === 'equity_ratio') {
+          normalizedLotMode = 'equity_ratio';
+        } else if (rawCopyMode === 'risk_percent') {
+          normalizedLotMode = 'risk_percent';
+        } else if (rawCopyMode === 'parent_lot') {
+          normalizedLotMode = 'parent_lot';
+        } else {
+          return res.status(400).json({
+            success: false,
+            code: 'INVALID_LOT_MODE',
+            error: `Invalid lot mode "${rawCopyMode}".`,
+          });
+        }
+
+        if (lotSettings.multiplier !== undefined) {
+          const mult = Number(lotSettings.multiplier);
+          if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
+            return res.status(400).json({ success: false, code: 'INVALID_LOT_MULTIPLIER', error: 'Lot multiplier must be > 0 and <= 100.' });
+          }
+          validatedMultiplier = mult;
+        }
+        if (lotSettings.fixedLot !== undefined) {
+          const fixed = Number(lotSettings.fixedLot);
+          if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
+            return res.status(400).json({ success: false, code: 'INVALID_FIXED_LOT', error: 'Fixed lot must be between 0.01 and 100.' });
+          }
+          validatedFixedLot = fixed;
+        }
+      }
+
+      let verifiedParentAcc: { id: string; user_id: string; account_role: string } | null = null;
+      const hasParentLinkRequest =
+        role === 'child' && parentAccountId !== undefined && parentAccountId !== null && String(parentAccountId).trim() !== '';
+
+      if (hasParentLinkRequest) {
+        const cleanParentId = String(parentAccountId).trim();
+        if (!isValidUUID(cleanParentId)) {
+          return res.status(400).json({ success: false, code: 'INVALID_PARENT_ACCOUNT_ID', error: 'Invalid parentAccountId UUID.' });
+        }
+        const { data: parentAcc, error: parentLookupErr } = await dbClient
+          .from('mt5_accounts')
+          .select('id, user_id, account_role')
+          .eq('id', cleanParentId)
+          .maybeSingle();
+
+        if (parentLookupErr) return res.status(500).json({ success: false, error: parentLookupErr.message });
+        if (!parentAcc) return res.status(404).json({ success: false, error: 'Parent MT5 account not found.' });
+        if (parentAcc.account_role !== 'parent') {
+          return res.status(400).json({ success: false, error: 'Target account is not a parent account.' });
+        }
+
+        const { data: parentOwnerProf } = await dbClient
+          .from('profiles')
+          .select('id, role, status')
+          .eq('id', parentAcc.user_id)
+          .maybeSingle();
+
+        if (!parentOwnerProf || parentOwnerProf.role !== 'mentor' || parentOwnerProf.status !== 'active') {
+          return res.status(400).json({ success: false, error: 'Parent account owner is not an active verified mentor.' });
+        }
+        if (parentAcc.user_id === targetUserId) {
+          return res.status(400).json({ success: false, code: 'SELF_ASSIGNMENT_FORBIDDEN', error: 'Cannot assign self as mentor.' });
+        }
+        verifiedParentAcc = parentAcc;
+      }
+
+      const { data: existingAcc, error: existErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id, user_id')
+        .eq('account_number', cleanAccNumber)
+        .eq('broker_server', cleanBrokerServer)
+        .maybeSingle();
+
+      if (existErr) {
+        return res.status(500).json({ success: false, error: `Database lookup error: ${existErr.message}` });
+      }
+
+      if (existingAcc && !caller.isVerifiedAdmin && existingAcc.user_id !== targetUserId) {
+        return res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_OWNED_BY_OTHER_USER',
+          error: 'Security error: This MT5 account number and broker server are already registered to another user.',
+        });
+      }
+
+      if (verifiedParentAcc && existingAcc && verifiedParentAcc.id === existingAcc.id) {
+        return res.status(400).json({ success: false, code: 'SELF_ASSIGNMENT_FORBIDDEN', error: 'An MT5 account cannot be its own parent.' });
+      }
+
+      const rawToken = BridgeStore.generateSecureToken(role === 'parent' ? 'ts_parent' : 'ts_child');
+      const tokenHash = BridgeStore.hashToken(rawToken);
+      const tokenPrefix = rawToken.substring(0, 12) + '...';
+      let accountId = existingAcc ? existingAcc.id : crypto.randomUUID();
+
+      if (existingAcc) {
+        const { error: updateErr } = await dbClient
+          .from('mt5_accounts')
+          .update({
+            user_id: targetUserId,
+            broker_name: cleanBrokerName,
+            account_role: role,
+            account_type: accountType,
+            balance: Number(balance) || 10000,
+            equity: Number(equity || balance) || 10000,
+            currency: currency || 'USD',
+            leverage: Number(leverage) || 100,
+            connection_status: 'disconnected',
+            ...(verifiedParentAcc ? { assigned_parent_id: verifiedParentAcc.id } : {}),
+            terminal_token_hash: tokenHash,
+            terminal_token_prefix: tokenPrefix,
+            terminal_token_created_at: new Date().toISOString(),
+          })
+          .eq('id', accountId);
+
+        if (updateErr) {
+          return res.status(500).json({ success: false, error: `Failed to update MT5 account: ${updateErr.message}` });
+        }
+      } else {
+        const { error: insertErr } = await dbClient.from('mt5_accounts').insert([
+          {
+            id: accountId,
+            user_id: targetUserId,
+            account_number: cleanAccNumber,
+            broker_server: cleanBrokerServer,
+            broker_name: cleanBrokerName,
+            account_role: role,
+            account_type: accountType,
+            balance: Number(balance) || 10000,
+            equity: Number(equity || balance) || 10000,
+            margin: 0,
+            free_margin: Number(balance) || 10000,
+            currency: currency || 'USD',
+            leverage: Number(leverage) || 100,
+            connection_status: 'disconnected',
+            is_investor_password: true,
+            auto_trading_enabled: true,
+            assigned_parent_id: verifiedParentAcc ? verifiedParentAcc.id : null,
+            terminal_token_hash: tokenHash,
+            terminal_token_prefix: tokenPrefix,
+            terminal_token_created_at: new Date().toISOString(),
+          },
+        ]);
+
+        if (insertErr) {
+          return res.status(500).json({ success: false, error: `Failed to insert MT5 account: ${insertErr.message}` });
+        }
+      }
+
+      if (role === 'child' && verifiedParentAcc) {
+        const { error: assignErr } = await dbClient
+          .from('mentor_assignments')
+          .upsert(
+            [
+              {
+                mentor_id: verifiedParentAcc.user_id,
+                trader_id: targetUserId,
+                parent_account_id: verifiedParentAcc.id,
+                child_account_id: accountId,
+                status: 'active',
+                lot_mode: normalizedLotMode,
+                lot_multiplier: validatedMultiplier,
+                fixed_lot: validatedFixedLot,
+                assigned_at: new Date().toISOString(),
+              },
+            ],
+            { onConflict: 'mentor_id,trader_id' }
+          );
+
+        if (assignErr) {
+          if (!existingAcc) {
+            await dbClient.from('mt5_accounts').delete().eq('id', accountId);
+          }
+          return res.status(422).json({
+            success: false,
+            code: 'MENTOR_ASSIGNMENT_FAILED',
+            error: `Account assignment to mentor failed: ${assignErr.message}`,
+          });
+        }
+      }
+
+      await bridgeStore.registerTerminal(
+        rawToken,
+        {
+          accountId,
+          userId: targetUserId,
+          accountRole: role,
+          accountNumber: cleanAccNumber,
+          brokerServer: cleanBrokerServer,
+          brokerName: cleanBrokerName,
+        },
+        dbClient
+      );
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'MT5_ACCOUNT_REGISTERED',
+          level: 'info',
+          details: `User ${caller.profile?.email || caller.user.id} (${caller.profile?.role}) registered ${role.toUpperCase()} MT5 account #${cleanAccNumber} (${cleanBrokerServer}).`,
+        },
+        dbClient
+      );
+
+      const serverHost = `${req.protocol}://${req.get('host')}`;
+      return res.status(200).json({
+        success: true,
+        account: {
+          id: accountId,
+          userId: targetUserId,
+          accountNumber: cleanAccNumber,
+          brokerName: cleanBrokerName,
+          brokerServer: cleanBrokerServer,
+          accountRole: role,
+          accountType,
+          balance: Number(balance) || 10000,
+          equity: Number(equity || balance) || 10000,
+          currency,
+          leverage: Number(leverage) || 100,
+          connectionStatus: 'disconnected',
+          isDurableDb: true,
+          dbError: null,
+        },
+        terminalToken: rawToken,
+        tokenPrefix,
+        instructions: {
+          serverUrl: serverHost,
+          eaFileName: role === 'parent' ? 'TradeSync_Broadcaster.mq5' : 'TradeSync_Receiver.mq5',
+          eaDownloadUrl: role === 'parent' ? '/api/mql5/download/broadcaster' : '/api/mql5/download/receiver',
+          serverParam: cleanBrokerServer,
+          tokenParam: rawToken,
+        },
+      });
+    } catch (err: any) {
+      console.error('[BridgeAPI] Self-service account registration error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Account registration failed' });
+    }
+  });
+
+  /**
    * 2c. Authoritative Admin MT5 Accounts Retrieval Endpoint
    * GET /api/v1/admin/accounts
    * Protected: Verified active Super Admin + durable service-role DB required.
@@ -1538,8 +1986,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const [accResult, assignResult, profilesResult] = await Promise.all([
         dbClient.from('mt5_accounts').select(safeAccountColumns).order('created_at', { ascending: false }),
-        dbClient.from('mentor_assignments').select('*').eq('status', 'active'),
-        dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status'),
+        dbClient.from('mentor_assignments').select('*').in('status', ['active', 'inactive']),
+        dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status, created_at'),
       ]);
 
       if (accResult.error) {
@@ -1560,8 +2008,9 @@ export function createApiApp(deps?: ApiAppDependencies) {
           acc.error_message,
           nowMs
         );
+        const { terminal_token_hash: _dropHash, ...safeAcc } = acc;
         return {
-          ...acc,
+          ...safeAcc,
           connection_status: eff.effectiveStatus,
           is_stale: eff.isStale,
           error_message: eff.errorMessage || null,
@@ -1607,12 +2056,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .from('mentor_assignments')
           .select('*')
           .eq('mentor_id', caller.user.id)
-          .eq('status', 'active'),
+          .in('status', ['active', 'inactive']),
         dbClient
           .from('mentor_assignments')
           .select('*')
           .eq('trader_id', caller.user.id)
-          .eq('status', 'active'),
+          .in('status', ['active', 'inactive']),
       ]);
 
       if (accRes.error) {
@@ -1627,38 +2076,101 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       // Load peer profile names strictly for users linked in the caller's own assignments
       const peerIds = new Set<string>([caller.user.id]);
+      const linkedChildIds = new Set<string>();
+      const linkedParentIds = new Set<string>();
+
       for (const a of assignments) {
         if (a.mentor_id) peerIds.add(a.mentor_id);
         if (a.trader_id) peerIds.add(a.trader_id);
+        if (a.mentor_id === caller.user.id && a.child_account_id) {
+          linkedChildIds.add(a.child_account_id);
+        }
+        if (a.trader_id === caller.user.id && a.parent_account_id) {
+          linkedParentIds.add(a.parent_account_id);
+        }
       }
 
-      const { data: peerProfiles } = await dbClient
-        .from('profiles')
-        .select('id, full_name, email, role, status, avatar_url')
-        .in('id', Array.from(peerIds));
+      const safeLinkedChildColumns =
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, auto_trading_enabled, last_sync, error_message, assigned_parent_id';
+      const safeLinkedParentColumns =
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, currency, connection_status, ping_ms, auto_trading_enabled, last_sync, error_message';
+
+      const [peerProfilesRes, childAccRes, parentAccRes] = await Promise.all([
+        dbClient
+          .from('profiles')
+          .select('id, full_name, email, role, status, avatar_url')
+          .in('id', Array.from(peerIds)),
+        linkedChildIds.size > 0
+          ? dbClient.from('mt5_accounts').select(safeLinkedChildColumns).in('id', Array.from(linkedChildIds))
+          : Promise.resolve({ data: [], error: null } as any),
+        linkedParentIds.size > 0
+          ? dbClient.from('mt5_accounts').select(safeLinkedParentColumns).in('id', Array.from(linkedParentIds))
+          : Promise.resolve({ data: [], error: null } as any),
+      ]);
 
       const nowMs = Date.now();
-      const enrichedAccounts = (accRes.data || []).map((acc: any) => {
+      const enrichAccount = (acc: any, isLinkedPeer = false) => {
         const eff = computeEffectiveConnectionStatus(
           acc.connection_status,
           acc.last_sync,
           acc.error_message,
           nowMs
         );
+        const { terminal_token_hash: _dropHash, ...rest } = acc;
+        if (isLinkedPeer) {
+          const {
+            terminal_token_prefix: _dropPrefix,
+            terminal_token_created_at: _dropCreated,
+            ...peerSafe
+          } = rest;
+          return {
+            ...peerSafe,
+            connection_status: eff.effectiveStatus,
+            is_stale: eff.isStale,
+            error_message: eff.errorMessage || null,
+          };
+        }
         return {
-          ...acc,
+          ...rest,
           connection_status: eff.effectiveStatus,
           is_stale: eff.isStale,
           error_message: eff.errorMessage || null,
         };
-      });
+      };
+
+      const enrichedAccounts = (accRes.data || []).map((a: any) => enrichAccount(a, false));
+      const linkedAccounts = [
+        ...((childAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
+        ...((parentAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
+      ];
+
+      // Load owned + mentor-scoped trades safely without leaking unrelated accounts
+      const ownedAndChildIds = Array.from(
+        new Set<string>([
+          ...enrichedAccounts.map((a: any) => a.id),
+          ...((childAccRes?.data || []).map((c: any) => c.id)),
+        ])
+      );
+
+      let scopedTrades: any[] = [];
+      if (ownedAndChildIds.length > 0) {
+        const { data: tradesData } = await dbClient
+          .from('trades')
+          .select('*')
+          .in('account_id', ownedAndChildIds)
+          .order('open_time', { ascending: false })
+          .limit(200);
+        scopedTrades = tradesData || [];
+      }
 
       return res.status(200).json({
         success: true,
         source: 'supabase',
         accounts: enrichedAccounts,
+        linkedAccounts,
         assignments,
-        profiles: peerProfiles || [],
+        profiles: peerProfilesRes?.data || [],
+        trades: scopedTrades,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to load user MT5 accounts' });
@@ -1974,7 +2486,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
     }
 
     if (assignedChildren.length === 0) {
-      bridgeStore.addSyncLog(
+      await bridgeStore.addSyncLog(
         {
           eventType: 'NO_ACTIVE_CHILDREN',
           level: 'info',
@@ -2019,7 +2531,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
 
       if (!sizing.valid) {
-        bridgeStore.addSyncLog(
+        await bridgeStore.addSyncLog(
           {
             eventType: 'RISK_ENGINE_REJECTED',
             level: 'warn',
@@ -2092,7 +2604,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade closures.' });
     }
 
-    const { ticket } = req.body;
+    const { ticket, closeType, closedLots, remainingLots, dealTicket } = req.body;
     if (ticket == null) {
       return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
     }
@@ -2100,6 +2612,35 @@ export function createApiApp(deps?: ApiAppDependencies) {
     const parentTicketStr = String(ticket).trim();
     const dbClient = auth.dbClient || requireServiceRoleClient(res);
     if (!dbClient) return;
+
+    const normalizedCloseType = typeof closeType === 'string' ? closeType.trim().toUpperCase() : '';
+    const remainingLotsNum = remainingLots != null && remainingLots !== '' ? Number(remainingLots) : 0;
+    const isPartialClose =
+      normalizedCloseType === 'PARTIAL' ||
+      (Number.isFinite(remainingLotsNum) && remainingLotsNum > 0.00001 && normalizedCloseType !== 'FULL');
+
+    if (isPartialClose) {
+      const closedLotsNum = closedLots != null && closedLots !== '' ? Number(closedLots) : null;
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'PARTIAL_CLOSE_SKIPPED',
+          level: 'warn',
+          details: `Partial close reported for parent ticket #${parentTicketStr}${dealTicket ? ` (deal #${dealTicket})` : ''}${closedLotsNum != null && Number.isFinite(closedLotsNum) ? `, closed ${closedLotsNum} lots` : ''}${Number.isFinite(remainingLotsNum) ? `, remaining ${remainingLotsNum} lots` : ''}. Child positions remain open until full close per Stage 4 protocol safeguard.`,
+          ticket: parentTicketStr,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({
+        success: true,
+        parentTicket: parentTicketStr,
+        closeType: 'PARTIAL',
+        partialCloseHandled: 'logged_not_executed',
+        closeInstructionsQueued: 0,
+        message: 'Partial close logged cleanly; open child positions remain intact until parent position is fully closed.',
+        instructions: [],
+      });
+    }
 
     try {
       // 1. Primary lookup: targeted query on trade_mappings for this parent account + ticket
@@ -2331,7 +2872,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
    * GET /api/v1/bridge/instructions/pending
    */
   registerRoute('get', '/api/v1/bridge/instructions/pending', async (req: Request, res: Response) => {
-    const auth = await authenticateTerminal(req);
+    const auth = await authenticateTerminal(req, { touchDb: 'throttled', throttleMs: 15_000 });
     if (!auth.terminal) {
       return res.status(auth.status || 401).json({
         success: false,
@@ -2485,6 +3026,674 @@ export function createApiApp(deps?: ApiAppDependencies) {
       return res.status(200).json({ success: true, logs });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to load bridge logs' });
+    }
+  });
+
+  /**
+   * 8a-tenant. Tenant-Scoped Sync Logs Endpoint (Mentors / Traders / Admins)
+   * GET /api/v1/bridge/my-logs
+   */
+  registerRoute('get', '/api/v1/bridge/my-logs', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    if (!caller.isVerifiedAdmin && caller.profile?.status !== 'active') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Active profile required.' });
+    }
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const logs = await bridgeStore.getSyncLogs(dbClient);
+      if (caller.isVerifiedAdmin) {
+        return res.status(200).json({ success: true, logs });
+      }
+
+      // Tenant isolation: collect MT5 account IDs owned by caller (plus mentor's follower accounts)
+      const [ownedAccRes, mentorAssignRes] = await Promise.all([
+        dbClient.from('mt5_accounts').select('id').eq('user_id', caller.user.id),
+        dbClient.from('mentor_assignments').select('child_account_id').eq('mentor_id', caller.user.id),
+      ]);
+
+      const scopedAccountIds = Array.from(
+        new Set<string>([
+          ...((ownedAccRes.data || []).map((a: any) => a.id)),
+          ...((mentorAssignRes.data || []).map((a: any) => a.child_account_id).filter(Boolean)),
+        ])
+      );
+
+      if (scopedAccountIds.length === 0) {
+        return res.status(200).json({ success: true, logs: [] });
+      }
+
+      const idList = scopedAccountIds.join(',');
+      const [mapRes, instRes] = await Promise.all([
+        dbClient
+          .from('trade_mappings')
+          .select('parent_trade_ticket, child_trade_ticket')
+          .or(`parent_account_id.in.(${idList}),child_account_id.in.(${idList})`),
+        dbClient
+          .from('bridge_instructions')
+          .select('parent_ticket, child_ticket')
+          .or(`parent_account_id.in.(${idList}),child_account_id.in.(${idList})`),
+      ]);
+
+      const allowedTickets = new Set<string>();
+      for (const m of mapRes.data || []) {
+        if (m.parent_trade_ticket != null) allowedTickets.add(String(m.parent_trade_ticket));
+        if (m.child_trade_ticket != null) allowedTickets.add(String(m.child_trade_ticket));
+      }
+      for (const inst of instRes.data || []) {
+        if (inst.parent_ticket != null) allowedTickets.add(String(inst.parent_ticket));
+        if (inst.child_ticket != null) allowedTickets.add(String(inst.child_ticket));
+      }
+
+      const scopedLogs = logs.filter((l) => l.ticket != null && allowedTickets.has(String(l.ticket)));
+      return res.status(200).json({ success: true, logs: scopedLogs });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to load bridge logs' });
+    }
+  });
+
+  /**
+   * 8b. Tenant-Scoped Trades Endpoint
+   * GET /api/v1/bridge/trades
+   */
+  registerRoute('get', '/api/v1/bridge/trades', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      if (caller.isVerifiedAdmin) {
+        const { data, error } = await dbClient
+          .from('trades')
+          .select('*')
+          .order('open_time', { ascending: false })
+          .limit(300);
+        if (error) return res.status(500).json({ success: false, error: error.message });
+        return res.status(200).json({ success: true, trades: data || [] });
+      }
+
+      const [ownedRes, mentorAssignRes] = await Promise.all([
+        dbClient.from('mt5_accounts').select('id').eq('user_id', caller.user.id),
+        caller.profile?.role === 'mentor'
+          ? dbClient
+              .from('mentor_assignments')
+              .select('child_account_id')
+              .eq('mentor_id', caller.user.id)
+              .in('status', ['active', 'inactive'])
+          : Promise.resolve({ data: [], error: null } as any),
+      ]);
+
+      const scopedAccountIds = Array.from(
+        new Set<string>([
+          ...((ownedRes.data || []).map((a: any) => a.id)),
+          ...((mentorAssignRes.data || []).map((a: any) => a.child_account_id).filter(Boolean)),
+        ])
+      );
+
+      if (scopedAccountIds.length === 0) {
+        return res.status(200).json({ success: true, trades: [] });
+      }
+
+      const { data, error } = await dbClient
+        .from('trades')
+        .select('*')
+        .in('account_id', scopedAccountIds)
+        .order('open_time', { ascending: false })
+        .limit(200);
+
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      return res.status(200).json({ success: true, trades: data || [] });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to load trades' });
+    }
+  });
+
+  /**
+   * 8c. Verified Active Mentors Directory
+   * GET /api/v1/bridge/mentors/directory
+   */
+  registerRoute('get', '/api/v1/bridge/mentors/directory', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const [mentorsRes, parentAccsRes, activeAssignRes] = await Promise.all([
+        dbClient.from('profiles').select('id, full_name, role, status, avatar_url').eq('role', 'mentor').eq('status', 'active'),
+        dbClient
+          .from('mt5_accounts')
+          .select('id, user_id, account_number, broker_name, broker_server, account_type, connection_status, last_sync, error_message, ping_ms')
+          .eq('account_role', 'parent'),
+        dbClient.from('mentor_assignments').select('id, mentor_id').eq('status', 'active'),
+      ]);
+
+      if (mentorsRes.error) return res.status(500).json({ success: false, error: mentorsRes.error.message });
+
+      const nowMs = Date.now();
+      const parentByUser = new Map<string, any>();
+      for (const acc of parentAccsRes.data || []) {
+        if (!parentByUser.has(acc.user_id)) parentByUser.set(acc.user_id, acc);
+      }
+
+      const followerCountByMentor = new Map<string, number>();
+      for (const a of activeAssignRes.data || []) {
+        followerCountByMentor.set(a.mentor_id, (followerCountByMentor.get(a.mentor_id) || 0) + 1);
+      }
+
+      const directory = (mentorsRes.data || []).map((m: any) => {
+        const parent = parentByUser.get(m.id);
+        const eff = parent
+          ? computeEffectiveConnectionStatus(parent.connection_status, parent.last_sync, parent.error_message, nowMs)
+          : null;
+        return {
+          id: m.id,
+          fullName: m.full_name || 'Verified Mentor',
+          avatarUrl: m.avatar_url || null,
+          inviteCode: `TS-${String(m.id).slice(0, 8).toUpperCase()}`,
+          parentAccountId: parent?.id || null,
+          parentAccountNumber: parent?.account_number || null,
+          brokerName: parent?.broker_name || null,
+          brokerServer: parent?.broker_server || null,
+          accountType: parent?.account_type || null,
+          connectionStatus: eff ? eff.effectiveStatus : 'disconnected',
+          isStale: eff ? eff.isStale : false,
+          lastSync: parent?.last_sync || null,
+          activeFollowersCount: followerCountByMentor.get(m.id) || 0,
+        };
+      });
+
+      return res.status(200).json({ success: true, mentors: directory });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to load mentor directory' });
+    }
+  });
+
+  /**
+   * 8d. Student Join / Link to Verified Mentor
+   * POST /api/v1/bridge/assignments/join
+   */
+  registerRoute('post', '/api/v1/bridge/assignments/join', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { inviteCodeOrMentorId, childAccountId, traderId, lotSettings } = req.body || {};
+      const query = String(inviteCodeOrMentorId || '').trim();
+      if (!query) {
+        return res.status(400).json({ success: false, error: 'Mentor invite code or mentor UUID is required.' });
+      }
+
+      const targetTraderId = caller.isVerifiedAdmin && traderId && isValidUUID(traderId) ? String(traderId).trim() : caller.user.id;
+      if (!caller.isVerifiedAdmin && caller.profile?.role !== 'trader') {
+        return res.status(403).json({ success: false, error: 'Forbidden: Only student/trader accounts can join a mentor.' });
+      }
+
+      const { data: activeMentors, error: mentorErr } = await dbClient
+        .from('profiles')
+        .select('id, full_name, role, status')
+        .eq('role', 'mentor')
+        .eq('status', 'active');
+
+      if (mentorErr) return res.status(500).json({ success: false, error: mentorErr.message });
+
+      const cleanUpper = query.toUpperCase();
+      const matchedMentor = (activeMentors || []).find((m: any) => {
+        const deterministicCode = `TS-${String(m.id).slice(0, 8).toUpperCase()}`;
+        return (
+          String(m.id).toLowerCase() === query.toLowerCase() ||
+          deterministicCode === cleanUpper ||
+          deterministicCode.replace('TS-', '') === cleanUpper.replace(/^TS-/, '')
+        );
+      });
+
+      if (!matchedMentor) {
+        return res.status(404).json({
+          success: false,
+          code: 'MENTOR_NOT_FOUND',
+          error: 'No verified active mentor matched that invite code or ID.',
+        });
+      }
+
+      if (matchedMentor.id === targetTraderId) {
+        return res.status(400).json({
+          success: false,
+          code: 'SELF_ASSIGNMENT_FORBIDDEN',
+          error: 'Security error: A user cannot link to themselves as mentor.',
+        });
+      }
+
+      const { data: parentAccs, error: pErr } = await dbClient
+        .from('mt5_accounts')
+        .select('id, user_id, account_role')
+        .eq('user_id', matchedMentor.id)
+        .eq('account_role', 'parent')
+        .limit(1);
+
+      if (pErr) return res.status(500).json({ success: false, error: pErr.message });
+      if (!parentAccs || parentAccs.length === 0) {
+        return res.status(400).json({
+          success: false,
+          code: 'MENTOR_NO_PARENT_ACCOUNT',
+          error: 'Selected mentor has not connected a Parent Master MT5 account yet.',
+        });
+      }
+      const parentAcc = parentAccs[0];
+
+      let resolvedChildId: string | null = null;
+      if (childAccountId && String(childAccountId).trim()) {
+        if (!isValidUUID(childAccountId)) {
+          return res.status(400).json({ success: false, error: 'Invalid childAccountId UUID.' });
+        }
+        const { data: childAcc, error: cErr } = await dbClient
+          .from('mt5_accounts')
+          .select('id, user_id, account_role')
+          .eq('id', String(childAccountId).trim())
+          .maybeSingle();
+        if (cErr) return res.status(500).json({ success: false, error: cErr.message });
+        if (!childAcc || childAcc.user_id !== targetTraderId || childAcc.account_role !== 'child') {
+          return res.status(403).json({ success: false, error: 'Child account not found or does not belong to target trader.' });
+        }
+        resolvedChildId = childAcc.id;
+      } else {
+        const { data: ownChildren } = await dbClient
+          .from('mt5_accounts')
+          .select('id')
+          .eq('user_id', targetTraderId)
+          .eq('account_role', 'child')
+          .limit(1);
+        resolvedChildId = ownChildren?.[0]?.id || null;
+      }
+
+      if (!resolvedChildId) {
+        return res.status(400).json({
+          success: false,
+          code: 'NO_CHILD_ACCOUNT',
+          error: 'Please connect your Child MT5 Demo account first before linking to a mentor.',
+        });
+      }
+
+      const rawCopyMode = String(lotSettings?.copyMode || 'parent_lot').trim().toLowerCase();
+      const lotMode =
+        rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot'
+          ? 'fixed'
+          : rawCopyMode === 'multiplier' || rawCopyMode === 'equity_ratio' || rawCopyMode === 'risk_percent'
+          ? rawCopyMode
+          : 'parent_lot';
+      const lotMultiplier =
+        lotSettings?.multiplier != null && Number.isFinite(Number(lotSettings.multiplier)) && Number(lotSettings.multiplier) > 0
+          ? Number(lotSettings.multiplier)
+          : 1.0;
+      const fixedLot =
+        lotSettings?.fixedLot != null && Number.isFinite(Number(lotSettings.fixedLot)) && Number(lotSettings.fixedLot) >= 0.01
+          ? Number(lotSettings.fixedLot)
+          : 0.1;
+
+      const { data: upserted, error: upsertErr } = await dbClient
+        .from('mentor_assignments')
+        .upsert(
+          [
+            {
+              mentor_id: matchedMentor.id,
+              trader_id: targetTraderId,
+              parent_account_id: parentAcc.id,
+              child_account_id: resolvedChildId,
+              status: 'active',
+              lot_mode: lotMode,
+              lot_multiplier: lotMultiplier,
+              fixed_lot: fixedLot,
+              assigned_at: new Date().toISOString(),
+            },
+          ],
+          { onConflict: 'mentor_id,trader_id' }
+        )
+        .select('*')
+        .single();
+
+      if (upsertErr) {
+        return res.status(422).json({ success: false, error: upsertErr.message });
+      }
+
+      await dbClient.from('mt5_accounts').update({ assigned_parent_id: parentAcc.id }).eq('id', resolvedChildId);
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'MENTOR_LINK_CREATED',
+          level: 'info',
+          details: `Trader ${targetTraderId} linked child account ${resolvedChildId} to mentor ${matchedMentor.full_name || matchedMentor.id}.`,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({
+        success: true,
+        assignment: upserted,
+        mentorName: matchedMentor.full_name || 'Verified Mentor',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to link to mentor' });
+    }
+  });
+
+  /**
+   * 8e. Pause / Resume Mentor Assignment Status ('active' | 'inactive')
+   * POST /api/v1/bridge/assignments/:assignmentId/status
+   */
+  registerRoute('post', '/api/v1/bridge/assignments/:assignmentId/status', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { assignmentId } = req.params;
+      if (!isValidUUID(assignmentId)) {
+        return res.status(400).json({ success: false, error: 'Invalid assignmentId UUID.' });
+      }
+
+      const rawStatus = String(req.body?.status || '').trim().toLowerCase();
+      const dbStatus = rawStatus === 'paused' ? 'inactive' : rawStatus;
+      if (dbStatus !== 'active' && dbStatus !== 'inactive') {
+        return res.status(400).json({ success: false, error: 'Status must be active, inactive, or paused.' });
+      }
+
+      const { data: existing, error: findErr } = await dbClient
+        .from('mentor_assignments')
+        .select('*')
+        .eq('id', assignmentId)
+        .maybeSingle();
+
+      if (findErr) return res.status(500).json({ success: false, error: findErr.message });
+      if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
+
+      if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id && existing.trader_id !== caller.user.id) {
+        return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can change link status.' });
+      }
+
+      if (dbStatus === 'active') {
+        const [{ data: mentorProf }, { data: traderProf }] = await Promise.all([
+          dbClient.from('profiles').select('id, role, status').eq('id', existing.mentor_id).maybeSingle(),
+          dbClient.from('profiles').select('id, status').eq('id', existing.trader_id).maybeSingle(),
+        ]);
+        if (!mentorProf || mentorProf.role !== 'mentor' || mentorProf.status !== 'active') {
+          return res.status(403).json({ success: false, error: 'Cannot activate link: mentor profile is not active.' });
+        }
+        if (!traderProf || traderProf.status !== 'active') {
+          return res.status(403).json({ success: false, error: 'Cannot activate link: trader profile is not active.' });
+        }
+      }
+
+      const { data: updated, error: updErr } = await dbClient
+        .from('mentor_assignments')
+        .update({ status: dbStatus })
+        .eq('id', assignmentId)
+        .select('*')
+        .single();
+
+      if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'ASSIGNMENT_STATUS_UPDATED',
+          level: dbStatus === 'inactive' ? 'warn' : 'info',
+          details: `Assignment ${assignmentId} status changed to '${dbStatus}' by ${caller.profile?.email || caller.user.id}.`,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({ success: true, assignment: updated });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to update assignment status' });
+    }
+  });
+
+  /**
+   * 8f. Remove / Unlink Mentor Assignment
+   * DELETE /api/v1/bridge/assignments/:assignmentId
+   */
+  registerRoute('delete', '/api/v1/bridge/assignments/:assignmentId', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { assignmentId } = req.params;
+      if (!isValidUUID(assignmentId)) {
+        return res.status(400).json({ success: false, error: 'Invalid assignmentId UUID.' });
+      }
+
+      const { data: existing, error: findErr } = await dbClient
+        .from('mentor_assignments')
+        .select('*')
+        .eq('id', assignmentId)
+        .maybeSingle();
+
+      if (findErr) return res.status(500).json({ success: false, error: findErr.message });
+      if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
+
+      if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id && existing.trader_id !== caller.user.id) {
+        return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can remove this link.' });
+      }
+
+      const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', assignmentId);
+      if (delErr) return res.status(500).json({ success: false, error: delErr.message });
+
+      if (existing.child_account_id) {
+        await dbClient.from('mt5_accounts').update({ assigned_parent_id: null }).eq('id', existing.child_account_id);
+      }
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'ASSIGNMENT_UNLINKED',
+          level: 'warn',
+          details: `Assignment ${assignmentId} removed by ${caller.profile?.email || caller.user.id}.`,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({ success: true, assignmentId });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to unlink assignment' });
+    }
+  });
+
+  /**
+   * 8g. Persist Verified Lot Settings Columns on mentor_assignments
+   * POST /api/v1/bridge/assignments/:assignmentId/lot-settings
+   */
+  registerRoute('post', '/api/v1/bridge/assignments/:assignmentId/lot-settings', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { assignmentId } = req.params;
+      if (!isValidUUID(assignmentId)) {
+        return res.status(400).json({ success: false, error: 'Invalid assignmentId UUID.' });
+      }
+
+      const { data: existing, error: findErr } = await dbClient
+        .from('mentor_assignments')
+        .select('*')
+        .eq('id', assignmentId)
+        .maybeSingle();
+
+      if (findErr) return res.status(500).json({ success: false, error: findErr.message });
+      if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
+
+      if (!caller.isVerifiedAdmin && existing.trader_id !== caller.user.id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Only the assigned trader or an administrator may modify lot sizing parameters.',
+        });
+      }
+
+      const rawMode = String(req.body?.copyMode || req.body?.lotMode || 'parent_lot').trim().toLowerCase();
+      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'parent_lot';
+      if (rawMode === 'fixed' || rawMode === 'fixed_lot') {
+        normalizedLotMode = 'fixed';
+      } else if (rawMode === 'multiplier') {
+        normalizedLotMode = 'multiplier';
+      } else if (rawMode === 'equity_ratio') {
+        normalizedLotMode = 'equity_ratio';
+      } else if (rawMode === 'risk_percent') {
+        normalizedLotMode = 'risk_percent';
+      } else if (rawMode === 'parent_lot') {
+        normalizedLotMode = 'parent_lot';
+      } else {
+        return res.status(400).json({ success: false, error: `Invalid lot mode "${rawMode}".` });
+      }
+
+      const mult = Number(req.body?.multiplier ?? existing.lot_multiplier ?? 1.0);
+      if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
+        return res.status(400).json({ success: false, error: 'Lot multiplier must be > 0 and <= 100.' });
+      }
+
+      const fixed = Number(req.body?.fixedLot ?? existing.fixed_lot ?? 0.1);
+      if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
+        return res.status(400).json({ success: false, error: 'Fixed lot must be between 0.01 and 100.' });
+      }
+
+      const { data: updated, error: updErr } = await dbClient
+        .from('mentor_assignments')
+        .update({
+          lot_mode: normalizedLotMode,
+          lot_multiplier: mult,
+          fixed_lot: fixed,
+        })
+        .eq('id', assignmentId)
+        .select('*')
+        .single();
+
+      if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+      return res.status(200).json({
+        success: true,
+        assignment: updated,
+        persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'],
+        unpersistedSchemaFields: ['risk_percent', 'max_lot_cap', 'min_lot_clamp', 'slippage_max_pips'],
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to update lot settings' });
+    }
+  });
+
+  /**
+   * 8h. Mentor / Admin Emergency Close Signal
+   * POST /api/v1/bridge/mentor/emergency-close
+   * Requires explicit confirmation flag and parent account ownership verification.
+   */
+  registerRoute('post', '/api/v1/bridge/mentor/emergency-close', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
+    if (!caller) return;
+
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { parentTicket, confirm } = req.body || {};
+      if (confirm !== true) {
+        return res.status(400).json({
+          success: false,
+          error: 'Explicit confirmation (confirm: true) is required to queue an emergency close signal.',
+        });
+      }
+      if (parentTicket == null || !String(parentTicket).trim()) {
+        return res.status(400).json({ success: false, error: 'parentTicket is required.' });
+      }
+
+      const ticketStr = String(parentTicket).trim();
+      if (!caller.isVerifiedAdmin && caller.profile?.role !== 'mentor') {
+        return res.status(403).json({ success: false, error: 'Forbidden: Only active mentors or admins can dispatch emergency closes.' });
+      }
+
+      const { data: parentAccounts } = caller.isVerifiedAdmin
+        ? await dbClient.from('mt5_accounts').select('id, user_id').eq('account_role', 'parent')
+        : await dbClient.from('mt5_accounts').select('id, user_id').eq('user_id', caller.user.id).eq('account_role', 'parent');
+
+      const allowedParentIds = new Set((parentAccounts || []).map((a: any) => a.id));
+      if (allowedParentIds.size === 0) {
+        return res.status(404).json({ success: false, error: 'No parent MT5 account found for caller.' });
+      }
+
+      const { data: mapRows, error: mapErr } = await dbClient
+        .from('trade_mappings')
+        .select('*')
+        .eq('parent_trade_ticket', ticketStr);
+
+      if (mapErr) return res.status(500).json({ success: false, error: mapErr.message });
+
+      const ownedMappings = (mapRows || []).filter(
+        (m: any) => allowedParentIds.has(m.parent_account_id) && m.status !== 'CLOSED'
+      );
+
+      if (ownedMappings.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: `No active copied child positions found for parent ticket #${ticketStr}.`,
+        });
+      }
+
+      const queued: any[] = [];
+      for (const map of ownedMappings) {
+        const idempotencyKey = `${ticketStr}_${map.child_account_id}_CLOSE`;
+        const childTicketVal = map.child_trade_ticket != null && String(map.child_trade_ticket) !== '0' ? String(map.child_trade_ticket) : undefined;
+        const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
+          {
+            idempotencyKey,
+            action: 'CLOSE',
+            childAccountId: map.child_account_id,
+            parentAccountId: map.parent_account_id,
+            parentTicket: ticketStr,
+            childTicket: childTicketVal,
+            symbol: map.symbol,
+            orderType: map.order_type as any,
+            lots: Number(map.child_lots),
+            magicNumber: '888999',
+            comment: `Emergency Close #${ticketStr}`,
+          },
+          dbClient
+        );
+        queued.push({
+          instructionId: instruction.instructionId,
+          childAccountId: instruction.childAccountId,
+          isDuplicate,
+        });
+      }
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'MENTOR_EMERGENCY_CLOSE',
+          level: 'warn',
+          details: `${caller.profile?.email || caller.user.id} queued emergency CLOSE for parent ticket #${ticketStr} across ${queued.length} follower terminal(s).`,
+          ticket: ticketStr,
+        },
+        dbClient
+      );
+
+      return res.status(200).json({
+        success: true,
+        parentTicket: ticketStr,
+        closeInstructionsQueued: queued.length,
+        instructions: queued,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to queue emergency close' });
     }
   });
 

@@ -40,7 +40,8 @@ export const ConnectionsView: React.FC = () => {
     mt5Accounts,
     users,
     disconnectMT5Account,
-    reconnectMT5Account
+    reconnectMT5Account,
+    refreshCloudData
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -429,8 +430,8 @@ export const ConnectionsView: React.FC = () => {
                     <td className="px-4 py-3.5">
                       <StatusBadge status={acc.connectionStatus} size="sm" />
                       {acc.connectionStatus === 'connected' && (
-                        <div className="text-[10px] font-mono text-slate-400 mt-0.5">
-                          Ping: {acc.pingMs}ms
+                        <div className={`text-[10px] font-mono mt-0.5 ${acc.isStale ? 'text-amber-400' : 'text-slate-400'}`}>
+                          {acc.isStale ? 'Stale Heartbeat' : `Ping: ${acc.pingMs}ms`}
                         </div>
                       )}
                     </td>
@@ -528,7 +529,9 @@ export const ConnectionsView: React.FC = () => {
         isOpen={isRegisterModalOpen}
         onClose={() => setIsRegisterModalOpen(false)}
         defaultRole="parent"
-        onSuccess={() => {}}
+        onSuccess={() => {
+          void refreshCloudData();
+        }}
       />
 
       {/* Token Rotation Display Modal */}

@@ -42,7 +42,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { isCloudMode } = useAuth();
   const {
     users,
-    mentorProfiles,
     mt5Accounts,
     subscriptions,
     parentChildLinks,
@@ -52,8 +51,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     auditLogs,
     systemHealth,
     cloudBridgeTelemetry,
-    notifications,
-    broadcastAnnouncement
+    broadcastAnnouncement,
+    refreshCloudData
   } = useApp();
 
   const [announcementTitle, setAnnouncementTitle] = useState('');
@@ -61,15 +60,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
 
-  // Compute metrics
+  // Compute metrics across all roles & statuses
+  const admins = users.filter((u) => u.role === 'admin');
   const mentors = users.filter((u) => u.role === 'mentor');
   const traders = users.filter((u) => u.role === 'trader');
   const activeMentors = mentors.filter((m) => m.status === 'active').length;
+  const pendingMentors = mentors.filter((m) => m.status === 'pending').length;
   const suspendedMentors = mentors.filter((m) => m.status === 'suspended').length;
   const activeTraders = traders.filter((t) => t.status === 'active').length;
+  const pendingTraders = traders.filter((t) => t.status === 'pending').length;
   const suspendedTraders = traders.filter((t) => t.status === 'suspended').length;
-  const totalActiveUsers = activeMentors + activeTraders;
-  const totalSuspendedUsers = suspendedMentors + suspendedTraders;
+  const totalActiveUsers = users.filter((u) => u.status === 'active').length;
+  const totalPendingUsers = users.filter((u) => u.status === 'pending').length;
+  const totalSuspendedUsers = users.filter((u) => u.status === 'suspended').length;
 
   const activeSubs = subscriptions.filter((s) => s.status === 'active').length;
   const expiredSubs = subscriptions.filter((s) => s.status === 'expired').length;
@@ -79,6 +82,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const connectedMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'connected').length;
   const disconnectedMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'disconnected').length;
   const errorMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'error').length;
+  const staleMT5 = isCloudMode
+    ? cloudBridgeTelemetry.staleTerminalsCount || mt5Accounts.filter((a) => a.isStale).length
+    : mt5Accounts.filter((a) => a.isStale).length;
 
   const totalExecuted = tradeMappings.filter(
     (m) => m.status === 'EXECUTED' || m.status === 'CLOSED'
@@ -122,11 +128,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            Account management, subscriber subscriptions, connection records, and audit monitoring.
+            Account management, mentor/trader approvals, bridge terminals, and audit monitoring.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center flex-wrap gap-2">
           <button
             onClick={() => {
               if (onOpenRegisterAccount) {
@@ -152,9 +158,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
           >
             <Plus className="h-3.5 w-3.5" />
-            <span>Provision Mentor</span>
+            <span>{isCloudMode ? 'Approve / Provision Mentor' : 'Provision Mentor'}</span>
           </button>
-          {onOpenAddTrader && (
+          {!isCloudMode && onOpenAddTrader && (
             <button
               onClick={onOpenAddTrader}
               className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
@@ -191,12 +197,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </span>
       </div>
 
+      {/* Pending Approvals Callout in Cloud Mode */}
+      {totalPendingUsers > 0 && (
+        <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-200">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>{totalPendingUsers} account(s) awaiting approval</strong> ({pendingMentors} mentor, {pendingTraders} trader). Review pending registrations to grant platform access.
+            </span>
+          </div>
+          <button
+            onClick={onOpenCreateMentor}
+            className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-3 py-1.5 text-xs transition-colors shrink-0"
+          >
+            Review Pending Users
+          </button>
+        </div>
+      )}
+
       {/* Primary KPI Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         <StatsCard
           title="Total Mentors"
           value={mentors.length}
-          subtitle={`${activeMentors} Active • ${suspendedMentors} Suspended`}
+          subtitle={`${activeMentors} Active • ${pendingMentors} Pending • ${suspendedMentors} Susp`}
           icon={Users}
           accentColor="blue"
           isDemo={!isCloudMode}
@@ -205,16 +229,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <StatsCard
           title="Total Traders"
           value={traders.length}
-          subtitle={`${activeTraders} Active • ${suspendedTraders} Suspended`}
+          subtitle={`${activeTraders} Active • ${pendingTraders} Pending • ${suspendedTraders} Susp`}
           icon={UserCheck}
           accentColor="teal"
           isDemo={!isCloudMode}
           onClick={() => onNavigateTab('traders')}
         />
         <StatsCard
-          title="Subscriptions"
-          value={activeSubs}
-          subtitle={`${activeSubs} Active • ${expiredSubs} Exp • ${cancelledSubs} Canc`}
+          title={isCloudMode ? 'Billing & Plans Schema' : 'Subscriptions'}
+          value={isCloudMode ? 'Unprovisioned' : activeSubs}
+          subtitle={
+            isCloudMode
+              ? 'No plans/payments tables in DB'
+              : `${activeSubs} Active • ${expiredSubs} Exp • ${cancelledSubs} Canc`
+          }
           icon={CreditCard}
           accentColor="slate"
           isDemo={!isCloudMode}
@@ -223,9 +251,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <StatsCard
           title={isCloudMode ? 'Cloud MT5 Terminals' : 'Demo MT5 Terminals'}
           value={connectedMT5}
-          subtitle={`${connectedMT5} Connected • ${disconnectedMT5 + errorMT5} Offline`}
+          subtitle={
+            staleMT5 > 0
+              ? `${connectedMT5} Online • ${staleMT5} Stale • ${disconnectedMT5 + errorMT5} Off`
+              : `${connectedMT5} Connected • ${disconnectedMT5 + errorMT5} Offline`
+          }
           icon={Server}
-          accentColor={errorMT5 > 0 ? 'amber' : 'emerald'}
+          accentColor={errorMT5 > 0 || staleMT5 > 0 ? 'amber' : 'emerald'}
           isDemo={!isCloudMode}
           onClick={() => onNavigateTab('connections')}
         />
@@ -292,11 +324,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </span>
           <div className="flex items-baseline gap-2 pt-1">
             <span className="font-mono text-2xl font-bold text-slate-100">{users.length}</span>
-            <span className="text-xs text-slate-400">Total Users</span>
+            <span className="text-xs text-slate-400">Total Users ({admins.length} Admin)</span>
           </div>
-          <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>Active: <strong className="text-emerald-400">{totalActiveUsers}</strong></div>
-            <div>Suspended: <strong className="text-rose-400">{totalSuspendedUsers}</strong></div>
+          <div className="grid grid-cols-3 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
+            <div>Act: <strong className="text-emerald-400">{totalActiveUsers}</strong></div>
+            <div>Pend: <strong className="text-amber-400">{totalPendingUsers}</strong></div>
+            <div>Susp: <strong className="text-rose-400">{totalSuspendedUsers}</strong></div>
           </div>
         </div>
 
@@ -304,16 +337,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
             Subscription Lifecycle
           </span>
-          <div className="flex items-baseline gap-2 pt-1">
-            <span className="font-mono text-2xl font-bold text-slate-100">{subscriptions.length}</span>
-            <span className="text-xs text-slate-400">Subscriptions</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>Active: <strong className="text-emerald-400">{activeSubs}</strong></div>
-            <div>Expired: <strong className="text-amber-400">{expiredSubs}</strong></div>
-            <div>Cancelled: <strong className="text-slate-400">{cancelledSubs}</strong></div>
-            <div>Pending: <strong className="text-sky-400">{pendingSubs}</strong></div>
-          </div>
+          {isCloudMode ? (
+            <>
+              <div className="flex items-baseline gap-2 pt-1">
+                <span className="font-mono text-lg font-bold text-amber-300">Not Provisioned</span>
+              </div>
+              <div className="pt-1 text-[11px] border-t border-slate-800 text-slate-400">
+                Requires <code className="font-mono text-slate-300">subscription_plans</code> &amp;{' '}
+                <code className="font-mono text-slate-300">payments</code> tables in Supabase.
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-baseline gap-2 pt-1">
+                <span className="font-mono text-2xl font-bold text-slate-100">{subscriptions.length}</span>
+                <span className="text-xs text-slate-400">Subscriptions</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
+                <div>Active: <strong className="text-emerald-400">{activeSubs}</strong></div>
+                <div>Expired: <strong className="text-amber-400">{expiredSubs}</strong></div>
+                <div>Cancelled: <strong className="text-slate-400">{cancelledSubs}</strong></div>
+                <div>Pending: <strong className="text-sky-400">{pendingSubs}</strong></div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
@@ -322,10 +369,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </span>
           <div className="flex items-baseline gap-2 pt-1">
             <span className="font-mono text-2xl font-bold text-slate-100">{mt5Accounts.length}</span>
-            <span className="text-xs text-slate-400">Registered Accounts</span>
+            <span className="text-xs text-slate-400">Registered ({parentChildLinks.filter((l) => l.status === 'active').length} Links)</span>
           </div>
-          <div className="grid grid-cols-3 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>Conn: <strong className="text-emerald-400">{connectedMT5}</strong></div>
+          <div className="grid grid-cols-4 gap-1.5 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
+            <div>On: <strong className="text-emerald-400">{connectedMT5}</strong></div>
+            <div>Stale: <strong className="text-amber-400">{staleMT5}</strong></div>
             <div>Off: <strong className="text-slate-400">{disconnectedMT5}</strong></div>
             <div>Err: <strong className="text-rose-400">{errorMT5}</strong></div>
           </div>
@@ -400,8 +448,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                   <div className="text-right flex flex-col items-end gap-1">
                     <StatusBadge status={acc.connectionStatus} size="sm" />
-                    <span className="font-mono text-[10px] text-slate-500">
-                      {acc.connectionStatus === 'connected' ? `${acc.pingMs}ms` : 'Off'}
+                    <span className={`font-mono text-[10px] ${acc.isStale ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {acc.connectionStatus === 'connected'
+                        ? acc.isStale
+                          ? 'Stale Heartbeat'
+                          : `${acc.pingMs}ms`
+                        : 'Off'}
                     </span>
                   </div>
                 </div>
@@ -558,7 +610,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         isOpen={showRegisterModal}
         onClose={() => setShowRegisterModal(false)}
         defaultRole="parent"
-        onSuccess={() => {}}
+        onSuccess={() => {
+          void refreshCloudData();
+        }}
       />
     </div>
   );

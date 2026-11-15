@@ -191,36 +191,42 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </span>
                 </div>
                 <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
-                  {notifications.map((notif) => (
-                    <div
-                      key={notif.id}
-                      onClick={() => markNotificationRead(notif.id)}
-                      className={`cursor-pointer rounded-lg border p-2.5 transition-colors ${
-                        notif.read
-                          ? 'border-slate-800/60 bg-slate-950/40 opacity-70'
-                          : 'border-slate-700 bg-slate-800/80'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        {notif.type === 'error' ? (
-                          <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                        ) : notif.type === 'warning' ? (
-                          <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
-                        ) : notif.type === 'success' ? (
-                          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-                        ) : (
-                          <Activity className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
-                        )}
-                        <div className="flex-1">
-                          <p className="text-xs font-semibold text-white">{notif.title}</p>
-                          <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">{notif.message}</p>
-                          <span className="text-[10px] text-slate-500 font-mono mt-1 block">
-                            {new Date(notif.timestamp).toLocaleTimeString()}
-                          </span>
+                  {notifications.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-slate-500">
+                      No active system alerts.
+                    </div>
+                  ) : (
+                    notifications.map((notif) => (
+                      <div
+                        key={notif.id}
+                        onClick={() => markNotificationRead(notif.id)}
+                        className={`cursor-pointer rounded-lg border p-2.5 transition-colors ${
+                          notif.read
+                            ? 'border-slate-800/60 bg-slate-950/40 opacity-70'
+                            : 'border-slate-700 bg-slate-800/80'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {notif.type === 'error' ? (
+                            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                          ) : notif.type === 'warning' ? (
+                            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                          ) : notif.type === 'success' ? (
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                          ) : (
+                            <Activity className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
+                          )}
+                          <div className="flex-1">
+                            <p className="text-xs font-semibold text-white">{notif.title}</p>
+                            <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">{notif.message}</p>
+                            <span className="text-[10px] text-slate-500 font-mono mt-1 block">
+                              {new Date(notif.timestamp).toLocaleTimeString()}
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
             )}
@@ -280,8 +286,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </div>
                 )}
 
-                {/* Demo personas (or admin testing personas) */}
-                {(!isCloudMode || currentUser.role === 'admin') && (
+                {/* Demo personas (strictly Local Demo Mode only) */}
+                {!isCloudMode && (
                   <div className="space-y-1">
                     {users.map((u) => (
                       <button
@@ -342,16 +348,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                     </button>
                   )}
 
-                  <button
-                    onClick={() => {
-                      resetDemoData();
-                      setShowRoleMenu(false);
-                    }}
-                    className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-2 py-1.5 text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
-                  >
-                    <RefreshCw className="h-3 w-3" />
-                    Reset Demo State
-                  </button>
+                  {!isCloudMode && (
+                    <button
+                      onClick={() => {
+                        resetDemoData();
+                        setShowRoleMenu(false);
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-2 py-1.5 text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Reset Demo State
+                    </button>
+                  )}
                 </div>
               </div>
             )}

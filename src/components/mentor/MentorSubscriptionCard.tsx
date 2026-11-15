@@ -1,27 +1,92 @@
 import React from 'react';
 import {
-  CreditCard,
-  Calendar,
   CheckCircle2,
-  AlertTriangle,
-  Zap,
   Users,
   Clock,
-  ArrowUpRight
+  Database,
+  Layers
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
 
 export const MentorSubscriptionCard: React.FC = () => {
-  const { currentUser, subscriptions, subscriptionPlans, mentorProfiles, parentChildLinks } = useApp();
-
-  const profile = mentorProfiles.find((m) => m.userId === currentUser.id);
-  const sub = subscriptions.find((s) => s.mentorId === currentUser.id);
-  const currentPlan = subscriptionPlans.find((p) => p.id === sub?.planId) || subscriptionPlans[0];
+  const { isCloudMode } = useAuth();
+  const { currentUser, subscriptions, subscriptionPlans, parentChildLinks, mt5Accounts } = useApp();
 
   const activeFollowers = parentChildLinks.filter(
     (l) => l.mentorId === currentUser.id && l.status === 'active'
   ).length;
+  const parentAccount = mt5Accounts.find(
+    (a) => a.userId === currentUser.id && a.accountRole === 'parent'
+  );
+
+  const sub = isCloudMode ? null : subscriptions.find((s) => s.mentorId === currentUser.id);
+  const currentPlan = isCloudMode
+    ? null
+    : subscriptionPlans.find((p) => p.id === sub?.planId) || subscriptionPlans[0] || null;
+
+  if (isCloudMode || !currentPlan) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            Subscription Plan, Billing & Mentor Groups
+            <span className="rounded bg-amber-950/70 border border-amber-800/70 px-2 py-0.5 text-xs text-amber-300 font-mono">
+              Schema Unprovisioned
+            </span>
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">
+            Authoritative Supabase persistence status for mentor subscriptions, revenue tracking, and mentor groups.
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-amber-900/50 bg-slate-900/90 p-6 space-y-5 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="rounded-xl bg-amber-950/60 border border-amber-800/70 p-2.5 text-amber-400 shrink-0">
+              <Database className="h-5 w-5" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-white">
+                Billing & Mentor Groups Tables Not Yet Provisioned in Supabase
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                This deployment enforces real Supabase persistence with zero fabricated pricing or revenue data. The tables{' '}
+                <code className="text-cyan-300 font-mono">subscription_plans</code>,{' '}
+                <code className="text-cyan-300 font-mono">subscriptions</code>,{' '}
+                <code className="text-cyan-300 font-mono">payments</code>, and{' '}
+                <code className="text-cyan-300 font-mono">mentor_groups</code> are not yet created in the live schema.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5">
+              <span className="text-[10px] font-mono uppercase text-slate-500">Active Linked Students</span>
+              <p className="font-mono text-xl font-bold text-cyan-300 mt-1">{activeFollowers}</p>
+              <span className="text-[11px] text-slate-400">Stored in mentor_assignments</span>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5">
+              <span className="text-[10px] font-mono uppercase text-slate-500">Parent MT5 Node</span>
+              <p className="font-mono text-sm font-bold text-white mt-1">
+                {parentAccount ? `#${parentAccount.accountNumber}` : 'Not connected'}
+              </p>
+              <span className="text-[11px] text-slate-400">
+                {parentAccount ? parentAccount.broker : 'Register Master MT5 to broadcast'}
+              </span>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5">
+              <span className="text-[10px] font-mono uppercase text-slate-500">Billing & Quota Enforcement</span>
+              <p className="font-semibold text-amber-300 mt-1 flex items-center gap-1.5">
+                <Layers className="h-3.5 w-3.5" /> Pending Migration
+              </p>
+              <span className="text-[11px] text-slate-400">No simulated fees charged</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const maxCapacity = currentPlan.maxChildAccounts || 25;
   const capacityPercent = Math.min(100, Math.round((activeFollowers / maxCapacity) * 100));
@@ -79,7 +144,7 @@ export const MentorSubscriptionCard: React.FC = () => {
               />
             </div>
             <p className="text-[11px] text-slate-400">
-              {maxCapacity - activeFollowers} follower slots available for new copy-traders.
+              {Math.max(0, maxCapacity - activeFollowers)} follower slots available for new copy-traders.
             </p>
           </div>
 
@@ -134,3 +199,4 @@ export const MentorSubscriptionCard: React.FC = () => {
     </div>
   );
 };
+

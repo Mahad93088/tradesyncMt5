@@ -1,16 +1,14 @@
 import React from 'react';
-import {
-  AlertOctagon,
-  AlertTriangle,
-  RefreshCw,
-  Server,
-  ShieldAlert,
-  Clock,
-  Zap,
-  Info
-} from 'lucide-react';
+import { ShieldAlert } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StatusBadge } from '../common/StatusBadge';
+
+function formatTimestamp(ts?: string | null): string {
+  if (!ts) return '--';
+  const ms = Date.parse(ts);
+  if (!Number.isFinite(ms)) return '--';
+  return new Date(ms).toLocaleTimeString();
+}
 
 export const FailedTradesTable: React.FC = () => {
   const { currentUser, tradeMappings, mt5Accounts } = useApp();
@@ -101,7 +99,7 @@ export const FailedTradesTable: React.FC = () => {
 
                     {/* Timestamp */}
                     <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
-                      {new Date(map.openTime).toLocaleTimeString()}
+                      {formatTimestamp(map.openTime)}
                     </td>
                   </tr>
                 ))}

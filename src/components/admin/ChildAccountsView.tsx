@@ -35,7 +35,7 @@ import { useApp } from '../../context/AppContext';
 
 export const ChildAccountsView: React.FC = () => {
   const { isCloudMode } = useAuth();
-  const { mt5Accounts, users, parentChildLinks, toggleUserStatus, addAuditLog, currentUser } = useApp();
+  const { mt5Accounts, users, parentChildLinks, toggleUserStatus, addAuditLog, currentUser, refreshCloudData } = useApp();
 
   const [children, setChildren] = useState<ChildAccountItem[]>([]);
   const [parents, setParents] = useState<ParentAccountItem[]>([]);
@@ -102,17 +102,18 @@ export const ChildAccountsView: React.FC = () => {
     fetchAccounts();
   }, [mt5Accounts, users, parentChildLinks, isCloudMode]);
 
-  // Handle Suspend/Activate action
+  // Handle Suspend/Activate action via authoritative backend toggleUserStatus
   const handleToggleStatusConfirm = async () => {
     const child = confirmStatusModal.child;
     if (!child) return;
 
     try {
-      const res = await mt5AdminService.toggleTraderStatus(child.userId, child.traderStatus, isCloudMode);
-      
-      // Also update in AppContext local state
-      toggleUserStatus(child.userId);
+      const res = await toggleUserStatus(child.userId);
+      if (!res.success) {
+        throw new Error(res.message || 'Failed to update trader status.');
+      }
 
+      const nextStatus = child.traderStatus === 'active' ? 'suspended' : 'active';
       addAuditLog({
         actorId: currentUser.id,
         actorName: currentUser.fullName,
@@ -121,12 +122,12 @@ export const ChildAccountsView: React.FC = () => {
         targetResource: 'profiles / mt5_accounts',
         targetId: child.userId,
         result: 'success',
-        details: `Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${res.newStatus}.`,
+        details: `Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${nextStatus}.`,
       });
 
       await fetchAccounts();
 
-      setSuccessToast(`Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${res.newStatus}.`);
+      setSuccessToast(`Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${nextStatus}.`);
       setErrorToast(null);
       setTimeout(() => setSuccessToast(null), 5000);
     } catch (err: any) {
@@ -225,15 +226,17 @@ export const ChildAccountsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleSeedDemoAccounts}
-            disabled={isSeeding}
-            className="flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-xs font-bold text-slate-950 transition-colors shadow-sm disabled:opacity-50"
-            title="Provision standard demo master and follower accounts for testing"
-          >
-            <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
-            <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
-          </button>
+          {!isCloudMode && (
+            <button
+              onClick={handleSeedDemoAccounts}
+              disabled={isSeeding}
+              className="flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-xs font-bold text-slate-950 transition-colors shadow-sm disabled:opacity-50"
+              title="Provision standard demo master and follower accounts for testing"
+            >
+              <Sparkles className={`h-3.5 w-3.5 ${isSeeding ? 'animate-spin' : ''}`} />
+              <span>{isSeeding ? 'Provisioning...' : 'Seed Demo Accounts'}</span>
+            </button>
+          )}
 
           <button
             onClick={() => setIsRegisterModalOpen(true)}
@@ -243,16 +246,21 @@ export const ChildAccountsView: React.FC = () => {
             <span>Register Child (XM / Custom)</span>
           </button>
 
-          <button
-            onClick={() => setIsCreateDemoModalOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-300 border border-slate-700 shadow-sm transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Sandbox Demo</span>
-          </button>
+          {!isCloudMode && (
+            <button
+              onClick={() => setIsCreateDemoModalOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-300 border border-slate-700 shadow-sm transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Sandbox Demo</span>
+            </button>
+          )}
 
           <button
-            onClick={fetchAccounts}
+            onClick={() => {
+              void refreshCloudData();
+              void fetchAccounts();
+            }}
             disabled={isLoading}
             className="flex items-center gap-1.5 rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
           >
@@ -349,6 +357,7 @@ export const ChildAccountsView: React.FC = () => {
             >
               <option value="all">All Accounts</option>
               <option value="active">Active Only</option>
+              <option value="pending">Pending Approval</option>
               <option value="suspended">Suspended Only</option>
             </select>
           </div>
@@ -500,6 +509,10 @@ export const ChildAccountsView: React.FC = () => {
                       {child.isAssigned ? (
                         child.copyMode === 'fixed' ? (
                           <span className="text-slate-300 font-bold">{child.fixedLot.toFixed(2)} Lots Fixed</span>
+                        ) : child.copyMode === 'parent_lot' ? (
+                          <span className="text-indigo-400 font-bold">1:1 Parent Lot</span>
+                        ) : child.copyMode === 'equity_ratio' ? (
+                          <span className="text-teal-400 font-bold">Equity Ratio</span>
                         ) : (
                           <span className="text-cyan-400 font-bold">{child.lotMultiplier.toFixed(2)}x Multiplier</span>
                         )
@@ -666,6 +679,7 @@ export const ChildAccountsView: React.FC = () => {
         onClose={() => setIsRegisterModalOpen(false)}
         defaultRole="child"
         onSuccess={async () => {
+          await refreshCloudData();
           await fetchAccounts();
         }}
       />

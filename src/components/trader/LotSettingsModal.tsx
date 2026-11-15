@@ -1,18 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   SlidersHorizontal,
-  Check,
-  ShieldCheck,
   AlertTriangle,
-  HelpCircle,
-  TrendingUp,
-  Percent,
-  Layers,
-  Zap,
   Info
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { LotSettings, LotCopyMode, CustomLotType } from '../../types';
 
 interface LotSettingsModalProps {
@@ -21,29 +15,32 @@ interface LotSettingsModalProps {
   linkId: string;
 }
 
+const DEFAULT_SETTINGS: LotSettings = {
+  mode: 'custom_lot',
+  customType: 'multiplier',
+  fixedLot: 0.1,
+  multiplier: 0.5,
+  riskPercent: 1.5,
+  maxLotCap: 0.5,
+  minLotClamp: 0.01,
+  maxDrawdownProtectionPercent: 10.0,
+  copyPendingOrders: true,
+  syncSlTp: true,
+  slippageMaxPips: 3.0
+};
+
 export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
   isOpen,
   onClose,
   linkId
 }) => {
+  const { isCloudMode } = useAuth();
   const { parentChildLinks, updateLotSettings, mt5Accounts } = useApp();
 
   const link = parentChildLinks.find((l) => l.id === linkId);
   const childAccount = link ? mt5Accounts.find((a) => a.id === link.childAccountId) : null;
 
-  const initialSettings: LotSettings = link?.lotSettings || {
-    mode: 'custom_lot',
-    customType: 'multiplier',
-    fixedLot: 0.1,
-    multiplier: 0.5,
-    riskPercent: 1.5,
-    maxLotCap: 0.5,
-    minLotClamp: 0.01,
-    maxDrawdownProtectionPercent: 10.0,
-    copyPendingOrders: true,
-    syncSlTp: true,
-    slippageMaxPips: 3.0
-  };
+  const initialSettings: LotSettings = link?.lotSettings || DEFAULT_SETTINGS;
 
   const [mode, setMode] = useState<LotCopyMode>(initialSettings.mode);
   const [customType, setCustomType] = useState<CustomLotType>(initialSettings.customType);
@@ -56,6 +53,25 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
   const [syncSlTp, setSyncSlTp] = useState<boolean>(initialSettings.syncSlTp);
   const [copyPending, setCopyPending] = useState<boolean>(initialSettings.copyPendingOrders);
   const [slippagePips, setSlippagePips] = useState<number>(initialSettings.slippageMaxPips);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || !link) return;
+    const s = link.lotSettings || DEFAULT_SETTINGS;
+    setMode(s.mode);
+    setCustomType(s.customType);
+    setFixedLot(s.fixedLot);
+    setMultiplier(s.multiplier);
+    setRiskPercent(s.riskPercent);
+    setMaxLotCap(s.maxLotCap);
+    setMinLotClamp(s.minLotClamp);
+    setMaxDrawdown(s.maxDrawdownProtectionPercent);
+    setSyncSlTp(s.syncSlTp);
+    setCopyPending(s.copyPendingOrders);
+    setSlippagePips(s.slippageMaxPips);
+    setSaveError(null);
+  }, [isOpen, linkId, link]);
 
   if (!isOpen || !link) return null;
 
@@ -69,14 +85,19 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
       ? fixedLot
       : customType === 'multiplier'
       ? 1.0 * multiplier
+      : customType === 'equity_ratio'
+      ? 1.0 * Math.max(0.01, currentEquity / 10000)
       : (currentEquity * (riskPercent / 100)) / 500;
 
   const estimatedRequiredMargin = (sampleLot * 100000) / currentLeverage;
   const isMarginRiskHigh = estimatedRequiredMargin > (childAccount?.freeMargin || 5000) * 0.4;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    updateLotSettings(linkId, {
+    if (saving) return;
+    setSaving(true);
+    setSaveError(null);
+    const res = await updateLotSettings(linkId, {
       mode,
       customType,
       fixedLot,
@@ -89,6 +110,11 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
       syncSlTp,
       slippageMaxPips: slippagePips
     });
+    setSaving(false);
+    if (res && !res.success) {
+      setSaveError(res.message || 'Failed to save lot sizing settings.');
+      return;
+    }
     onClose();
   };
 
@@ -104,7 +130,9 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
               <h3 className="text-base font-bold text-white">
                 Lot Sizing & Risk Controls: {link.mentorName}
               </h3>
-              <p className="text-xs text-slate-400">Configure child deal volumes, slippage guard, and margin safety</p>
+              <p className="text-xs text-slate-400">
+                Configure child deal volumes, slippage guard, and margin safety
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white">
@@ -113,6 +141,22 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-5 text-xs">
+          {saveError && (
+            <div className="rounded-lg border border-rose-900/60 bg-rose-950/50 p-3 text-rose-300 flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+              <span>{saveError}</span>
+            </div>
+          )}
+
+          {isCloudMode && (
+            <div className="rounded-lg border border-sky-900/50 bg-sky-950/30 p-3 text-[11px] text-sky-200 flex items-start gap-2">
+              <Info className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>Supabase Persistence:</strong> Copy Mode (<code>parent_lot</code>, <code>multiplier</code>, <code>fixed</code>, <code>equity_ratio</code>, <code>risk_percent</code>), Multiplier Ratio, and Fixed Lot persist in <code>mentor_assignments</code>. Safety clamps below apply locally in-session pending schema extension.
+              </span>
+            </div>
+          )}
+
           {/* Mode Selector: Mode A vs Mode B */}
           <div>
             <label className="block text-slate-300 font-semibold mb-2">
@@ -155,7 +199,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  Configure custom volume algorithms: Multipliers (e.g. 0.5x), Fixed lots, or Risk % adjusted to your child balance.
+                  Configure custom volume algorithms: Multipliers (e.g. 0.5x), Fixed lots, Equity Ratio, or Risk %.
                 </p>
               </div>
             </div>
@@ -169,7 +213,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
               </span>
 
               {/* Sub-type picker */}
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <button
                   type="button"
                   onClick={() => setCustomType('multiplier')}
@@ -191,6 +235,17 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                   }`}
                 >
                   Fixed Lot Size
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomType('equity_ratio')}
+                  className={`rounded-lg border p-2 text-center transition-colors ${
+                    customType === 'equity_ratio'
+                      ? 'border-cyan-500 bg-cyan-950/80 text-cyan-300 font-bold'
+                      : 'border-slate-800 bg-slate-900 text-slate-400'
+                  }`}
+                >
+                  Equity Ratio
                 </button>
                 <button
                   type="button"
@@ -244,6 +299,15 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                     <span className="text-[10px] text-slate-400 mt-1 block">
                       Every order opens at exactly {fixedLot.toFixed(2)} lots, regardless of parent size.
                     </span>
+                  </div>
+                )}
+
+                {customType === 'equity_ratio' && (
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-slate-300 space-y-1">
+                    <div className="font-semibold text-white">Proportional Equity Scaling Active</div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Child trade volume scales automatically by <code>Parent Lots × (Child Equity / Parent Equity)</code> using real-time terminal balances.
+                    </p>
                   </div>
                 )}
 
@@ -371,9 +435,10 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
             </button>
             <button
               type="submit"
-              className="rounded-lg bg-cyan-600 hover:bg-cyan-500 px-4 py-2 font-semibold text-white transition-colors"
+              disabled={saving}
+              className="rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 px-4 py-2 font-semibold text-white transition-colors"
             >
-              Save Lot Settings
+              {saving ? 'Saving...' : 'Save Lot Settings'}
             </button>
           </div>
         </form>
@@ -381,3 +446,4 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
     </div>
   );
 };
+

@@ -1,35 +1,32 @@
 import React, { useState } from 'react';
 import {
-  ListOrdered,
   Search,
   CheckCircle2,
-  AlertTriangle,
-  Clock,
-  ArrowRight,
-  TrendingUp,
-  TrendingDown,
-  Layers,
   SlidersHorizontal,
   Zap,
   Users,
-  ShieldAlert
+  Terminal,
+  ListOrdered
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
 
 export const MentorActivityView: React.FC = () => {
+  const { isCloudMode } = useAuth();
   const { currentUser, tradeMappings, syncLogs, parentChildLinks, users } = useApp();
 
+  const [activeTab, setActiveTab] = useState<'mappings' | 'logs'>('mappings');
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterState, setFilterState] = useState<'all' | 'EXECUTED' | 'FAILED' | 'REJECTED'>('all');
+  const [filterState, setFilterState] = useState<'all' | 'EXECUTED' | 'CLOSED' | 'PENDING' | 'FAILED' | 'REJECTED'>('all');
 
   // Filter mappings strictly for this mentor (Security: mentor isolation)
   const myMappings = tradeMappings.filter((m) => m.mentorId === currentUser.id);
 
-  // Filter sync logs strictly for this mentor
-  const mySyncLogs = syncLogs.filter(
-    (l) => l.mentorName === currentUser.fullName || l.eventType.includes('PARENT')
-  );
+  // In Cloud Mode /api/v1/bridge/logs is already tenant-scoped; in Demo Mode filter by mentor
+  const mySyncLogs = isCloudMode
+    ? syncLogs
+    : syncLogs.filter((l) => l.mentorName === currentUser.fullName || l.eventType.includes('PARENT'));
 
   // Follower links for this mentor
   const myFollowers = parentChildLinks.filter((l) => l.mentorId === currentUser.id);
@@ -44,8 +41,12 @@ export const MentorActivityView: React.FC = () => {
     (l) => l.lotSettings.mode === 'custom_lot' && l.lotSettings.customType === 'multiplier'
   ).length;
   const riskPctCount = myFollowers.filter(
-    (l) => l.lotSettings.mode === 'custom_lot' && l.lotSettings.customType === 'risk_percent'
+    (l) =>
+      l.lotSettings.mode === 'custom_lot' &&
+      (l.lotSettings.customType === 'risk_percent' || l.lotSettings.customType === 'equity_ratio')
   ).length;
+
+  const executedOrClosed = myMappings.filter((m) => m.status === 'EXECUTED' || m.status === 'CLOSED');
 
   const filteredMappings = myMappings.filter((m) => {
     const trader = users.find((u) => u.id === m.traderId);
@@ -56,25 +57,64 @@ export const MentorActivityView: React.FC = () => {
         ? true
         : filterState === 'EXECUTED'
         ? m.status === 'EXECUTED'
+        : filterState === 'CLOSED'
+        ? m.status === 'CLOSED'
+        : filterState === 'PENDING'
+        ? m.status === 'PENDING'
         : filterState === 'FAILED'
         ? m.status === 'FAILED'
-        : m.status.startsWith('REJECTED') || m.status.includes('SLIPPAGE');
+        : m.status.startsWith('REJECTED') || m.status.includes('SLIPPAGE') || m.status === 'SKIPPED_LOT_LIMIT';
     return matchesSearch && matchesFilter;
+  });
+
+  const filteredLogs = mySyncLogs.filter((l) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      l.eventType.toLowerCase().includes(q) ||
+      l.details.toLowerCase().includes(q) ||
+      String(l.ticket || '').toLowerCase().includes(q)
+    );
   });
 
   return (
     <div className="space-y-6">
       {/* Top Header */}
-      <div>
-        <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-          Strategy Activity & Synchronization Logs
-          <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
-            {myMappings.length} Total Events
-          </span>
-        </h2>
-        <p className="text-xs text-slate-400 mt-0.5">
-          Real-time trade copying logs, ticket mapping history, and follower lot preference breakdowns.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+            Strategy Activity & Synchronization Logs
+            <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
+              {myMappings.length} Mappings
+            </span>
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Real-time trade copying logs, ticket mapping history, and follower lot preference breakdowns.
+          </p>
+        </div>
+
+        <div className="flex rounded-lg border border-slate-800 bg-slate-900 p-1 text-xs">
+          <button
+            type="button"
+            onClick={() => setActiveTab('mappings')}
+            className={`flex items-center gap-1.5 rounded px-3 py-1.5 font-medium transition-colors ${
+              activeTab === 'mappings' ? 'bg-slate-800 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <ListOrdered className="h-3.5 w-3.5" />
+            <span>Ticket Mappings ({myMappings.length})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('logs')}
+            className={`flex items-center gap-1.5 rounded px-3 py-1.5 font-medium transition-colors ${
+              activeTab === 'logs' ? 'bg-slate-800 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Terminal className="h-3.5 w-3.5" />
+            <span>Sync Logs ({mySyncLogs.length})</span>
+          </button>
+        </div>
       </div>
 
       {/* Copy Preference Summaries Grid */}
@@ -109,7 +149,7 @@ export const MentorActivityView: React.FC = () => {
             <span className="text-xs text-slate-500">Traders</span>
           </div>
           <p className="text-[11px] text-slate-400">
-            {fixedLotCount} Fixed • {multiplierCount} Multiplier • {riskPctCount} % Risk
+            {fixedLotCount} Fixed • {multiplierCount} Multiplier • {riskPctCount} Risk/Eq
           </p>
         </div>
 
@@ -123,16 +163,12 @@ export const MentorActivityView: React.FC = () => {
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-2xl font-bold text-emerald-400">
               {myMappings.length > 0
-                ? `${Math.round(
-                    (myMappings.filter((m) => m.status === 'EXECUTED').length /
-                      myMappings.length) *
-                      100
-                  )}%`
-                : '100%'}
+                ? `${Math.round((executedOrClosed.length / myMappings.length) * 100)}%`
+                : '--'}
             </span>
           </div>
           <p className="text-[11px] text-slate-400">
-            {myMappings.filter((m) => m.status === 'EXECUTED').length} of {myMappings.length} executed
+            {executedOrClosed.length} of {myMappings.length} executed
           </p>
         </div>
 
@@ -149,10 +185,12 @@ export const MentorActivityView: React.FC = () => {
                 ? `${Math.round(
                     myMappings.reduce((acc, m) => acc + m.latencyMs, 0) / myMappings.length
                   )}ms`
-                : '18ms'}
+                : '--'}
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 font-mono">FastAPI WebSocket pipe</p>
+          <p className="text-[11px] text-slate-400 font-mono">
+            {isCloudMode ? 'Supabase Cloud Bridge' : 'Demo Copy Simulator'}
+          </p>
         </div>
       </div>
 
@@ -162,116 +200,155 @@ export const MentorActivityView: React.FC = () => {
           <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
           <input
             type="text"
-            placeholder="Search ticket, symbol, or follower..."
+            placeholder={activeTab === 'mappings' ? 'Search ticket, symbol, or follower...' : 'Search sync event or ticket...'}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <span className="text-slate-400">Status:</span>
-          <select
-            value={filterState}
-            onChange={(e) => setFilterState(e.target.value as any)}
-            className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
-          >
-            <option value="all">All Operations</option>
-            <option value="EXECUTED">Executed Successfully</option>
-            <option value="FAILED">Execution Errors</option>
-            <option value="REJECTED">Risk / Slippage Rejects</option>
-          </select>
-        </div>
+        {activeTab === 'mappings' && (
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <span className="text-slate-400">Status:</span>
+            <select
+              value={filterState}
+              onChange={(e) => setFilterState(e.target.value as any)}
+              className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
+            >
+              <option value="all">All Operations</option>
+              <option value="EXECUTED">Executed</option>
+              <option value="CLOSED">Closed</option>
+              <option value="PENDING">Pending</option>
+              <option value="FAILED">Execution Errors</option>
+              <option value="REJECTED">Risk / Slippage Rejects</option>
+            </select>
+          </div>
+        )}
       </div>
 
-      {/* Synchronized Ticket Mappings Table */}
-      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              <tr>
-                <th className="px-4 py-3">Parent Ticket</th>
-                <th className="px-4 py-3">Follower Trader</th>
-                <th className="px-4 py-3">Child Ticket</th>
-                <th className="px-4 py-3">Symbol & Direction</th>
-                <th className="px-4 py-3">Lots (Parent → Child)</th>
-                <th className="px-4 py-3">Latency</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3 text-right">Timestamp</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/80">
-              {filteredMappings.map((map) => {
-                const trader = users.find((u) => u.id === map.traderId);
+      {activeTab === 'mappings' ? (
+        /* Synchronized Ticket Mappings Table */
+        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Parent Ticket</th>
+                  <th className="px-4 py-3">Follower Trader</th>
+                  <th className="px-4 py-3">Child Ticket</th>
+                  <th className="px-4 py-3">Symbol & Direction</th>
+                  <th className="px-4 py-3">Lots (Parent → Child)</th>
+                  <th className="px-4 py-3">Latency</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3 text-right">Timestamp</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80">
+                {filteredMappings.length > 0 ? (
+                  filteredMappings.map((map) => {
+                    const trader = users.find((u) => u.id === map.traderId);
+                    const link = parentChildLinks.find(
+                      (l) => l.traderId === map.traderId && l.mentorId === map.mentorId
+                    );
 
-                return (
-                  <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
-                    {/* Parent Ticket */}
-                    <td className="px-4 py-3 font-mono">
-                      <span className="font-semibold text-slate-200">#{map.parentTradeTicket}</span>
-                    </td>
-
-                    {/* Trader */}
-                    <td className="px-4 py-3 font-medium text-slate-200">
-                      {trader?.fullName || 'Follower'}
-                    </td>
-
-                    {/* Child Ticket */}
-                    <td className="px-4 py-3 font-mono">
-                      {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
-                        <span className="font-semibold text-emerald-400">#{map.childTradeTicket}</span>
-                      ) : (
-                        <span className="text-slate-500 italic text-[11px]">Rejected</span>
-                      )}
-                    </td>
-
-                    {/* Symbol & Direction */}
-                    <td className="px-4 py-3 font-mono">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-slate-200">{map.symbol}</span>
-                        <span
-                          className={`text-[10px] font-bold ${
-                            map.orderType.startsWith('BUY') ? 'text-emerald-400' : 'text-rose-400'
-                          }`}
-                        >
-                          {map.orderType}
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Lots */}
-                    <td className="px-4 py-3 font-mono text-[11px]">
-                      <span className="text-slate-400">{map.parentLots.toFixed(2)}L</span>
-                      <span className="text-slate-600 mx-1">→</span>
-                      <span className="text-sky-300 font-semibold">{map.childLots.toFixed(2)}L</span>
-                    </td>
-
-                    {/* Latency */}
-                    <td className="px-4 py-3 font-mono text-slate-300">
-                      {map.latencyMs}ms
-                    </td>
-
-                    {/* Status */}
-                    <td className="px-4 py-3">
-                      <StatusBadge status={map.status} size="sm" />
-                      {map.errorMessage && (
-                        <p className="text-[10px] text-rose-400 truncate max-w-xs mt-0.5" title={map.errorMessage}>
-                          {map.errorMessage}
-                        </p>
-                      )}
-                    </td>
-
-                    {/* Timestamp */}
-                    <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-400">
-                      {new Date(map.openTime).toLocaleTimeString()} UTC
+                    return (
+                      <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
+                        <td className="px-4 py-3 font-mono">
+                          <span className="font-semibold text-slate-200">#{map.parentTradeTicket}</span>
+                        </td>
+                        <td className="px-4 py-3 font-medium text-slate-200">
+                          {trader?.fullName || link?.traderName || 'Follower'}
+                        </td>
+                        <td className="px-4 py-3 font-mono">
+                          {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
+                            <span className="font-semibold text-emerald-400">#{map.childTradeTicket}</span>
+                          ) : (
+                            <span className="text-slate-500 italic text-[11px]">None</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-mono">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-200">{map.symbol}</span>
+                            <span
+                              className={`text-[10px] font-bold ${
+                                map.orderType.startsWith('BUY') ? 'text-emerald-400' : 'text-rose-400'
+                              }`}
+                            >
+                              {map.orderType}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[11px]">
+                          <span className="text-slate-400">{map.parentLots.toFixed(2)}L</span>
+                          <span className="text-slate-600 mx-1">→</span>
+                          <span className="text-sky-300 font-semibold">{map.childLots.toFixed(2)}L</span>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-300">{map.latencyMs}ms</td>
+                        <td className="px-4 py-3">
+                          <StatusBadge status={map.status} size="sm" />
+                          {map.errorMessage && (
+                            <p className="text-[10px] text-rose-400 truncate max-w-xs mt-0.5" title={map.errorMessage}>
+                              {map.errorMessage}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-400">
+                          {new Date(map.openTime).toLocaleTimeString()}
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-10 text-center text-slate-500 text-xs">
+                      No mirrored trade mappings recorded for your account yet.
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      ) : (
+        /* Scoped Synchronization Logs List */
+        <div className="rounded-xl border border-slate-800 bg-slate-900/90 divide-y divide-slate-800/80 shadow-sm">
+          {filteredLogs.length > 0 ? (
+            filteredLogs.map((log) => (
+              <div key={log.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                        log.level === 'error'
+                          ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                          : log.level === 'warn'
+                          ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                          : log.level === 'success'
+                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                          : 'bg-sky-950 text-sky-400 border border-sky-800'
+                      }`}
+                    >
+                      {log.eventType}
+                    </span>
+                    {log.ticket && (
+                      <span className="font-mono text-[10px] text-slate-400">Ticket #{log.ticket}</span>
+                    )}
+                  </div>
+                  <p className="text-slate-300 leading-relaxed">{log.details}</p>
+                </div>
+                <span className="font-mono text-[11px] text-slate-500 shrink-0">
+                  {new Date(log.timestamp).toLocaleString()}
+                </span>
+              </div>
+            ))
+          ) : (
+            <div className="p-10 text-center text-slate-500 text-xs">
+              No bridge synchronization logs recorded for your tenant yet.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
+

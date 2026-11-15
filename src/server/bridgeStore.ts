@@ -17,6 +17,21 @@ export interface RegisteredTerminal {
   isDurableDb?: boolean;
 }
 
+export interface TerminalHeartbeatTelemetry {
+  balance?: number;
+  equity?: number;
+  margin?: number;
+  freeMargin?: number;
+  pingMs?: number;
+  autoTradingEnabled?: boolean;
+}
+
+export interface AuthenticateTerminalOptions {
+  touchDb?: 'always' | 'throttled' | 'never';
+  throttleMs?: number;
+  telemetry?: TerminalHeartbeatTelemetry;
+}
+
 export type BridgeInstructionAction = 'OPEN' | 'CLOSE' | 'MODIFY';
 
 export interface BridgeInstruction {
@@ -67,6 +82,7 @@ export class BridgeStore {
   // L1 execution cache (ephemeral per-lambda instance)
   private terminalsByHash = new Map<string, RegisteredTerminal>();
   private accountToHash = new Map<string, string>();
+  private lastSyncWriteByAccountId = new Map<string, number>();
   private instructions = new Map<string, BridgeInstruction>();
   private idempotencyIndex = new Map<string, string>();
   private tradeMappings = new Map<string, TradeMapping>();
@@ -162,7 +178,8 @@ export class BridgeStore {
    */
   public async authenticateTerminal(
     token?: string,
-    supabaseClient?: SupabaseClient
+    supabaseClient?: SupabaseClient,
+    options?: AuthenticateTerminalOptions
   ): Promise<RegisteredTerminal | null> {
     if (!token) return null;
     const hash = BridgeStore.hashToken(token);
@@ -172,7 +189,7 @@ export class BridgeStore {
       try {
         const { data: acc, error } = await supabaseClient
           .from('mt5_accounts')
-          .select('id, user_id, account_role, account_number, broker_server, broker_name, connection_status')
+          .select('id, user_id, account_role, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms')
           .eq('terminal_token_hash', hash)
           .maybeSingle();
 
@@ -200,17 +217,64 @@ export class BridgeStore {
             return null;
           }
 
-          // Authoritative EA request received: flip connection_status to connected
-          const { error: statusUpdateErr } = await supabaseClient
-            .from('mt5_accounts')
-            .update({
-              connection_status: 'connected',
-              last_sync: new Date().toISOString(),
-            })
-            .eq('id', acc.id);
+          const nowMs = Date.now();
+          const nowIso = new Date(nowMs).toISOString();
+          const touchDbMode = options?.touchDb || 'always';
+          const throttleMs = options?.throttleMs ?? 15_000;
+          const telemetry = options?.telemetry;
+          const telemetryFields: Record<string, any> = {};
 
-          if (statusUpdateErr) {
-            console.warn('[BridgeStore] Failed to update terminal connection_status:', statusUpdateErr.message);
+          if (telemetry) {
+            if (typeof telemetry.balance === 'number' && Number.isFinite(telemetry.balance)) {
+              telemetryFields.balance = telemetry.balance;
+            }
+            if (typeof telemetry.equity === 'number' && Number.isFinite(telemetry.equity)) {
+              telemetryFields.equity = telemetry.equity;
+            }
+            if (typeof telemetry.margin === 'number' && Number.isFinite(telemetry.margin)) {
+              telemetryFields.margin = telemetry.margin;
+            }
+            if (typeof telemetry.freeMargin === 'number' && Number.isFinite(telemetry.freeMargin)) {
+              telemetryFields.free_margin = telemetry.freeMargin;
+            }
+            if (typeof telemetry.pingMs === 'number' && Number.isFinite(telemetry.pingMs) && telemetry.pingMs >= 0) {
+              telemetryFields.ping_ms = Math.round(telemetry.pingMs);
+            }
+            if (typeof telemetry.autoTradingEnabled === 'boolean') {
+              telemetryFields.auto_trading_enabled = telemetry.autoTradingEnabled;
+            }
+          }
+
+          const hasTelemetry = Object.keys(telemetryFields).length > 0;
+          const dbLastSyncMs = acc.last_sync ? Date.parse(acc.last_sync) : NaN;
+          const memLastSyncMs = this.lastSyncWriteByAccountId.get(acc.id) ?? 0;
+          const latestSyncMs = Math.max(Number.isFinite(dbLastSyncMs) ? dbLastSyncMs : 0, memLastSyncMs);
+          const isStaleWriteNeeded =
+            acc.connection_status !== 'connected' ||
+            acc.error_message != null ||
+            latestSyncMs === 0 ||
+            nowMs - latestSyncMs >= throttleMs;
+
+          const shouldWriteDb =
+            touchDbMode === 'always' ||
+            (touchDbMode === 'throttled' && (isStaleWriteNeeded || hasTelemetry));
+
+          if (shouldWriteDb) {
+            const { error: statusUpdateErr } = await supabaseClient
+              .from('mt5_accounts')
+              .update({
+                connection_status: 'connected',
+                last_sync: nowIso,
+                error_message: null,
+                ...telemetryFields,
+              })
+              .eq('id', acc.id);
+
+            if (statusUpdateErr) {
+              console.warn('[BridgeStore] Failed to update terminal connection_status:', statusUpdateErr.message);
+            } else {
+              this.lastSyncWriteByAccountId.set(acc.id, nowMs);
+            }
           }
 
           const registered: RegisteredTerminal = {
@@ -222,8 +286,8 @@ export class BridgeStore {
             accountNumber: acc.account_number,
             brokerServer: acc.broker_server,
             brokerName: acc.broker_name || 'MetaTrader 5',
-            lastSeenAt: new Date().toISOString(),
-            pingMs: 12,
+            lastSeenAt: nowIso,
+            pingMs: typeof telemetryFields.ping_ms === 'number' ? telemetryFields.ping_ms : (Number(acc.ping_ms) || 12),
             status: 'connected',
             isDurableDb: true,
           };
@@ -462,7 +526,7 @@ export class BridgeStore {
       });
     }
 
-    this.addSyncLog({
+    await this.addSyncLog({
       eventType: `BRIDGE_${params.action}_QUEUED`,
       level: 'info',
       details: `Instruction ${instructionId} (${params.action} ${params.symbol} ${params.lots} lots) queued for child account ${params.childAccountId}`,
@@ -578,7 +642,7 @@ export class BridgeStore {
               .eq('parent_trade_ticket', String(cand.parent_ticket))
               .eq('status', 'PENDING');
 
-            this.addSyncLog(
+            await this.addSyncLog(
               {
                 eventType: 'INSTRUCTION_MAX_RETRIES_EXCEEDED',
                 level: 'error',
@@ -748,7 +812,7 @@ export class BridgeStore {
       console.warn(
         `[BridgeStore] Security rejection: Child account ${childAccountId} attempted to ACK instruction ${ack.instructionId} owned by ${inst.childAccountId}`
       );
-      this.addSyncLog(
+      await this.addSyncLog(
         {
           eventType: 'SECURITY_ACK_OWNERSHIP_REJECTED',
           level: 'error',
@@ -866,7 +930,7 @@ export class BridgeStore {
       map.errorMessage = ack.brokerErrorMessage || undefined;
     }
 
-    this.addSyncLog({
+    await this.addSyncLog({
       eventType: `BROKER_ACK_${ack.status}`,
       level: ack.status === 'EXECUTED' ? 'success' : 'error',
       details: `Receiver reported ${ack.status} for parent ticket #${inst.parentTicket}${childTicketStr ? ` -> child #${childTicketStr}` : ''}. Latency: ${ack.executionLatencyMs ?? 0}ms. ${ack.brokerErrorMessage || ''}`,
@@ -985,26 +1049,32 @@ export class BridgeStore {
     return [];
   }
 
-  public addSyncLog(log: Omit<SyncLog, 'id' | 'timestamp'>, supabaseClient?: SupabaseClient) {
+  public async addSyncLog(
+    log: Omit<SyncLog, 'id' | 'timestamp'>,
+    supabaseClient?: SupabaseClient
+  ): Promise<boolean> {
     if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
-      Promise.resolve(
-        supabaseClient
+      try {
+        const res: any = await supabaseClient
           .from('bridge_sync_logs')
           .insert({
             event_type: log.eventType,
             level: log.level,
             details: log.details,
             ticket: log.ticket != null ? String(log.ticket) : null,
-            latency_ms: log.latencyMs || null,
+            latency_ms: log.latencyMs ?? null,
             created_at: new Date().toISOString(),
-          })
-      )
-        .then((res: any) => {
-          if (res?.error) {
-            console.warn('[BridgeStore] Sync log write error:', res.error.message);
-          }
-        })
-        .catch((err: any) => console.warn('[BridgeStore] Sync log write exception:', err.message));
+          });
+        if (res?.error) {
+          console.error('[BridgeStore] Sync log write error:', res.error.message);
+          return false;
+        }
+        return true;
+      } catch (err: any) {
+        console.error('[BridgeStore] Sync log write exception:', err.message);
+        return false;
+      }
     }
+    return false;
   }
 }

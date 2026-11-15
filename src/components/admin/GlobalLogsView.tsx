@@ -213,39 +213,47 @@ export const GlobalLogsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80">
-                {filteredAuditLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-850/40 transition-colors">
-                    <td className="px-4 py-3 font-mono text-[11px] text-slate-400 whitespace-nowrap">
-                      {new Date(log.timestamp).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="font-semibold text-slate-200">{log.actorName}</div>
-                      <span className="text-[10px] font-mono text-slate-500 uppercase">{log.actorRole}</span>
-                    </td>
-                    <td className="px-4 py-3 font-mono font-semibold text-sky-400">
-                      {log.action}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-[11px] text-slate-300">
-                      {log.targetResource} {log.targetId ? `(#${log.targetId.slice(-6)})` : ''}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase font-mono ${
-                          log.result === 'success'
-                            ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-800/40'
-                            : log.result === 'failure'
-                            ? 'bg-rose-950/50 text-rose-300 border border-rose-800/40'
-                            : 'bg-amber-950/50 text-amber-300 border border-amber-800/40'
-                        }`}
-                      >
-                        {log.result}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-300 max-w-sm leading-normal">
-                      {log.details}
+                {filteredAuditLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-slate-500">
+                      No administrative or assignment audit entries found for the current filters.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredAuditLogs.map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-850/40 transition-colors">
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-400 whitespace-nowrap">
+                        {new Date(log.timestamp).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="font-semibold text-slate-200">{log.actorName}</div>
+                        <span className="text-[10px] font-mono text-slate-500 uppercase">{log.actorRole}</span>
+                      </td>
+                      <td className="px-4 py-3 font-mono font-semibold text-sky-400">
+                        {log.action}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-300">
+                        {log.targetResource} {log.targetId ? `(#${log.targetId.slice(-6)})` : ''}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase font-mono ${
+                            log.result === 'success'
+                              ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-800/40'
+                              : log.result === 'failure'
+                              ? 'bg-rose-950/50 text-rose-300 border border-rose-800/40'
+                              : 'bg-amber-950/50 text-amber-300 border border-amber-800/40'
+                          }`}
+                        >
+                          {log.result}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-300 max-w-sm leading-normal">
+                        {log.details}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -269,59 +277,67 @@ export const GlobalLogsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80">
-                {filteredMappings.map((map) => {
-                  const mentor = users.find((u) => u.id === map.mentorId);
-                  const trader = users.find((u) => u.id === map.traderId);
+                {filteredMappings.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center text-slate-500">
+                      No trade copy mappings found for the current filter.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredMappings.map((map) => {
+                    const mentor = users.find((u) => u.id === map.mentorId);
+                    const trader = users.find((u) => u.id === map.traderId);
 
-                  return (
-                    <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
-                      <td className="px-4 py-3 font-mono">
-                        <div className="font-semibold text-slate-200">#{map.parentTradeTicket}</div>
-                        <span className="text-[10px] text-slate-500 font-sans">
-                          {mentor?.fullName || 'Verified Mentor'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 font-mono">
-                        {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
-                          <div className="font-semibold text-emerald-400">#{map.childTradeTicket}</div>
-                        ) : (
-                          <span className="text-slate-500 italic text-[11px]">
-                            {map.status === 'PENDING' ? 'Pending' : 'Rejected'}
+                    return (
+                      <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
+                        <td className="px-4 py-3 font-mono">
+                          <div className="font-semibold text-slate-200">#{map.parentTradeTicket}</div>
+                          <span className="text-[10px] text-slate-500 font-sans">
+                            {mentor?.fullName || 'Verified Mentor'}
                           </span>
-                        )}
-                        <span className="text-[10px] text-slate-500 font-sans">
-                          {trader?.fullName || 'Verified Trader'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5 font-mono">
-                          <span className="font-semibold text-slate-200">{map.symbol}</span>
-                          <span className={`text-[10px] font-bold ${map.orderType.startsWith('BUY') ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {map.orderType}
+                        </td>
+                        <td className="px-4 py-3 font-mono">
+                          {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
+                            <div className="font-semibold text-emerald-400">#{map.childTradeTicket}</div>
+                          ) : (
+                            <span className="text-slate-500 italic text-[11px]">
+                              {map.status === 'PENDING' ? 'Pending' : 'Rejected'}
+                            </span>
+                          )}
+                          <span className="text-[10px] text-slate-500 font-sans">
+                            {trader?.fullName || 'Verified Trader'}
                           </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-[11px]">
-                        <div>P: <strong className="text-slate-200">{map.parentLots.toFixed(2)}L</strong></div>
-                        <div>C: <strong className="text-sky-300">{map.childLots.toFixed(2)}L</strong></div>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-slate-300">
-                        {map.latencyMs}ms
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge status={map.status} size="sm" />
-                        {map.errorMessage && (
-                          <p className="text-[10px] text-rose-400 truncate max-w-xs mt-0.5" title={map.errorMessage}>
-                            {map.errorMessage}
-                          </p>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-400">
-                        {new Date(map.openTime).toLocaleTimeString()}
-                      </td>
-                    </tr>
-                  );
-                })}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <span className="font-semibold text-slate-200">{map.symbol}</span>
+                            <span className={`text-[10px] font-bold ${map.orderType.startsWith('BUY') ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {map.orderType}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[11px]">
+                          <div>P: <strong className="text-slate-200">{map.parentLots.toFixed(2)}L</strong></div>
+                          <div>C: <strong className="text-sky-300">{map.childLots.toFixed(2)}L</strong></div>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-300">
+                          {map.latencyMs}ms
+                        </td>
+                        <td className="px-4 py-3">
+                          <StatusBadge status={map.status} size="sm" />
+                          {map.errorMessage && (
+                            <p className="text-[10px] text-rose-400 truncate max-w-xs mt-0.5" title={map.errorMessage}>
+                              {map.errorMessage}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-400">
+                          {new Date(map.openTime).toLocaleTimeString()}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -331,45 +347,51 @@ export const GlobalLogsView: React.FC = () => {
       {/* TAB 3: Engine Sync Logs */}
       {activeSubTab === 'engine' && (
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm divide-y divide-slate-800/80">
-          {filteredSyncLogs.map((log) => (
-            <div key={log.id} className="p-3.5 hover:bg-slate-850/40 transition-colors flex items-start gap-3 text-xs">
-              <div className="mt-0.5 shrink-0">
-                {log.level === 'success' ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                ) : log.level === 'error' ? (
-                  <AlertTriangle className="h-4 w-4 text-rose-400" />
-                ) : log.level === 'warn' ? (
-                  <AlertTriangle className="h-4 w-4 text-amber-400" />
-                ) : (
-                  <Clock className="h-4 w-4 text-sky-400" />
-                )}
-              </div>
-
-              <div className="flex-1 space-y-1">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 font-mono">
-                    <span className="font-semibold text-slate-200">{log.eventType}</span>
-                    {log.ticket && (
-                      <span className="rounded bg-slate-800 px-1 py-0.2 text-[10px] text-slate-400">
-                        #{log.ticket}
-                      </span>
-                    )}
-                  </div>
-                  <span className="font-mono text-[10px] text-slate-500">
-                    {new Date(log.timestamp).toLocaleTimeString()} UTC
-                  </span>
-                </div>
-
-                <p className="text-slate-300 leading-normal">{log.details}</p>
-
-                <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
-                  {log.mentorName && <span>Mentor: {log.mentorName}</span>}
-                  {log.traderName && <span>Trader: {log.traderName}</span>}
-                  {log.latencyMs !== undefined && <span>Latency: {log.latencyMs}ms</span>}
-                </div>
-              </div>
+          {filteredSyncLogs.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-500">
+              No bridge synchronization logs recorded matching your filters.
             </div>
-          ))}
+          ) : (
+            filteredSyncLogs.map((log) => (
+              <div key={log.id} className="p-3.5 hover:bg-slate-850/40 transition-colors flex items-start gap-3 text-xs">
+                <div className="mt-0.5 shrink-0">
+                  {log.level === 'success' ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                  ) : log.level === 'error' ? (
+                    <AlertTriangle className="h-4 w-4 text-rose-400" />
+                  ) : log.level === 'warn' ? (
+                    <AlertTriangle className="h-4 w-4 text-amber-400" />
+                  ) : (
+                    <Clock className="h-4 w-4 text-sky-400" />
+                  )}
+                </div>
+
+                <div className="flex-1 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 font-mono">
+                      <span className="font-semibold text-slate-200">{log.eventType}</span>
+                      {log.ticket && (
+                        <span className="rounded bg-slate-800 px-1 py-0.2 text-[10px] text-slate-400">
+                          #{log.ticket}
+                        </span>
+                      )}
+                    </div>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      {new Date(log.timestamp).toLocaleTimeString()} UTC
+                    </span>
+                  </div>
+
+                  <p className="text-slate-300 leading-normal">{log.details}</p>
+
+                  <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
+                    {log.mentorName && <span>Mentor: {log.mentorName}</span>}
+                    {log.traderName && <span>Trader: {log.traderName}</span>}
+                    {log.latencyMs !== undefined && <span>Latency: {log.latencyMs}ms</span>}
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>

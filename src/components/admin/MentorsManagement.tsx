@@ -22,7 +22,6 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
-import { mt5AdminService } from '../../services/mt5AdminService';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { User, MentorProfile } from '../../types';
@@ -45,17 +44,18 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     parentChildLinks,
     toggleUserStatus,
     editMentorProfile,
-    renewOrChangeSubscription
+    renewOrChangeSubscription,
+    refreshCloudData
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'suspended'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'pending' | 'suspended'>('all');
 
-  // Confirmation Modal state for suspend / reactivate
+  // Confirmation Modal state for approve / suspend / reactivate
   const [confirmModalData, setConfirmModalData] = useState<{
     isOpen: boolean;
     mentor: User | null;
-    action: 'suspend' | 'reactivate';
+    action: 'approve' | 'suspend' | 'reactivate';
   }>({
     isOpen: false,
     mentor: null,
@@ -65,7 +65,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   // Details Modal state
   const [detailsMentor, setDetailsMentor] = useState<User | null>(null);
 
-  // Edit Mentor Modal state
+  // Edit Mentor Modal state (Local Demo only)
   const [editingMentor, setEditingMentor] = useState<{
     user: User;
     profile: MentorProfile;
@@ -79,53 +79,36 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   const [editMonthlyFee, setEditMonthlyFee] = useState(149);
   const [editMaxFollowers, setEditMaxFollowers] = useState(25);
 
-  // Edit Subscription Modal State
+  // Edit Subscription Modal State (Local Demo only)
   const [editingSubMentorId, setEditingSubMentorId] = useState<string | null>(null);
   const [editPlanId, setEditPlanId] = useState<string>('');
   const [editBillingCycle, setEditBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
 
   const { isCloudMode } = useAuth();
-  const [cloudMentors, setCloudMentors] = useState<User[]>([]);
   const [isLoadingCloud, setIsLoadingCloud] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   const loadMentors = useCallback(async () => {
     if (!isCloudMode) return;
     setIsLoadingCloud(true);
     setCloudError(null);
     try {
-      const verified = await mt5AdminService.getVerifiedMentors(true, users);
-      const mapped: User[] = verified.map((v) => ({
-        id: v.id,
-        fullName: v.fullName,
-        email: v.email,
-        role: 'mentor',
-        status: v.status,
-        avatarUrl: v.avatarUrl,
-        createdAt: new Date().toISOString(),
-      }));
-      setCloudMentors(mapped);
+      await refreshCloudData();
     } catch (err: any) {
-      console.error('[MentorsManagement] Error querying verified mentors:', err);
-      setCloudError(err?.message || 'Failed to query active mentors from database.');
+      setCloudError(err?.message || 'Failed to refresh mentors from backend.');
     } finally {
       setIsLoadingCloud(false);
     }
-  }, [isCloudMode, users]);
-
-  // Initial load
-  useEffect(() => {
-    if (isCloudMode) {
-      loadMentors();
-    }
-  }, [isCloudMode, loadMentors]);
+  }, [isCloudMode, refreshCloudData]);
 
   // Global listener for mentor promotions and user approvals across modal workflows
   useEffect(() => {
     const handlePromoted = () => {
-      loadMentors();
+      void loadMentors();
     };
     window.addEventListener('tradesync:mentor-promoted', handlePromoted);
+    window.removeEventListener('tradesync:user-approved', handlePromoted);
     window.addEventListener('tradesync:user-approved', handlePromoted);
     return () => {
       window.removeEventListener('tradesync:mentor-promoted', handlePromoted);
@@ -137,14 +120,12 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   const prevCreateOpenRef = useRef(isCreateOpen);
   useEffect(() => {
     if (prevCreateOpenRef.current && !isCreateOpen && isCloudMode) {
-      loadMentors();
+      void loadMentors();
     }
     prevCreateOpenRef.current = isCreateOpen;
   }, [isCreateOpen, isCloudMode, loadMentors]);
 
-  const effectiveMentors = isCloudMode
-    ? cloudMentors
-    : users.filter((u) => u.role === 'mentor');
+  const effectiveMentors = users.filter((u) => u.role === 'mentor');
 
   const filteredMentors = effectiveMentors.filter((m) => {
     const matchesSearch =
@@ -153,6 +134,23 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     const matchesStatus = filterStatus === 'all' || m.status === filterStatus;
     return matchesSearch && matchesStatus;
   });
+
+  const handleConfirmStatusChange = async () => {
+    if (!confirmModalData.mentor) return;
+    const target = confirmModalData.mentor;
+    const actionLabel = confirmModalData.action;
+    setCloudError(null);
+    setActionSuccess(null);
+    const res = await toggleUserStatus(target.id);
+    if (!res.success) {
+      setCloudError(res.message || `Failed to ${actionLabel} mentor account.`);
+    } else {
+      setActionSuccess(
+        res.message ||
+          `${target.fullName} status updated (${actionLabel === 'suspend' ? 'suspended' : 'active'}).`
+      );
+    }
+  };
 
   const handleOpenEdit = (mentorUser: User) => {
     const profile: MentorProfile = mentorProfiles.find((p) => p.userId === mentorUser.id) || {
@@ -301,10 +299,25 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
             <span>{cloudError}</span>
           </div>
           <button
-            onClick={() => loadMentors()}
+            onClick={() => void loadMentors()}
             className="text-xs font-semibold underline hover:text-white"
           >
             Retry
+          </button>
+        </div>
+      )}
+
+      {actionSuccess && (
+        <div className="rounded-xl border border-emerald-800/60 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            <span>{actionSuccess}</span>
+          </div>
+          <button
+            onClick={() => setActionSuccess(null)}
+            className="text-slate-400 hover:text-white"
+          >
+            <X className="h-4 w-4" />
           </button>
         </div>
       )}
@@ -331,6 +344,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
           >
             <option value="all">All Mentors</option>
             <option value="active">Active Only</option>
+            <option value="pending">Pending Approval</option>
             <option value="suspended">Suspended Only</option>
           </select>
         </div>
@@ -342,10 +356,10 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
           <table className="w-full text-left text-xs">
             <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
               <tr>
-                <th className="px-4 py-3">Mentor & Strategy</th>
+                <th className="px-4 py-3">Mentor & Invite Code</th>
                 <th className="px-4 py-3">Parent Terminal</th>
                 <th className="px-4 py-3">Followers</th>
-                <th className="px-4 py-3">Subscription</th>
+                <th className="px-4 py-3">{isCloudMode ? 'Billing / Plan' : 'Subscription'}</th>
                 <th className="px-4 py-3">Created Date</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3 text-right">Actions</th>
@@ -361,10 +375,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                 const followersCount = parentChildLinks.filter(
                   (l) => l.mentorId === mentor.id && l.status === 'active'
                 ).length;
+                const deterministicInvite = `TS-${mentor.id.slice(0, 8).toUpperCase()}`;
 
                 return (
                   <tr key={mentor.id} className="hover:bg-slate-850/40 transition-colors">
-                    {/* Mentor & Strategy */}
+                    {/* Mentor & Strategy / Invite */}
                     <td className="px-4 py-3.5">
                       <div className="flex items-center gap-3">
                         <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-800 shrink-0 flex items-center justify-center font-bold text-xs text-slate-300">
@@ -381,8 +396,10 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                               <span className="text-[10px] font-mono text-slate-400">@{mentor.username}</span>
                             )}
                           </div>
-                          <p className="text-[11px] text-sky-400 font-medium">
-                            {profile?.strategyName || 'Strategy Alpha'}
+                          <p className="text-[11px] text-sky-400 font-mono">
+                            {isCloudMode
+                              ? `Invite: ${deterministicInvite}`
+                              : profile?.strategyName || 'Strategy Alpha'}
                           </p>
                           <span className="text-[10px] text-slate-500">{mentor.email}</span>
                         </div>
@@ -411,19 +428,27 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                     {/* Followers Count */}
                     <td className="px-4 py-3.5 font-mono">
                       <span className="font-semibold text-slate-200">{followersCount}</span>
-                      <span className="text-slate-500 text-[10px]"> / {profile?.maxFollowers || 25}</span>
+                      {!isCloudMode && (
+                        <span className="text-slate-500 text-[10px]"> / {profile?.maxFollowers || 25}</span>
+                      )}
                     </td>
 
                     {/* Subscription */}
                     <td className="px-4 py-3.5">
-                      <div className="space-y-0.5">
-                        <span className="text-slate-300 font-medium text-[11px]">
-                          {sub?.planName || 'Standard Tier'}
+                      {isCloudMode ? (
+                        <span className="text-[11px] font-mono text-slate-500">
+                          Billing unprovisioned
                         </span>
-                        <div>
-                          <StatusBadge status={sub?.status || 'active'} size="sm" />
+                      ) : (
+                        <div className="space-y-0.5">
+                          <span className="text-slate-300 font-medium text-[11px]">
+                            {sub?.planName || 'Standard Tier'}
+                          </span>
+                          <div>
+                            <StatusBadge status={sub?.status || 'active'} size="sm" />
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </td>
 
                     {/* Creation Date */}
@@ -448,34 +473,42 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                           <Eye className="h-4 w-4" />
                         </button>
 
-                        {/* Edit Profile */}
-                        <button
-                          onClick={() => handleOpenEdit(mentor)}
-                          className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
-                          title="Edit mentor profile"
-                        >
-                          <Edit2 className="h-4 w-4" />
-                        </button>
+                        {!isCloudMode && (
+                          <>
+                            <button
+                              onClick={() => handleOpenEdit(mentor)}
+                              className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+                              title="Edit mentor profile (Demo)"
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </button>
 
-                        {/* Subscription */}
+                            <button
+                              onClick={() => {
+                                setEditingSubMentorId(mentor.id);
+                                setEditPlanId(sub?.planId || subscriptionPlans[0]?.id || '');
+                                setEditBillingCycle(sub?.billingCycle || 'monthly');
+                              }}
+                              className="rounded px-2 py-1 text-[11px] font-medium border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-750 transition-colors"
+                            >
+                              Plan
+                            </button>
+                          </>
+                        )}
+
+                        {/* Approve / Suspend / Reactivate with Confirmation */}
                         <button
                           onClick={() => {
-                            setEditingSubMentorId(mentor.id);
-                            setEditPlanId(sub?.planId || subscriptionPlans[0].id);
-                            setEditBillingCycle(sub?.billingCycle || 'monthly');
-                          }}
-                          className="rounded px-2 py-1 text-[11px] font-medium border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-750 transition-colors"
-                        >
-                          Plan
-                        </button>
-
-                        {/* Suspend / Reactivate with Confirmation */}
-                        <button
-                          onClick={() => {
+                            const action: 'approve' | 'suspend' | 'reactivate' =
+                              mentor.status === 'active'
+                                ? 'suspend'
+                                : mentor.status === 'pending'
+                                ? 'approve'
+                                : 'reactivate';
                             setConfirmModalData({
                               isOpen: true,
                               mentor,
-                              action: mentor.status === 'active' ? 'suspend' : 'reactivate'
+                              action
                             });
                           }}
                           className={`rounded px-2 py-1 text-[11px] font-medium border transition-colors ${
@@ -484,7 +517,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                               : 'border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50'
                           }`}
                         >
-                          {mentor.status === 'active' ? 'Suspend' : 'Reactivate'}
+                          {mentor.status === 'active'
+                            ? 'Suspend'
+                            : mentor.status === 'pending'
+                            ? 'Approve'
+                            : 'Reactivate'}
                         </button>
                       </div>
                     </td>
@@ -573,28 +610,42 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
               {/* Grid info */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2.5">
-                  <span className="text-slate-500 text-[10px] uppercase font-mono">Win Rate</span>
-                  <p className="font-mono font-bold text-emerald-400 text-sm mt-0.5">{profile?.winRate}%</p>
+                  <span className="text-slate-500 text-[10px] uppercase font-mono">Invite Code</span>
+                  <p className="font-mono font-bold text-sky-400 text-sm mt-0.5">
+                    {isCloudMode
+                      ? `TS-${detailsMentor.id.slice(0, 8).toUpperCase()}`
+                      : profile?.inviteCode || `TS-${detailsMentor.id.slice(0, 8).toUpperCase()}`}
+                  </p>
                 </div>
                 <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2.5">
-                  <span className="text-slate-500 text-[10px] uppercase font-mono">Profit Factor</span>
-                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">{profile?.profitFactor}</p>
+                  <span className="text-slate-500 text-[10px] uppercase font-mono">Win Rate / PF</span>
+                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">
+                    {profile ? `${profile.winRate}% / ${profile.profitFactor}` : 'Not tracked'}
+                  </p>
                 </div>
                 <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2.5">
-                  <span className="text-slate-500 text-[10px] uppercase font-mono">Trader Fee</span>
-                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">${profile?.monthlyFee}/mo</p>
+                  <span className="text-slate-500 text-[10px] uppercase font-mono">Billing Fee</span>
+                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">
+                    {profile ? `$${profile.monthlyFee}/mo` : 'Unprovisioned'}
+                  </p>
                 </div>
                 <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2.5">
                   <span className="text-slate-500 text-[10px] uppercase font-mono">Followers</span>
-                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">{followers.length} / {profile?.maxFollowers}</p>
+                  <p className="font-mono font-bold text-slate-200 text-sm mt-0.5">
+                    {followers.length}
+                    {profile ? ` / ${profile.maxFollowers}` : ' active'}
+                  </p>
                 </div>
               </div>
 
               {/* Description */}
               <div className="text-xs space-y-1">
-                <span className="text-slate-400 font-medium">Strategy Methodology</span>
+                <span className="text-slate-400 font-medium">Strategy Profile</span>
                 <p className="rounded-lg bg-slate-950/60 border border-slate-800 p-3 text-slate-300 leading-relaxed">
-                  {profile?.description || 'No detailed methodology specified.'}
+                  {profile?.description ||
+                    (isCloudMode
+                      ? 'Verified Cloud mentor profile backed by Supabase public.profiles and Parent MT5 bridge telemetry.'
+                      : 'No detailed methodology specified.')}
                 </p>
               </div>
 
@@ -827,22 +878,34 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
         </div>
       )}
 
-      {/* Confirmation Dialog for Suspend / Reactivate */}
+      {/* Confirmation Dialog for Approve / Suspend / Reactivate */}
       <ConfirmationModal
         isOpen={confirmModalData.isOpen}
         onClose={() => setConfirmModalData({ isOpen: false, mentor: null, action: 'suspend' })}
         onConfirm={() => {
-          if (confirmModalData.mentor) {
-            toggleUserStatus(confirmModalData.mentor.id);
-          }
+          void handleConfirmStatusChange();
         }}
-        title={confirmModalData.action === 'suspend' ? 'Suspend Mentor Account' : 'Reactivate Mentor Account'}
+        title={
+          confirmModalData.action === 'suspend'
+            ? 'Suspend Mentor Account'
+            : confirmModalData.action === 'approve'
+            ? 'Approve Mentor Account'
+            : 'Reactivate Mentor Account'
+        }
         description={
           confirmModalData.action === 'suspend'
             ? `Are you sure you want to suspend ${confirmModalData.mentor?.fullName}? Active follower copy links will be paused immediately to prevent unsanctioned trade execution.`
+            : confirmModalData.action === 'approve'
+            ? `Approve ${confirmModalData.mentor?.fullName} as an active mentor? They will gain access to Parent MT5 registration and follower linking.`
             : `Are you sure you want to reactivate ${confirmModalData.mentor?.fullName}? Their follower copy streams can resume operation.`
         }
-        confirmLabel={confirmModalData.action === 'suspend' ? 'Suspend Account' : 'Reactivate Account'}
+        confirmLabel={
+          confirmModalData.action === 'suspend'
+            ? 'Suspend Account'
+            : confirmModalData.action === 'approve'
+            ? 'Approve Mentor'
+            : 'Reactivate Account'
+        }
         variant={confirmModalData.action === 'suspend' ? 'danger' : 'primary'}
       />
     </div>

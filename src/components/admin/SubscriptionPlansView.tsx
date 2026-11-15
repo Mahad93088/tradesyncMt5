@@ -17,11 +17,13 @@ import {
   Ban
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { SubscriptionPlan, Subscription } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 
 export const SubscriptionPlansView: React.FC = () => {
+  const { isCloudMode } = useAuth();
   const {
     subscriptionPlans,
     subscriptions,
@@ -119,6 +121,64 @@ export const SubscriptionPlansView: React.FC = () => {
     if (subStatusFilter === 'all') return true;
     return s.status === subStatusFilter;
   });
+
+  if (isCloudMode) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+              Subscriptions, Billing &amp; Plan Limits
+              <span className="rounded bg-amber-950/80 border border-amber-800 px-2 py-0.5 text-xs text-amber-300 font-mono">
+                Schema Unprovisioned
+              </span>
+            </h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Verified backend readiness check for SaaS plans, subscriber billing, renewals, failed payments, and per-plan child limits.
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-amber-700/60 bg-amber-950/20 p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-2 text-xs text-amber-100">
+              <h3 className="text-sm font-bold text-amber-200">
+                Billing, Subscriptions &amp; Payments Tables Not Yet Provisioned in Supabase
+              </h3>
+              <p className="text-amber-200/80 leading-relaxed">
+                To prevent misleading or fabricated pricing, MRR, failed-payment, or trial metrics in Cloud Mode, plan creation and payment tracking remain disabled until dedicated database tables and webhook handlers are deployed.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 text-xs">
+            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
+              <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px] font-mono">
+                Unprovisioned Billing Schema
+              </span>
+              <ul className="space-y-1.5 text-slate-400 font-mono text-[11px]">
+                <li>• subscription_plans (pricing, trial days, max_child_accounts)</li>
+                <li>• subscriptions (mentor/trader status, renewal dates)</li>
+                <li>• payments / invoices (Stripe/PayPal webhooks, failed charges)</li>
+              </ul>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
+              <span className="font-semibold text-emerald-300 uppercase tracking-wider text-[11px] font-mono">
+                Enforced Today via Cloud Bridge
+              </span>
+              <ul className="space-y-1.5 text-slate-300 text-[11px]">
+                <li>• Profile role &amp; active status enforcement via PostgreSQL RLS</li>
+                <li>• Automatic copy link pause on Admin account suspension</li>
+                <li>• Interactive sandbox plan builder available in Local Demo Mode</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

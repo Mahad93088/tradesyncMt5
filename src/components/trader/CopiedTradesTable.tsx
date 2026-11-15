@@ -1,17 +1,9 @@
 import React, { useState } from 'react';
-import {
-  ListOrdered,
-  Search,
-  CheckCircle2,
-  TrendingUp,
-  TrendingDown,
-  Clock,
-  Zap,
-  ArrowRight
-} from 'lucide-react';
+import { Search } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
+import { formatTradeProfitDisplay } from '../common/dashboardHelpers';
 
 function formatTime(timestamp?: string | null): string {
   if (!timestamp) return '--';
@@ -41,7 +33,8 @@ export const CopiedTradesTable: React.FC = () => {
   const useCloudMappingsView = isCloudMode || (childTrades.length === 0 && traderMappings.length > 0);
 
   const filteredTrades = childTrades.filter((t) => {
-    const matchesSearch = t.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    const matchesSearch =
+      t.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
       t.ticket.toString().includes(searchQuery) ||
       (t.comment && t.comment.toLowerCase().includes(searchQuery.toLowerCase()));
     const matchesType =
@@ -80,7 +73,7 @@ export const CopiedTradesTable: React.FC = () => {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time positions mirrored from your linked mentor with execution latency and ticket references.
+            Positions mirrored from your linked mentor with execution latency, P&amp;L sync state, and ticket references.
           </p>
         </div>
 
@@ -136,61 +129,91 @@ export const CopiedTradesTable: React.FC = () => {
                 <tr>
                   <th className="px-5 py-3.5">Child Ticket</th>
                   <th className="px-4 py-3.5">Parent Ticket</th>
-                  <th className="px-4 py-3.5">Symbol & Type</th>
+                  <th className="px-4 py-3.5">Symbol &amp; Type</th>
                   <th className="px-4 py-3.5">Lots (C / P)</th>
                   <th className="px-4 py-3.5">Latency</th>
+                  <th className="px-4 py-3.5">P&amp;L</th>
                   <th className="px-4 py-3.5">Status</th>
                   <th className="px-5 py-3.5 text-right">Time</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-sans">
                 {filteredMappings.length > 0 ? (
-                  filteredMappings.map((map) => (
-                    <tr key={map.id} className="hover:bg-slate-800/40 transition-colors">
-                      <td className="px-5 py-4 font-mono font-bold text-white text-xs">
-                        {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0')
-                          ? `#${map.childTradeTicket}`
-                          : <span className="text-slate-500 italic">Pending / None</span>}
-                      </td>
-                      <td className="px-4 py-4 font-mono text-slate-300">
-                        #{map.parentTradeTicket}
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono font-bold text-white">{map.symbol}</span>
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-mono ${
-                              map.orderType.startsWith('BUY')
-                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                                : 'bg-rose-950 text-rose-400 border border-rose-800'
-                            }`}
-                          >
-                            {map.orderType}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-4 font-mono text-white">
-                        {map.childLots.toFixed(2)} <span className="text-slate-500">/ {map.parentLots.toFixed(2)}L</span>
-                      </td>
-                      <td className="px-4 py-4 font-mono text-slate-300">
-                        {map.latencyMs}ms
-                      </td>
-                      <td className="px-4 py-4">
-                        <StatusBadge status={map.status} size="sm" />
-                        {map.errorMessage && (
-                          <div className="text-[10px] text-rose-400 mt-1 max-w-xs truncate" title={map.errorMessage}>
-                            {map.errorMessage}
+                  filteredMappings.map((map) => {
+                    const matchedTrade = childTrades.find(
+                      (t) =>
+                        !t.isMappingFallback &&
+                        map.childTradeTicket &&
+                        String(t.ticket) === String(map.childTradeTicket)
+                    );
+                    const pnl = matchedTrade
+                      ? formatTradeProfitDisplay(matchedTrade, isCloudMode)
+                      : {
+                          text: isCloudMode ? 'Awaiting EA sync' : '$0.00',
+                          available: !isCloudMode,
+                          isPositive: true
+                        };
+
+                    return (
+                      <tr key={map.id} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="px-5 py-4 font-mono font-bold text-white text-xs">
+                          {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0')
+                            ? `#${map.childTradeTicket}`
+                            : <span className="text-slate-500 italic">Pending / None</span>}
+                        </td>
+                        <td className="px-4 py-4 font-mono text-slate-300">
+                          #{map.parentTradeTicket}
+                        </td>
+                        <td className="px-4 py-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-white">{map.symbol}</span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-mono ${
+                                map.orderType.startsWith('BUY')
+                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                  : 'bg-rose-950 text-rose-400 border border-rose-800'
+                              }`}
+                            >
+                              {map.orderType}
+                            </span>
                           </div>
-                        )}
-                      </td>
-                      <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
-                        {formatTime(map.openTime)}
-                      </td>
-                    </tr>
-                  ))
+                        </td>
+                        <td className="px-4 py-4 font-mono text-white">
+                          {map.childLots.toFixed(2)} <span className="text-slate-500">/ {map.parentLots.toFixed(2)}L</span>
+                        </td>
+                        <td className="px-4 py-4 font-mono text-slate-300">
+                          {map.latencyMs}ms
+                        </td>
+                        <td className="px-4 py-4 font-mono text-xs">
+                          <span
+                            className={
+                              !pnl.available
+                                ? 'text-slate-500 italic'
+                                : pnl.isPositive
+                                ? 'text-emerald-400 font-bold'
+                                : 'text-rose-400 font-bold'
+                            }
+                          >
+                            {pnl.text}
+                          </span>
+                        </td>
+                        <td className="px-4 py-4">
+                          <StatusBadge status={map.status} size="sm" />
+                          {map.errorMessage && (
+                            <div className="text-[10px] text-rose-400 mt-1 max-w-xs truncate" title={map.errorMessage}>
+                              {map.errorMessage}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
+                          {formatTime(map.openTime)}
+                        </td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-xs text-slate-500">
+                    <td colSpan={8} className="px-5 py-10 text-center text-xs text-slate-500">
                       No copied trade mappings recorded for your account yet.
                     </td>
                   </tr>
@@ -202,7 +225,7 @@ export const CopiedTradesTable: React.FC = () => {
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
                   <th className="px-5 py-3.5">Child Ticket</th>
-                  <th className="px-4 py-3.5">Symbol & Type</th>
+                  <th className="px-4 py-3.5">Symbol &amp; Type</th>
                   <th className="px-4 py-3.5">Lots</th>
                   <th className="px-4 py-3.5">Open Price</th>
                   <th className="px-4 py-3.5">Current / Close</th>
@@ -213,81 +236,91 @@ export const CopiedTradesTable: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-sans">
-                {filteredTrades.map((trade) => {
-                  const mapping = tradeMappings.find((m) => m.childTradeTicket === trade.ticket);
+                {filteredTrades.length > 0 ? (
+                  filteredTrades.map((trade) => {
+                    const mapping = tradeMappings.find((m) => m.childTradeTicket === trade.ticket);
+                    const pnl = formatTradeProfitDisplay(trade, isCloudMode);
 
-                  return (
-                    <tr key={trade.id} className="hover:bg-slate-800/40 transition-colors">
-                      {/* Child Ticket */}
-                      <td className="px-5 py-4">
-                        <div className="space-y-0.5">
-                          <span className="font-mono font-bold text-white text-xs">
-                            #{trade.ticket}
-                          </span>
-                          {mapping && (
-                            <div className="text-[10px] text-slate-400 font-mono">
-                              Parent: #{mapping.parentTradeTicket} ({mapping.latencyMs}ms)
-                            </div>
-                          )}
-                        </div>
-                      </td>
+                    return (
+                      <tr key={trade.id} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="px-5 py-4">
+                          <div className="space-y-0.5">
+                            <span className="font-mono font-bold text-white text-xs">
+                              #{trade.ticket}
+                            </span>
+                            {mapping && (
+                              <div className="text-[10px] text-slate-400 font-mono">
+                                Parent: #{mapping.parentTradeTicket} ({mapping.latencyMs}ms)
+                              </div>
+                            )}
+                          </div>
+                        </td>
 
-                      {/* Symbol & Type */}
-                      <td className="px-4 py-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono font-bold text-white">{trade.symbol}</span>
+                        <td className="px-4 py-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-white">{trade.symbol}</span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-mono ${
+                                trade.type.startsWith('BUY')
+                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                  : 'bg-rose-950 text-rose-400 border border-rose-800'
+                              }`}
+                            >
+                              {trade.type}
+                            </span>
+                          </div>
+                        </td>
+
+                        <td className="px-4 py-4 font-mono font-bold text-white">
+                          {trade.lots.toFixed(2)}
+                        </td>
+
+                        <td className="px-4 py-4 font-mono text-slate-300">
+                          {trade.isMappingFallback || !trade.openPrice ? '--' : trade.openPrice}
+                        </td>
+
+                        <td className="px-4 py-4 font-mono text-slate-300">
+                          {trade.isMappingFallback
+                            ? '--'
+                            : trade.closePrice || trade.currentPrice || '--'}
+                        </td>
+
+                        <td className="px-4 py-4 font-mono text-[11px] text-slate-400">
+                          <div>SL: {trade.sl || '-'}</div>
+                          <div>TP: {trade.tp || '-'}</div>
+                        </td>
+
+                        <td className="px-4 py-4 font-mono font-bold text-xs">
                           <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-mono ${
-                              trade.type.startsWith('BUY')
-                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                                : 'bg-rose-950 text-rose-400 border border-rose-800'
-                            }`}
+                            className={
+                              !pnl.available
+                                ? 'text-slate-500 font-normal italic'
+                                : pnl.isPositive
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
                           >
-                            {trade.type}
+                            {pnl.text}
                           </span>
-                        </div>
-                      </td>
+                        </td>
 
-                      {/* Lots */}
-                      <td className="px-4 py-4 font-mono font-bold text-white">
-                        {trade.lots.toFixed(2)}
-                      </td>
+                        <td className="px-4 py-4">
+                          <StatusBadge status={trade.status} size="sm" />
+                        </td>
 
-                      {/* Open Price */}
-                      <td className="px-4 py-4 font-mono text-slate-300">
-                        {trade.openPrice}
-                      </td>
-
-                      {/* Current / Close */}
-                      <td className="px-4 py-4 font-mono text-slate-300">
-                        {trade.closePrice || trade.currentPrice}
-                      </td>
-
-                      {/* SL / TP */}
-                      <td className="px-4 py-4 font-mono text-[11px] text-slate-400">
-                        <div>SL: {trade.sl || '-'}</div>
-                        <div>TP: {trade.tp || '-'}</div>
-                      </td>
-
-                      {/* Profit */}
-                      <td className="px-4 py-4 font-mono font-bold text-xs">
-                        <span className={trade.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                          {trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)}
-                        </span>
-                      </td>
-
-                      {/* Status */}
-                      <td className="px-4 py-4">
-                        <StatusBadge status={trade.status} size="sm" />
-                      </td>
-
-                      {/* Time */}
-                      <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
-                        {formatTime(trade.openTime)}
-                      </td>
-                    </tr>
-                  );
-                })}
+                        <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
+                          {formatTime(trade.openTime)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={9} className="px-5 py-10 text-center text-xs text-slate-500">
+                      No copied trades found for this filter.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           )}
@@ -296,3 +329,4 @@ export const CopiedTradesTable: React.FC = () => {
     </div>
   );
 };
+
