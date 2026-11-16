@@ -112,6 +112,50 @@ function runTests() {
   }
   console.log(`[PASS] 6. Scanned ${files.length} component files: zero hardcoded legacy secrets, FastAPI mock copy, mock invite codes, or window dialogs.`);
 
+  // 7. Static check: All 13 Super Admin navigation routes exist in Sidebar.tsx and App.tsx
+  const requiredAdminTabs = [
+    'overview',
+    'mentors',
+    'traders',
+    'mt5-accounts',
+    'plans',
+    'subscriptions',
+    'payments-revenue',
+    'system-health',
+    'copier-monitoring',
+    'audit-logs',
+    'notifications',
+    'platform-settings',
+    'admin-profile',
+  ];
+  const sidebarContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/common/Sidebar.tsx'), 'utf8');
+  const appContent = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const navbarContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/common/Navbar.tsx'), 'utf8');
+
+  for (const tabId of requiredAdminTabs) {
+    assert.strictEqual(
+      sidebarContent.includes(`'${tabId}'`),
+      true,
+      `Missing Super Admin tab '${tabId}' in Sidebar.tsx`
+    );
+    assert.strictEqual(
+      appContent.includes(`'${tabId}'`),
+      true,
+      `Missing Super Admin route '${tabId}' in App.tsx`
+    );
+  }
+  assert.strictEqual(
+    navbarContent.includes('TradeSync MT5 — Super Admin'),
+    true,
+    'Navbar.tsx must render "TradeSync MT5 — Super Admin" title for admin role'
+  );
+  console.log('[PASS] 7. Verified all 13 Super Admin routes and title in Sidebar.tsx, Navbar.tsx, and App.tsx.');
+
+  // 8. Static check: Admin components never list or embed plaintext terminal tokens outside rotation modal
+  const mt5ViewContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/admin/MT5AccountsManagementView.tsx'), 'utf8');
+  assert.strictEqual(mt5ViewContent.includes('terminalToken'), false, 'MT5AccountsManagementView must not expose terminalToken');
+  console.log('[PASS] 8. Verified MT5AccountsManagementView does not expose terminal tokens.');
+
   console.log('\nALL DASHBOARD UI SAFETY TESTS PASSED.');
 }
 

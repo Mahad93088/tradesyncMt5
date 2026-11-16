@@ -1,24 +1,11 @@
 import React, { useState } from 'react';
-import {
-  ListOrdered,
-  Search,
-  Filter,
-  CheckCircle2,
-  AlertTriangle,
-  Clock,
-  ArrowRight,
-  TrendingUp,
-  TrendingDown,
-  Layers,
-  Zap,
-  Download,
-  Calendar,
-  FileSpreadsheet,
-  ShieldCheck,
-  UserCheck
-} from 'lucide-react';
+import { FileSpreadsheet, Search } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { StatusBadge } from '../common/StatusBadge';
+import {
+  AdminPageHeader,
+  AdminStatusText,
+  AdminEmptyState,
+} from './adminUi';
 
 export const GlobalLogsView: React.FC = () => {
   const { tradeMappings, syncLogs, auditLogs, users } = useApp();
@@ -30,8 +17,9 @@ export const GlobalLogsView: React.FC = () => {
 
   const isWithinDateRange = (timestamp: string) => {
     if (dateFilter === 'all') return true;
-    const now = new Date().getTime();
-    const itemTime = new Date(timestamp).getTime();
+    const now = Date.now();
+    const itemTime = Date.parse(timestamp);
+    if (!Number.isFinite(itemTime)) return true;
     const diffHours = (now - itemTime) / (1000 * 60 * 60);
 
     if (dateFilter === 'today') return diffHours <= 24;
@@ -40,16 +28,14 @@ export const GlobalLogsView: React.FC = () => {
     return true;
   };
 
-  // Filter audit logs
   const filteredAuditLogs = auditLogs.filter((log) => {
-    const text = `${log.action} ${log.actorName} ${log.targetResource} ${log.details} ${log.targetId || ''}`.toLowerCase();
+    const text = `${log.action} ${log.actorName} ${log.actorRole} ${log.targetResource} ${log.details} ${log.targetId || ''}`.toLowerCase();
     const matchesSearch = text.includes(searchQuery.toLowerCase());
     const matchesResult = statusFilter === 'all' || log.result === statusFilter;
     const matchesDate = isWithinDateRange(log.timestamp);
     return matchesSearch && matchesResult && matchesDate;
   });
 
-  // Filter ticket mappings
   const filteredMappings = tradeMappings.filter((m) => {
     const mentor = users.find((u) => u.id === m.mentorId);
     const trader = users.find((u) => u.id === m.traderId);
@@ -60,7 +46,6 @@ export const GlobalLogsView: React.FC = () => {
     return matchesSearch && matchesStatus && matchesDate;
   });
 
-  // Filter sync logs
   const filteredSyncLogs = syncLogs.filter((log) => {
     const text = `${log.eventType} ${log.details} ${log.mentorName || ''} ${log.traderName || ''}`.toLowerCase();
     const matchesSearch = text.includes(searchQuery.toLowerCase());
@@ -71,80 +56,69 @@ export const GlobalLogsView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-            Activity, Audit & Execution Logs
-            <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
-              Audit Trail
-            </span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Structured administrative audit trails, trade copying ticket mappings, and daemon synchronization logs.
-          </p>
-        </div>
-
-        {/* Tab switcher */}
-        <div className="flex rounded-lg border border-slate-800 bg-slate-900 p-1 text-xs">
-          <button
-            onClick={() => { setActiveSubTab('audit'); setStatusFilter('all'); }}
-            className={`rounded px-3 py-1 font-medium transition-colors ${
-              activeSubTab === 'audit'
-                ? 'bg-slate-800 text-sky-300 font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Audit Trail ({auditLogs.length})
-          </button>
-          <button
-            onClick={() => { setActiveSubTab('mappings'); setStatusFilter('all'); }}
-            className={`rounded px-3 py-1 font-medium transition-colors ${
-              activeSubTab === 'mappings'
-                ? 'bg-slate-800 text-sky-300 font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Ticket Mappings ({tradeMappings.length})
-          </button>
-          <button
-            onClick={() => { setActiveSubTab('engine'); setStatusFilter('all'); }}
-            className={`rounded px-3 py-1 font-medium transition-colors ${
-              activeSubTab === 'engine'
-                ? 'bg-slate-800 text-sky-300 font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Engine Sync Logs ({syncLogs.length})
-          </button>
-        </div>
-      </div>
+      <AdminPageHeader
+        title="System Audit Logs"
+        meta={`${auditLogs.length} Audit · ${syncLogs.length} Sync Events`}
+        subtitle="Structured record of admin actions, account registrations & suspensions, bridge errors, and trade ticket mappings."
+        actions={
+          <div className="flex rounded-lg border border-slate-200 bg-white p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => { setActiveSubTab('audit'); setStatusFilter('all'); }}
+              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                activeSubTab === 'audit' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Audit Trail ({auditLogs.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => { setActiveSubTab('mappings'); setStatusFilter('all'); }}
+              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                activeSubTab === 'mappings' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Ticket Mappings ({tradeMappings.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => { setActiveSubTab('engine'); setStatusFilter('all'); }}
+              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                activeSubTab === 'engine' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Bridge Logs ({syncLogs.length})
+            </button>
+          </div>
+        }
+      />
 
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-xs">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-xs">
         <div className="relative w-full sm:w-80">
-          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
+          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
           <input
             type="text"
             placeholder={
               activeSubTab === 'audit'
-                ? 'Search action, user, resource, details...'
+                ? 'Search event, user, resource, details...'
                 : activeSubTab === 'mappings'
                 ? 'Search tickets, symbols, mentors...'
                 : 'Search event type, details...'
             }
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+            className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:outline-none"
           />
         </div>
 
-        <div className="flex items-center gap-3 w-full sm:w-auto">
+        <div className="flex items-center flex-wrap gap-3 w-full sm:w-auto">
           <div className="flex items-center gap-1.5">
-            <span className="text-slate-400">Date:</span>
+            <span className="text-slate-600 font-medium">Date Range:</span>
             <select
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
-              className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
+              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-sky-500"
             >
               <option value="all">All Time</option>
               <option value="today">Today (24h)</option>
@@ -154,14 +128,14 @@ export const GlobalLogsView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1.5">
-            <span className="text-slate-400">Result:</span>
+            <span className="text-slate-600 font-medium">Severity:</span>
             {activeSubTab === 'audit' ? (
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-sky-500"
               >
-                <option value="all">All Results</option>
+                <option value="all">All Severities</option>
                 <option value="success">Success</option>
                 <option value="warning">Warning</option>
                 <option value="failure">Failure</option>
@@ -170,7 +144,7 @@ export const GlobalLogsView: React.FC = () => {
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-sky-500"
               >
                 <option value="all">All States</option>
                 <option value="EXECUTED">EXECUTED</option>
@@ -184,7 +158,7 @@ export const GlobalLogsView: React.FC = () => {
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-slate-200 focus:outline-none focus:border-sky-500"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-sky-500"
               >
                 <option value="all">All Levels</option>
                 <option value="info">Info</option>
@@ -197,202 +171,174 @@ export const GlobalLogsView: React.FC = () => {
         </div>
       </div>
 
-      {/* TAB 1: Activity and Audit Logs */}
+      {/* TAB 1: Audit Trail */}
       {activeSubTab === 'audit' && (
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                <tr>
-                  <th className="px-4 py-3">Timestamp</th>
-                  <th className="px-4 py-3">User / Administrator</th>
-                  <th className="px-4 py-3">Action Performed</th>
-                  <th className="px-4 py-3">Target Resource</th>
-                  <th className="px-4 py-3">Result</th>
-                  <th className="px-4 py-3">Details</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/80">
-                {filteredAuditLogs.length === 0 ? (
+        filteredAuditLogs.length === 0 ? (
+          <AdminEmptyState
+            icon={FileSpreadsheet}
+            title="No audit log entries match your filter"
+            description="No fabricated historical logs are displayed. Real admin actions, registrations, and bridge events appear here as they occur."
+          />
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                   <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-slate-500">
-                      No administrative or assignment audit entries found for the current filters.
-                    </td>
+                    <th className="px-4 py-3">Date / Time</th>
+                    <th className="px-4 py-3">User &amp; Role</th>
+                    <th className="px-4 py-3">Event Type</th>
+                    <th className="px-4 py-3">Target Resource</th>
+                    <th className="px-4 py-3">Severity</th>
+                    <th className="px-4 py-3">Details</th>
                   </tr>
-                ) : (
-                  filteredAuditLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-slate-850/40 transition-colors">
-                      <td className="px-4 py-3 font-mono text-[11px] text-slate-400 whitespace-nowrap">
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredAuditLogs.map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-500 whitespace-nowrap tabular-nums">
                         {new Date(log.timestamp).toLocaleString()}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-200">{log.actorName}</div>
+                        <div className="font-semibold text-slate-900">{log.actorName}</div>
                         <span className="text-[10px] font-mono text-slate-500 uppercase">{log.actorRole}</span>
                       </td>
-                      <td className="px-4 py-3 font-mono font-semibold text-sky-400">
+                      <td className="px-4 py-3 font-mono font-semibold text-sky-700">
                         {log.action}
                       </td>
-                      <td className="px-4 py-3 font-mono text-[11px] text-slate-300">
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-700">
                         {log.targetResource} {log.targetId ? `(#${log.targetId.slice(-6)})` : ''}
                       </td>
                       <td className="px-4 py-3">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase font-mono ${
-                            log.result === 'success'
-                              ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-800/40'
-                              : log.result === 'failure'
-                              ? 'bg-rose-950/50 text-rose-300 border border-rose-800/40'
-                              : 'bg-amber-950/50 text-amber-300 border border-amber-800/40'
-                          }`}
-                        >
-                          {log.result}
-                        </span>
+                        <AdminStatusText status={log.result} />
                       </td>
-                      <td className="px-4 py-3 text-slate-300 max-w-sm leading-normal">
+                      <td className="px-4 py-3 text-slate-700 max-w-md leading-relaxed">
                         {log.details}
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )
       )}
 
       {/* TAB 2: Ticket Mappings */}
       {activeSubTab === 'mappings' && (
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                <tr>
-                  <th className="px-4 py-3">Parent Ticket</th>
-                  <th className="px-4 py-3">Child Ticket</th>
-                  <th className="px-4 py-3">Symbol & Type</th>
-                  <th className="px-4 py-3">Parent / Child Lots</th>
-                  <th className="px-4 py-3">Latency</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-right">Timestamp</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/80">
-                {filteredMappings.length === 0 ? (
+        filteredMappings.length === 0 ? (
+          <AdminEmptyState
+            icon={FileSpreadsheet}
+            title="No ticket mappings recorded"
+            description="Parent-to-child order ticket mappings appear here once bridge orders are processed."
+          />
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-slate-500">
-                      No trade copy mappings found for the current filter.
-                    </td>
+                    <th className="px-4 py-3">Parent Ticket</th>
+                    <th className="px-4 py-3">Child Ticket</th>
+                    <th className="px-4 py-3">Symbol &amp; Type</th>
+                    <th className="px-4 py-3">Parent / Child Lots</th>
+                    <th className="px-4 py-3">Latency</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Timestamp</th>
                   </tr>
-                ) : (
-                  filteredMappings.map((map) => {
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredMappings.map((map) => {
                     const mentor = users.find((u) => u.id === map.mentorId);
                     const trader = users.find((u) => u.id === map.traderId);
 
                     return (
-                      <tr key={map.id} className="hover:bg-slate-850/40 transition-colors">
+                      <tr key={map.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="px-4 py-3 font-mono">
-                          <div className="font-semibold text-slate-200">#{map.parentTradeTicket}</div>
-                          <span className="text-[10px] text-slate-500 font-sans">
+                          <div className="font-semibold text-slate-900 tabular-nums">#{map.parentTradeTicket}</div>
+                          <span className="text-[11px] text-slate-500 font-sans">
                             {mentor?.fullName || 'Verified Mentor'}
                           </span>
                         </td>
                         <td className="px-4 py-3 font-mono">
                           {Boolean(map.childTradeTicket && map.childTradeTicket !== 0 && map.childTradeTicket !== '0') ? (
-                            <div className="font-semibold text-emerald-400">#{map.childTradeTicket}</div>
+                            <div className="font-semibold text-emerald-700 tabular-nums">#{map.childTradeTicket}</div>
                           ) : (
-                            <span className="text-slate-500 italic text-[11px]">
-                              {map.status === 'PENDING' ? 'Pending' : 'Rejected'}
+                            <span className="text-slate-400 italic text-[11px]">
+                              {map.status === 'PENDING' ? 'Pending' : 'Not Executed'}
                             </span>
                           )}
-                          <span className="text-[10px] text-slate-500 font-sans">
+                          <span className="text-[11px] text-slate-500 font-sans">
                             {trader?.fullName || 'Verified Trader'}
                           </span>
                         </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5 font-mono">
-                            <span className="font-semibold text-slate-200">{map.symbol}</span>
-                            <span className={`text-[10px] font-bold ${map.orderType.startsWith('BUY') ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {map.orderType}
-                            </span>
-                          </div>
+                        <td className="px-4 py-3 font-mono">
+                          <span className="font-semibold text-slate-900">{map.symbol}</span>{' '}
+                          <span className={`text-[11px] font-bold ${map.orderType.startsWith('BUY') ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            {map.orderType}
+                          </span>
                         </td>
-                        <td className="px-4 py-3 font-mono text-[11px]">
-                          <div>P: <strong className="text-slate-200">{map.parentLots.toFixed(2)}L</strong></div>
-                          <div>C: <strong className="text-sky-300">{map.childLots.toFixed(2)}L</strong></div>
+                        <td className="px-4 py-3 font-mono text-[11px] text-slate-700 tabular-nums">
+                          P: {map.parentLots.toFixed(2)}L · C: {map.childLots.toFixed(2)}L
                         </td>
-                        <td className="px-4 py-3 font-mono text-slate-300">
+                        <td className="px-4 py-3 font-mono text-slate-700 tabular-nums">
                           {map.latencyMs}ms
                         </td>
                         <td className="px-4 py-3">
-                          <StatusBadge status={map.status} size="sm" />
+                          <AdminStatusText status={map.status} />
                           {map.errorMessage && (
-                            <p className="text-[10px] text-rose-400 truncate max-w-xs mt-0.5" title={map.errorMessage}>
+                            <p className="text-[11px] text-rose-700 truncate max-w-xs mt-0.5" title={map.errorMessage}>
                               {map.errorMessage}
                             </p>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-400">
+                        <td className="px-4 py-3 text-right font-mono text-[11px] text-slate-500 tabular-nums">
                           {new Date(map.openTime).toLocaleTimeString()}
                         </td>
                       </tr>
                     );
-                  })
-                )}
-              </tbody>
-            </table>
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )
       )}
 
-      {/* TAB 3: Engine Sync Logs */}
+      {/* TAB 3: Bridge Sync Logs */}
       {activeSubTab === 'engine' && (
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm divide-y divide-slate-800/80">
-          {filteredSyncLogs.length === 0 ? (
-            <div className="p-10 text-center text-xs text-slate-500">
-              No bridge synchronization logs recorded matching your filters.
-            </div>
-          ) : (
-            filteredSyncLogs.map((log) => (
-              <div key={log.id} className="p-3.5 hover:bg-slate-850/40 transition-colors flex items-start gap-3 text-xs">
-                <div className="mt-0.5 shrink-0">
-                  {log.level === 'success' ? (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                  ) : log.level === 'error' ? (
-                    <AlertTriangle className="h-4 w-4 text-rose-400" />
-                  ) : log.level === 'warn' ? (
-                    <AlertTriangle className="h-4 w-4 text-amber-400" />
-                  ) : (
-                    <Clock className="h-4 w-4 text-sky-400" />
-                  )}
-                </div>
-
-                <div className="flex-1 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 font-mono">
-                      <span className="font-semibold text-slate-200">{log.eventType}</span>
-                      {log.ticket && (
-                        <span className="rounded bg-slate-800 px-1 py-0.2 text-[10px] text-slate-400">
-                          #{log.ticket}
-                        </span>
-                      )}
-                    </div>
-                    <span className="font-mono text-[10px] text-slate-500">
-                      {new Date(log.timestamp).toLocaleTimeString()} UTC
-                    </span>
+        filteredSyncLogs.length === 0 ? (
+          <AdminEmptyState
+            icon={FileSpreadsheet}
+            title="No bridge synchronization logs recorded"
+            description="No synchronization events match your current search or severity filter."
+          />
+        ) : (
+          <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+            {filteredSyncLogs.map((log) => (
+              <div key={log.id} className="p-4 hover:bg-slate-50/80 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <AdminStatusText status={log.level} />
+                    <span className="font-mono font-semibold text-slate-900">{log.eventType}</span>
+                    {log.ticket && (
+                      <span className="font-mono text-[11px] text-slate-500">#{log.ticket}</span>
+                    )}
                   </div>
-
-                  <p className="text-slate-300 leading-normal">{log.details}</p>
-
-                  <div className="flex items-center gap-3 text-[10px] text-slate-500 font-mono">
+                  <p className="text-slate-700 leading-relaxed">{log.details}</p>
+                  <div className="flex items-center gap-3 text-[11px] text-slate-500 font-mono">
                     {log.mentorName && <span>Mentor: {log.mentorName}</span>}
                     {log.traderName && <span>Trader: {log.traderName}</span>}
-                    {log.latencyMs !== undefined && <span>Latency: {log.latencyMs}ms</span>}
+                    {log.latencyMs !== undefined && <span className="tabular-nums">Latency: {log.latencyMs}ms</span>}
                   </div>
                 </div>
+                <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                  {new Date(log.timestamp).toLocaleString()}
+                </span>
               </div>
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )
       )}
     </div>
   );

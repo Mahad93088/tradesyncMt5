@@ -2,7 +2,7 @@ export type UserRole = 'admin' | 'mentor' | 'trader';
 
 export type AccountStatus = 'active' | 'suspended' | 'pending';
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
-export type SubscriptionStatus = 'active' | 'expired' | 'trial' | 'cancelled' | 'pending';
+export type SubscriptionStatus = 'active' | 'expired' | 'trial' | 'cancelled' | 'pending' | 'suspended';
 export type CopyLinkStatus = 'active' | 'paused' | 'unlinked' | 'error';
 
 export interface User {
@@ -67,8 +67,14 @@ export interface SubscriptionPlan {
   name: string;
   billingCycle: 'monthly' | 'yearly';
   price: number;
+  monthlyPrice?: number;
+  yearlyPrice?: number;
+  maxMentorAccounts?: number;
   maxChildAccounts: number;
   maxLotSize: number;
+  trialDays?: number;
+  isActive?: boolean;
+  description?: string;
   features: string[];
   priorityExecution: boolean;
   slTpSync: boolean;
@@ -86,6 +92,9 @@ export interface Subscription {
   price: number;
   startedAt: string;
   expiresAt: string;
+  trialEndsAt?: string;
+  suspendedAt?: string;
+  usedChildAccounts?: number;
   autoRenew: boolean;
 }
 

@@ -136,8 +136,10 @@ interface AppContextType {
   // Subscriptions
   createSubscriptionPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void;
   updateSubscriptionPlan: (planId: string, planData: Partial<SubscriptionPlan>) => void;
+  togglePlanStatus: (planId: string) => void;
   renewOrChangeSubscription: (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => void;
   cancelSubscription: (subscriptionId: string) => void;
+  toggleSubscriptionStatus: (subscriptionId: string) => void;
 
   // Trade Copy Engine Simulation
   simulateParentOrder: (
@@ -1589,9 +1591,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const createSubscriptionPlan = (plan: Omit<SubscriptionPlan, 'id'>) => {
     const newPlan: SubscriptionPlan = {
       ...plan,
+      isActive: plan.isActive ?? true,
       id: `plan_${Date.now()}`
     };
     setSubscriptionPlans((prev) => [...prev, newPlan]);
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: 'PLAN_CREATED',
+      targetResource: 'SubscriptionPlan',
+      targetId: newPlan.id,
+      result: 'success',
+      details: `Created plan "${newPlan.name}" ($${newPlan.price}/${newPlan.billingCycle}, cap ${newPlan.maxChildAccounts} child accounts).`
+    });
   };
 
   const updateSubscriptionPlan = (planId: string, planData: Partial<SubscriptionPlan>) => {
@@ -1605,6 +1618,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const togglePlanStatus = (planId: string) => {
+    const target = subscriptionPlans.find((p) => p.id === planId);
+    if (!target) return;
+    const nextActive = target.isActive === false ? true : false;
+    setSubscriptionPlans((prev) =>
+      prev.map((p) => (p.id === planId ? { ...p, isActive: nextActive } : p))
+    );
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: nextActive ? 'PLAN_ACTIVATED' : 'PLAN_DEACTIVATED',
+      targetResource: 'SubscriptionPlan',
+      targetId: planId,
+      result: nextActive ? 'success' : 'warning',
+      details: `${nextActive ? 'Activated' : 'Deactivated'} subscription plan "${target.name}".`
+    });
+  };
+
   const renewOrChangeSubscription = (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => {
     const plan = subscriptionPlans.find((p) => p.id === planId);
     if (!plan) return;
@@ -1612,6 +1644,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const mentorUser = users.find((u) => u.id === mentorId);
     const daysToAdd = billingCycle === 'yearly' ? 365 : 30;
     const expiresAt = new Date(Date.now() + daysToAdd * 24 * 60 * 60 * 1000).toISOString();
+    const effectivePrice =
+      billingCycle === 'yearly'
+        ? plan.yearlyPrice ?? (plan.billingCycle === 'yearly' ? plan.price : plan.price * 10)
+        : plan.monthlyPrice ?? (plan.billingCycle === 'monthly' ? plan.price : Math.round(plan.price / 10));
 
     setSubscriptions((prev) => {
       const existing = prev.find((s) => s.mentorId === mentorId);
@@ -1623,9 +1659,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 planId: plan.id,
                 planName: plan.name,
                 billingCycle,
-                price: plan.price,
+                price: effectivePrice,
                 status: 'active',
                 expiresAt,
+                suspendedAt: undefined,
                 autoRenew: true
               }
             : s
@@ -1640,7 +1677,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           planName: plan.name,
           status: 'active',
           billingCycle,
-          price: plan.price,
+          price: effectivePrice,
           startedAt: new Date().toISOString(),
           expiresAt,
           autoRenew: true
@@ -1705,6 +1742,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         details: `Cancelled subscription for ${targetSub.mentorName}. Auto-renew halted.`
       });
     }
+  };
+
+  const toggleSubscriptionStatus = (subscriptionId: string) => {
+    const targetSub = subscriptions.find((s) => s.id === subscriptionId);
+    if (!targetSub) return;
+
+    const nextStatus = targetSub.status === 'suspended' ? 'active' : 'suspended';
+    setSubscriptions((prev) =>
+      prev.map((s) =>
+        s.id === subscriptionId
+          ? {
+              ...s,
+              status: nextStatus,
+              suspendedAt: nextStatus === 'suspended' ? new Date().toISOString() : undefined
+            }
+          : s
+      )
+    );
+
+    setMentorProfiles((prev) =>
+      prev.map((m) =>
+        m.userId === targetSub.mentorId ? { ...m, subscriptionStatus: nextStatus } : m
+      )
+    );
+
+    addAuditLog({
+      actorId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      action: nextStatus === 'suspended' ? 'SUBSCRIPTION_SUSPENDED' : 'SUBSCRIPTION_REACTIVATED',
+      targetResource: 'Subscription',
+      targetId: subscriptionId,
+      result: nextStatus === 'suspended' ? 'warning' : 'success',
+      details: `${nextStatus === 'suspended' ? 'Suspended' : 'Reactivated'} subscription for ${targetSub.mentorName}.`
+    });
   };
 
   // Trade Copy Engine Simulation
@@ -2285,8 +2357,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         emergencyCloseParentTicket,
         createSubscriptionPlan,
         updateSubscriptionPlan,
+        togglePlanStatus,
         renewOrChangeSubscription,
         cancelSubscription,
+        toggleSubscriptionStatus,
         simulateParentOrder,
         simulateParentClose,
         simulateErrorEvent,

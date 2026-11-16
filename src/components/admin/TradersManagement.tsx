@@ -6,18 +6,22 @@ import {
   Eye,
   Edit2,
   X,
-  Link,
+  Link as LinkIcon,
   Server,
-  AlertCircle,
-  CheckCircle2
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
-import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AddTraderModal } from './AddTraderModal';
 import { EditTraderModal } from './EditTraderModal';
 import { User } from '../../types';
+import {
+  AdminPageHeader,
+  AdminStatusText,
+  AdminFeedbackBanner,
+  AdminEmptyState,
+} from './adminUi';
+import { formatHeartbeatAge, formatLotRuleLabel } from '../common/dashboardHelpers';
 
 interface TradersManagementProps {
   isAddOpen?: boolean;
@@ -26,12 +30,11 @@ interface TradersManagementProps {
 
 export const TradersManagement: React.FC<TradersManagementProps> = ({
   isAddOpen: externalIsAddOpen,
-  setIsAddOpen: externalSetIsAddOpen
+  setIsAddOpen: externalSetIsAddOpen,
 }) => {
   const { isCloudMode } = useAuth();
-  const { users, mt5Accounts, parentChildLinks, toggleUserStatus } = useApp();
+  const { users, mt5Accounts, parentChildLinks, tradeMappings, auditLogs, toggleUserStatus } = useApp();
 
-  // Internal modal state if not passed from parent
   const [internalIsAddOpen, setInternalIsAddOpen] = useState(false);
   const isAddOpen = externalIsAddOpen !== undefined ? externalIsAddOpen : internalIsAddOpen;
   const setIsAddOpen = externalSetIsAddOpen !== undefined ? externalSetIsAddOpen : setInternalIsAddOpen;
@@ -40,14 +43,10 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'pending' | 'suspended'>('all');
   const [filterSub, setFilterSub] = useState<'all' | 'active' | 'unlinked'>('all');
 
-  // Trader detail modal state
   const [detailsTrader, setDetailsTrader] = useState<User | null>(null);
-
-  // Edit trader modal state
   const [editingTrader, setEditingTrader] = useState<User | null>(null);
   const [actionFeedback, setActionFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
-  // Confirmation modal state for approve / suspend / reactivate
   const [confirmModalData, setConfirmModalData] = useState<{
     isOpen: boolean;
     trader: User | null;
@@ -55,7 +54,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   }>({
     isOpen: false,
     trader: null,
-    action: 'suspend'
+    action: 'suspend',
   });
 
   const traders = users.filter((u) => u.role === 'trader');
@@ -71,7 +70,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
       filterSub === 'all'
         ? true
         : filterSub === 'active'
-        ? link && link.status === 'active'
+        ? Boolean(link && link.status === 'active')
         : !link || link.status !== 'active';
     return matchesSearch && matchesStatus && matchesSub;
   });
@@ -96,73 +95,52 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-            Trader Management (Followers)
-            <span className="rounded bg-slate-800 border border-slate-700 px-2 py-0.5 text-xs text-slate-300 font-mono">
-              {traders.length} Registered
-            </span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Monitor follower trader accounts, mentor associations, demo connection health, and copy lot settings.
-          </p>
-        </div>
-
-        {!isCloudMode && (
-          <button
-            onClick={() => setIsAddOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Add Trader</span>
-          </button>
-        )}
-      </div>
+      <AdminPageHeader
+        title="Trader Management"
+        meta={`${traders.length} Registered · ${traders.filter((t) => t.status === 'active').length} Active`}
+        subtitle="Monitor follower trader accounts, assigned mentors, Child MT5 terminal connectivity, and copy sizing rules."
+        actions={
+          !isCloudMode ? (
+            <button
+              type="button"
+              onClick={() => setIsAddOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Add Trader</span>
+            </button>
+          ) : undefined
+        }
+      />
 
       {actionFeedback && (
-        <div
-          className={`rounded-xl border p-3 text-xs flex items-center justify-between ${
-            actionFeedback.type === 'error'
-              ? 'border-rose-800/60 bg-rose-950/40 text-rose-300'
-              : 'border-emerald-800/60 bg-emerald-950/40 text-emerald-300'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            {actionFeedback.type === 'error' ? (
-              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
-            ) : (
-              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-            )}
-            <span>{actionFeedback.message}</span>
-          </div>
-          <button onClick={() => setActionFeedback(null)} className="text-slate-400 hover:text-white">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        <AdminFeedbackBanner
+          type={actionFeedback.type}
+          message={actionFeedback.message}
+          onDismiss={() => setActionFeedback(null)}
+        />
       )}
 
-      {/* Filters and Search */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
-        <div className="relative w-full sm:w-72">
-          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
+      {/* Search & Filters */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3">
+        <div className="relative w-full sm:w-80">
+          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
           <input
             type="text"
             placeholder="Search trader name, username, or email..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-teal-500 focus:outline-none"
+            className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:outline-none"
           />
         </div>
 
-        <div className="flex items-center gap-3 w-full sm:w-auto">
+        <div className="flex items-center flex-wrap gap-3 w-full sm:w-auto text-xs">
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-slate-400">Account:</span>
+            <span className="text-slate-600 font-medium">Account:</span>
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value as any)}
-              className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-teal-500"
+              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-sky-500"
             >
               <option value="all">All Statuses</option>
               <option value="active">Active Only</option>
@@ -172,11 +150,11 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <span className="text-xs text-slate-400">Copy Link:</span>
+            <span className="text-slate-600 font-medium">Copy Link:</span>
             <select
               value={filterSub}
               onChange={(e) => setFilterSub(e.target.value as any)}
-              className="rounded-lg border border-slate-750 bg-slate-950 px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-teal-500"
+              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-sky-500"
             >
               <option value="all">All Links</option>
               <option value="active">Active Linked</option>
@@ -187,41 +165,40 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
       </div>
 
       {/* Traders Table */}
-      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/90 shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="border-b border-slate-800 bg-slate-950/90 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              <tr>
-                <th className="px-4 py-3">Trader</th>
-                <th className="px-4 py-3">Assigned Mentor</th>
-                <th className="px-4 py-3">{isCloudMode ? 'Copy Entitlement' : 'Subscription'}</th>
-                <th className="px-4 py-3">Demo Terminal</th>
-                <th className="px-4 py-3">Copy Sizing</th>
-                <th className="px-4 py-3">Created</th>
-                <th className="px-4 py-3">Account Status</th>
-                <th className="px-4 py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/80">
-              {filteredTraders.length === 0 ? (
+      {filteredTraders.length === 0 ? (
+        <AdminEmptyState
+          icon={UserCheck}
+          title="No traders match your filter criteria"
+          description="Try clearing the search or status filters to view registered follower traders."
+        />
+      ) : (
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500">
-                    No traders found matching the filter criteria.
-                  </td>
+                  <th className="px-4 py-3">Trader</th>
+                  <th className="px-4 py-3">Assigned Mentor</th>
+                  <th className="px-4 py-3">{isCloudMode ? 'Entitlement' : 'Subscription'}</th>
+                  <th className="px-4 py-3">Child MT5 Terminal</th>
+                  <th className="px-4 py-3">Copy Sizing</th>
+                  <th className="px-4 py-3">Created</th>
+                  <th className="px-4 py-3">Account Status</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
-              ) : (
-                filteredTraders.map((trader) => {
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredTraders.map((trader) => {
                   const childAccount = mt5Accounts.find(
                     (a) => a.userId === trader.id && a.accountRole === 'child'
                   );
                   const link = parentChildLinks.find((l) => l.traderId === trader.id);
 
                   return (
-                    <tr key={trader.id} className="hover:bg-slate-850/40 transition-colors">
-                      {/* Trader */}
+                    <tr key={trader.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-3">
-                          <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-800 shrink-0 flex items-center justify-center font-bold text-xs text-slate-300">
+                          <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-200 bg-slate-100 shrink-0 flex items-center justify-center font-bold text-xs text-slate-700">
                             {trader.avatarUrl ? (
                               <img src={trader.avatarUrl} alt="" className="h-full w-full object-cover" />
                             ) : (
@@ -229,132 +206,97 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                             )}
                           </div>
                           <div>
-                            <div className="font-semibold text-slate-100 flex items-center gap-1.5">
+                            <div className="font-semibold text-slate-900 flex items-center gap-1.5">
                               {trader.fullName}
                               {trader.username && (
-                                <span className="font-mono text-[10px] text-teal-400 font-normal">
+                                <span className="font-mono text-[11px] text-slate-500 font-normal">
                                   @{trader.username}
                                 </span>
                               )}
                             </div>
-                            <span className="text-[10px] text-slate-500">{trader.email}</span>
+                            <span className="text-[11px] text-slate-500">{trader.email}</span>
                           </div>
                         </div>
                       </td>
 
-                      {/* Mentor Association */}
                       <td className="px-4 py-3.5">
                         {link ? (
-                          <div className="space-y-0.5">
-                            <span className="font-semibold text-sky-400">{link.mentorName}</span>
-                            <div>
-                              <StatusBadge status={link.status} size="sm" />
-                            </div>
+                          <div className="space-y-1">
+                            <span className="font-semibold text-sky-700 block">{link.mentorName}</span>
+                            <AdminStatusText status={link.status} />
                           </div>
                         ) : (
-                          <span className="text-slate-500 italic text-[11px]">Unlinked</span>
+                          <span className="text-slate-400 italic text-[11px]">Unlinked</span>
                         )}
                       </td>
 
-                      {/* Copy Entitlement / Subscription Status */}
                       <td className="px-4 py-3.5">
                         {isCloudMode ? (
-                          link ? (
-                            <div className="space-y-0.5">
-                              <StatusBadge status={link.status === 'active' ? 'active' : 'paused'} size="sm" />
-                              <div className="text-[10px] font-mono text-slate-500">
-                                Billing unprovisioned
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="text-slate-500 text-[11px] font-mono">Unlinked</span>
-                          )
+                          <span className="text-[11px] font-mono text-slate-500">Not Configured</span>
                         ) : link ? (
-                          <div className="space-y-0.5">
-                            <span className="text-[11px] font-medium text-slate-200">
-                              Follower Tier
-                            </span>
-                            <div>
-                              <StatusBadge status={link.status === 'active' ? 'active' : 'paused'} size="sm" />
-                            </div>
+                          <div className="space-y-1">
+                            <span className="text-[11px] font-medium text-slate-800 block">Follower Membership</span>
+                            <AdminStatusText status={link.status === 'active' ? 'active' : 'paused'} />
                           </div>
                         ) : (
                           <span className="text-slate-500 text-[11px] font-mono">Free Demo</span>
                         )}
                       </td>
 
-                      {/* Child MT5 Terminal & Connection */}
                       <td className="px-4 py-3.5">
                         {childAccount ? (
-                          <div className="space-y-0.5 font-mono">
+                          <div className="space-y-1 font-mono">
                             <div className="flex items-center gap-1.5">
-                              <span className="font-semibold text-slate-200">
+                              <span className="font-semibold text-slate-900 tabular-nums">
                                 #{childAccount.accountNumber}
                               </span>
-                              <StatusBadge status={childAccount.connectionStatus} size="sm" />
+                              <AdminStatusText status={childAccount.isStale ? 'stale' : childAccount.connectionStatus} />
                             </div>
-                            <p className="text-[10px] text-slate-400 font-sans">
-                              {childAccount.broker} • Eq: ${childAccount.equity.toLocaleString()}
+                            <p className="text-[11px] text-slate-500 font-sans tabular-nums">
+                              {childAccount.broker} · Eq: ${childAccount.equity.toLocaleString()}
                             </p>
                           </div>
                         ) : (
-                          <span className="text-slate-500 italic text-[11px]">No terminal bound</span>
+                          <span className="text-slate-400 italic text-[11px]">No terminal bound</span>
                         )}
                       </td>
 
-                      {/* Lot Size Rules */}
-                      <td className="px-4 py-3.5 font-mono text-[11px]">
-                        {link ? (
-                          <div className="space-y-0.5">
-                            {link.lotSettings.mode === 'parent_lot' ? (
-                              <span className="text-slate-300">1:1 Direct Copy</span>
-                            ) : (
-                              <span className="text-sky-300 uppercase">
-                                {link.lotSettings.customType}:{' '}
-                                {link.lotSettings.customType === 'fixed' && `${link.lotSettings.fixedLot} lots`}
-                                {link.lotSettings.customType === 'multiplier' && `${link.lotSettings.multiplier}x ratio`}
-                                {link.lotSettings.customType === 'risk_percent' && `${link.lotSettings.riskPercent}% risk`}
-                                {link.lotSettings.customType === 'equity_ratio' && 'Proportional'}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-slate-600">-</span>
-                        )}
+                      <td className="px-4 py-3.5 font-mono text-[11px] text-slate-700">
+                        {link ? formatLotRuleLabel(link.lotSettings) : <span className="text-slate-400">—</span>}
                       </td>
 
-                      {/* Creation Date */}
-                      <td className="px-4 py-3.5 text-slate-400 font-mono text-[11px]">
+                      <td className="px-4 py-3.5 text-slate-600 font-mono text-[11px] tabular-nums">
                         {new Date(trader.createdAt).toLocaleDateString()}
                       </td>
 
-                      {/* Account Status */}
                       <td className="px-4 py-3.5">
-                        <StatusBadge status={trader.status} size="sm" />
+                        <AdminStatusText status={trader.status} />
                       </td>
 
-                      {/* Actions: View, Edit (Demo), Approve / Suspend / Reactivate */}
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
+                            type="button"
                             onClick={() => setDetailsTrader(trader)}
-                            className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+                            className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
                             title="View trader details"
                           >
-                            <Eye className="h-4 w-4" />
+                            <Eye className="h-3.5 w-3.5" />
                           </button>
 
                           {!isCloudMode && (
                             <button
+                              type="button"
                               onClick={() => setEditingTrader(trader)}
-                              className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+                              className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
                               title="Edit trader profile (Demo)"
                             >
-                              <Edit2 className="h-4 w-4" />
+                              <Edit2 className="h-3.5 w-3.5" />
                             </button>
                           )}
 
                           <button
+                            type="button"
                             onClick={() => {
                               const action: 'approve' | 'suspend' | 'reactivate' =
                                 trader.status === 'active'
@@ -365,13 +307,13 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                               setConfirmModalData({
                                 isOpen: true,
                                 trader,
-                                action
+                                action,
                               });
                             }}
-                            className={`rounded px-2 py-1 text-[11px] font-medium border transition-colors ${
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-semibold border whitespace-nowrap transition-colors ${
                               trader.status === 'active'
-                                ? 'border-rose-900/60 bg-rose-950/40 text-rose-300 hover:bg-rose-900/50'
-                                : 'border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50'
+                                ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
                             }`}
                           >
                             {trader.status === 'active'
@@ -384,129 +326,147 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                       </td>
                     </tr>
                   );
-                })
-              )}
-            </tbody>
-          </table>
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Trader Details Modal */}
       {detailsTrader && (() => {
         const childAccount = mt5Accounts.find((a) => a.userId === detailsTrader.id && a.accountRole === 'child');
         const link = parentChildLinks.find((l) => l.traderId === detailsTrader.id);
+        const recentCopies = tradeMappings.filter((m) => m.traderId === detailsTrader.id).slice(0, 4);
+        const traderAuditHistory = auditLogs.filter(
+          (log) => log.actorId === detailsTrader.id || log.targetId === detailsTrader.id
+        ).slice(0, 4);
 
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto">
-            <div className="w-full max-w-lg rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-4">
-              <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="w-full max-w-xl rounded-xl border border-slate-200 bg-white p-6 shadow-2xl space-y-4 my-auto">
+              <div className="flex items-start justify-between border-b border-slate-200 pb-3">
                 <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-sm text-slate-200">
+                  <div className="h-10 w-10 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center font-bold text-sm text-slate-800">
                     {detailsTrader.fullName[0]}
                   </div>
                   <div>
-                    <h3 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                       {detailsTrader.fullName}
                       {detailsTrader.username && (
-                        <span className="font-mono text-xs text-teal-400">@{detailsTrader.username}</span>
+                        <span className="font-mono text-xs text-sky-700">@{detailsTrader.username}</span>
                       )}
                     </h3>
-                    <p className="text-xs text-slate-400">{detailsTrader.email}</p>
+                    <p className="text-xs text-slate-500">{detailsTrader.email}</p>
                   </div>
                 </div>
                 <button
+                  type="button"
                   onClick={() => setDetailsTrader(null)}
-                  className="text-slate-500 hover:text-slate-300"
+                  className="text-slate-400 hover:text-slate-700"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
-              {/* Account Meta & Status */}
-              <div className="grid grid-cols-2 gap-2 text-xs bg-slate-950/60 p-3 rounded-lg border border-slate-800 font-mono">
+              <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200 font-mono">
                 <div>
                   <span className="text-slate-500 block text-[10px]">ACCOUNT STATUS</span>
-                  <StatusBadge status={detailsTrader.status} size="sm" />
+                  <div className="mt-0.5"><AdminStatusText status={detailsTrader.status} /></div>
                 </div>
                 <div>
                   <span className="text-slate-500 block text-[10px]">JOINED ON</span>
-                  <span className="text-slate-300">{new Date(detailsTrader.createdAt).toLocaleDateString()}</span>
+                  <span className="text-slate-900 tabular-nums">{new Date(detailsTrader.createdAt).toLocaleDateString()}</span>
                 </div>
                 <div>
                   <span className="text-slate-500 block text-[10px]">PHONE</span>
-                  <span className="text-slate-300">{detailsTrader.phone || 'None provided'}</span>
+                  <span className="text-slate-800">{detailsTrader.phone || 'None provided'}</span>
                 </div>
                 <div>
-                  <span className="text-slate-500 block text-[10px]">ROLE</span>
-                  <span className="text-slate-300 uppercase">{detailsTrader.role} (Follower)</span>
+                  <span className="text-slate-500 block text-[10px]">MEMBERSHIP</span>
+                  <span className="text-slate-800">
+                    {isCloudMode ? 'Not Configured' : link ? `Follower (${link.status})` : 'Unassigned'}
+                  </span>
                 </div>
               </div>
 
-              {/* Demo Account Overview */}
-              <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-3 space-y-2 text-xs">
-                <span className="font-semibold text-slate-300 flex items-center gap-1.5">
-                  <Server className="h-3.5 w-3.5 text-teal-400" />
-                  Demo MT5 Account (Child Terminal)
+              <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 space-y-2 text-xs">
+                <span className="font-semibold text-slate-800 flex items-center gap-1.5">
+                  <Server className="h-3.5 w-3.5 text-sky-600" />
+                  Child MT5 Terminal (Demo)
                 </span>
                 {childAccount ? (
-                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-400">
-                    <div>Account: <strong className="text-slate-200">#{childAccount.accountNumber}</strong></div>
-                    <div>Broker: <strong className="text-slate-200">{childAccount.broker}</strong></div>
-                    <div>Balance: <strong className="text-slate-200">${childAccount.balance.toLocaleString()}</strong></div>
-                    <div>Equity: <strong className="text-emerald-400">${childAccount.equity.toLocaleString()}</strong></div>
-                    <div>Connection: <StatusBadge status={childAccount.connectionStatus} size="sm" /></div>
-                    <div>Ping: <strong className="text-slate-200">{childAccount.pingMs}ms</strong></div>
+                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-600">
+                    <div>Account: <strong className="text-slate-900">#{childAccount.accountNumber}</strong></div>
+                    <div>Broker: <strong className="text-slate-900">{childAccount.broker}</strong></div>
+                    <div>Balance: <strong className="text-slate-900 tabular-nums">${childAccount.balance.toLocaleString()}</strong></div>
+                    <div>Equity: <strong className="text-emerald-700 tabular-nums">${childAccount.equity.toLocaleString()}</strong></div>
+                    <div>Connection: <AdminStatusText status={childAccount.isStale ? 'stale' : childAccount.connectionStatus} /></div>
+                    <div>Heartbeat: <strong className="text-slate-900">{formatHeartbeatAge(childAccount.lastHeartbeat)}</strong></div>
                   </div>
                 ) : (
                   <p className="text-slate-500 italic">No demo terminal bound.</p>
                 )}
               </div>
 
-              {/* Mentor Association & Copy Settings */}
-              <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-3 space-y-2 text-xs">
-                <span className="font-semibold text-slate-300 flex items-center gap-1.5">
-                  <Link className="h-3.5 w-3.5 text-sky-400" />
-                  Mentor Association &amp; Copy Telemetry
+              <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 space-y-2 text-xs">
+                <span className="font-semibold text-slate-800 flex items-center gap-1.5">
+                  <LinkIcon className="h-3.5 w-3.5 text-sky-600" />
+                  Assigned Mentor &amp; Copy Telemetry
                 </span>
                 {link ? (
-                  <div className="space-y-1.5 font-mono text-[11px] text-slate-400">
-                    <div>Mentor: <strong className="text-sky-300 font-sans">{link.mentorName}</strong></div>
-                    <div>Copy Link Status: <StatusBadge status={link.status} size="sm" /></div>
+                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-600">
+                    <div>Mentor: <strong className="text-sky-700 font-sans">{link.mentorName}</strong></div>
+                    <div>Link Status: <AdminStatusText status={link.status} /></div>
+                    <div>Copy Rule: <strong className="text-slate-900">{formatLotRuleLabel(link.lotSettings)}</strong></div>
+                    <div>Trades Copied: <strong className="text-slate-900 tabular-nums">{link.totalTradesCopied}</strong></div>
                     <div>
-                      Billing / Plan:{' '}
-                      <strong className="text-slate-200">
-                        {isCloudMode ? 'Unprovisioned (Schema pending)' : `Follower Standard (${link.status === 'active' ? 'Active' : 'Paused'})`}
-                      </strong>
-                    </div>
-                    <div>Linked Since: <strong className="text-slate-200">{new Date(link.linkedAt).toLocaleDateString()}</strong></div>
-                    <div>Lot Mode: <strong className="text-slate-200">{link.lotSettings.mode === 'parent_lot' ? 'parent_lot' : link.lotSettings.customType}</strong></div>
-                    <div>Total Deals Copied: <strong className="text-slate-200">{link.totalTradesCopied}</strong></div>
-                    <div>
-                      Total Copied Profit:{' '}
+                      Copied P&amp;L:{' '}
                       {isCloudMode && link.totalProfitAvailable === false ? (
-                        <span className="text-slate-400 italic font-sans">Deal P&amp;L awaiting EA sync</span>
+                        <span className="text-slate-500 italic font-sans">Awaiting EA sync</span>
                       ) : (
-                        <strong className={link.totalProfitUSD >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                        <strong className={link.totalProfitUSD >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
                           ${link.totalProfitUSD.toLocaleString()}
                         </strong>
                       )}
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-1 text-slate-500 italic">
-                    <p>Not linked to any mentor.</p>
-                  </div>
+                  <p className="text-slate-500 italic">Not linked to any mentor.</p>
                 )}
               </div>
 
-              <div className="flex justify-between items-center pt-2 border-t border-slate-800">
+              <div className="space-y-1.5 text-xs">
+                <span className="font-semibold text-slate-800 block">Recent Account Activity</span>
+                {recentCopies.length > 0 || traderAuditHistory.length > 0 ? (
+                  <div className="space-y-1 max-h-28 overflow-y-auto">
+                    {recentCopies.map((m) => (
+                      <div key={m.id} className="flex items-center justify-between rounded border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-[11px]">
+                        <span className="text-slate-800">{m.symbol} {m.orderType} ({m.childLots.toFixed(2)}L)</span>
+                        <AdminStatusText status={m.status} />
+                      </div>
+                    ))}
+                    {traderAuditHistory.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px]">
+                        <span className="text-slate-700 truncate pr-2">{item.action}: {item.details}</span>
+                        <span className="font-mono text-slate-400 shrink-0">{new Date(item.timestamp).toLocaleDateString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-slate-500 italic">No recent copy executions or audit entries.</p>
+                )}
+              </div>
+
+              <div className="flex justify-between items-center pt-2 border-t border-slate-200">
                 {!isCloudMode ? (
                   <button
+                    type="button"
                     onClick={() => {
                       setDetailsTrader(null);
                       setEditingTrader(detailsTrader);
                     }}
-                    className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                   >
                     Edit Trader
                   </button>
@@ -516,8 +476,9 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                   </span>
                 )}
                 <button
+                  type="button"
                   onClick={() => setDetailsTrader(null)}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-1.5 text-xs font-medium text-slate-300 hover:text-white"
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   Close
                 </button>
@@ -527,14 +488,12 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
         );
       })()}
 
-      {/* Edit Trader Modal (Demo Mode Only) */}
       <EditTraderModal
         isOpen={!isCloudMode && Boolean(editingTrader)}
         trader={editingTrader}
         onClose={() => setEditingTrader(null)}
       />
 
-      {/* Confirmation Modal for Approve / Suspend / Reactivate */}
       <ConfirmationModal
         isOpen={confirmModalData.isOpen}
         onClose={() => setConfirmModalData({ isOpen: false, trader: null, action: 'suspend' })}
@@ -565,7 +524,6 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
         variant={confirmModalData.action === 'suspend' ? 'danger' : 'primary'}
       />
 
-      {/* Add Trader Modal (Demo Mode Only) */}
       <AddTraderModal
         isOpen={!isCloudMode && isAddOpen}
         onClose={() => setIsAddOpen(false)}

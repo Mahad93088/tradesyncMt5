@@ -1,0 +1,271 @@
+import React, { useMemo, useState } from 'react';
+import { Bell, Check, Search } from 'lucide-react';
+import { useApp } from '../../context/AppContext';
+import { formatHeartbeatAge } from '../common/dashboardHelpers';
+import {
+  AdminPageHeader,
+  AdminStatusText,
+  AdminEmptyState,
+} from './adminUi';
+
+interface AdminNotificationsViewProps {
+  onNavigateTab?: (tab: string) => void;
+}
+
+export const AdminNotificationsView: React.FC<AdminNotificationsViewProps> = ({
+  onNavigateTab,
+}) => {
+  const {
+    notifications,
+    mt5Accounts,
+    users,
+    tradeMappings,
+    markNotificationRead,
+  } = useApp();
+
+  const [filterType, setFilterType] = useState<'all' | 'error' | 'warning' | 'info' | 'success'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Live operational alerts derived from real platform state (no fabricated entries)
+  const derivedAlerts = useMemo(() => {
+    const items: Array<{
+      id: string;
+      title: string;
+      message: string;
+      type: 'error' | 'warning' | 'info';
+      timestamp: string;
+      source: string;
+      targetTab: string;
+    }> = [];
+
+    const pendingMentors = users.filter((u) => u.role === 'mentor' && u.status === 'pending');
+    const pendingTraders = users.filter((u) => u.role === 'trader' && u.status === 'pending');
+    const suspendedUsers = users.filter((u) => u.status === 'suspended');
+
+    if (pendingMentors.length > 0) {
+      items.push({
+        id: 'derived_pending_mentors',
+        title: `${pendingMentors.length} Mentor Approval(s) Pending`,
+        message: `${pendingMentors.map((m) => m.fullName).slice(0, 3).join(', ')} awaiting Super Admin activation.`,
+        type: 'warning',
+        timestamp: pendingMentors[0].createdAt,
+        source: 'User Approvals',
+        targetTab: 'mentors',
+      });
+    }
+
+    if (pendingTraders.length > 0) {
+      items.push({
+        id: 'derived_pending_traders',
+        title: `${pendingTraders.length} Trader Approval(s) Pending`,
+        message: `${pendingTraders.map((t) => t.fullName).slice(0, 3).join(', ')} awaiting follower access review.`,
+        type: 'warning',
+        timestamp: pendingTraders[0].createdAt,
+        source: 'User Approvals',
+        targetTab: 'traders',
+      });
+    }
+
+    if (suspendedUsers.length > 0) {
+      items.push({
+        id: 'derived_suspended_users',
+        title: `${suspendedUsers.length} Suspended Account(s)`,
+        message: `Suspended profiles have automated trade copying paused.`,
+        type: 'info',
+        timestamp: new Date().toISOString(),
+        source: 'Account Governance',
+        targetTab: 'mentors',
+      });
+    }
+
+    mt5Accounts.forEach((acc) => {
+      if (acc.connectionStatus === 'error') {
+        items.push({
+          id: `derived_acc_err_${acc.id}`,
+          title: `Terminal #${acc.accountNumber} Error`,
+          message: acc.errorMessage || 'Authentication or bridge error reported.',
+          type: 'error',
+          timestamp: acc.lastHeartbeat || new Date().toISOString(),
+          source: 'MT5 Terminal',
+          targetTab: 'system-health',
+        });
+      } else if (acc.isStale) {
+        items.push({
+          id: `derived_acc_stale_${acc.id}`,
+          title: `Stale Heartbeat on #${acc.accountNumber}`,
+          message: `Last heartbeat ${formatHeartbeatAge(acc.lastHeartbeat)}. Check MT5 terminal connectivity.`,
+          type: 'warning',
+          timestamp: acc.lastHeartbeat || new Date().toISOString(),
+          source: 'Heartbeat Guard',
+          targetTab: 'system-health',
+        });
+      }
+    });
+
+    const failedMappings = tradeMappings.filter(
+      (m) => m.status !== 'EXECUTED' && m.status !== 'CLOSED' && m.status !== 'PENDING'
+    );
+    if (failedMappings.length > 0) {
+      const latest = failedMappings[0];
+      items.push({
+        id: 'derived_failed_copies',
+        title: `${failedMappings.length} Failed Bridge Instruction(s)`,
+        message: `Latest failure on ${latest.symbol} (Parent #${latest.parentTradeTicket}): ${latest.errorMessage || latest.status}`,
+        type: 'error',
+        timestamp: latest.openTime,
+        source: 'Trade Copier',
+        targetTab: 'copier-monitoring',
+      });
+    }
+
+    return items;
+  }, [users, mt5Accounts, tradeMappings]);
+
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
+  const filteredDerived = derivedAlerts.filter((a) => {
+    const matchesType = filterType === 'all' || a.type === filterType;
+    const matchesSearch =
+      a.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      a.message.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesType && matchesSearch;
+  });
+
+  const filteredNotifs = notifications.filter((n) => {
+    const matchesType = filterType === 'all' || n.type === filterType;
+    const matchesSearch =
+      n.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      n.message.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesType && matchesSearch;
+  });
+
+  return (
+    <div className="space-y-6">
+      <AdminPageHeader
+        title="Notifications & Alerts"
+        meta={`${derivedAlerts.length} Live Signals · ${unreadCount} Unread`}
+        subtitle="Real-time operational alerts for offline/stale terminals, pending mentor & trader approvals, failed bridge instructions, and system notices."
+        actions={
+          unreadCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => notifications.forEach((n) => markNotificationRead(n.id))}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Check className="h-3.5 w-3.5 text-emerald-600" />
+              <span>Mark All as Read</span>
+            </button>
+          ) : undefined
+        }
+      />
+
+      {/* Search & Severity Filters */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-xs">
+        <div className="relative w-full sm:w-80">
+          <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Search operational alerts..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:outline-none"
+          />
+        </div>
+
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <span className="text-slate-600 font-medium">Severity:</span>
+          <select
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value as any)}
+            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-sky-500"
+          >
+            <option value="all">All Severities</option>
+            <option value="error">Errors</option>
+            <option value="warning">Warnings</option>
+            <option value="info">Info</option>
+            <option value="success">Success</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Live Derived Operational Signals */}
+      {filteredDerived.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+              Active Platform Conditions ({filteredDerived.length})
+            </h3>
+            <span className="font-mono text-[11px] text-slate-500">Derived from live state</span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {filteredDerived.map((item) => (
+              <div key={item.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <AdminStatusText status={item.type} />
+                    <span className="font-semibold text-slate-900">{item.title}</span>
+                    <span className="font-mono text-[10px] text-slate-500">{item.source}</span>
+                  </div>
+                  <p className="text-slate-600">{item.message}</p>
+                </div>
+                {onNavigateTab && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab(item.targetTab)}
+                    className="rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0"
+                  >
+                    Inspect
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Recorded Platform Notifications */}
+      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+            System Notification Stream ({filteredNotifs.length})
+          </h3>
+        </div>
+        {filteredNotifs.length === 0 ? (
+          <div className="p-6">
+            <AdminEmptyState
+              icon={Bell}
+              title="No recorded notifications match your filter"
+              description="System broadcasts and real-time terminal notices will appear here."
+            />
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {filteredNotifs.map((notif) => (
+              <div
+                key={notif.id}
+                onClick={() => markNotificationRead(notif.id)}
+                className={`p-4 cursor-pointer transition-colors hover:bg-slate-50 flex items-start justify-between gap-3 text-xs ${
+                  notif.read ? 'opacity-70' : 'bg-sky-50/20'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <AdminStatusText status={notif.type} />
+                    <span className="font-semibold text-slate-900">{notif.title}</span>
+                    {!notif.read && (
+                      <span className="h-2 w-2 rounded-full bg-sky-600" title="Unread" />
+                    )}
+                  </div>
+                  <p className="text-slate-600 leading-relaxed">{notif.message}</p>
+                </div>
+                <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                  {new Date(notif.timestamp).toLocaleString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};

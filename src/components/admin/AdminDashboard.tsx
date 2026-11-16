@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Users,
   UserCheck,
@@ -6,25 +6,29 @@ import {
   Server,
   Activity,
   AlertTriangle,
-  CheckCircle2,
-  Cpu,
-  ArrowUpRight,
-  Plus,
-  Radio,
-  Zap,
-  TrendingUp,
-  ShieldCheck,
-  Bell,
+  Link2,
+  DollarSign,
   Clock,
-  Info,
-  Layers,
-  Key
+  Plus,
+  Bell,
+  Key,
+  ArrowUpRight,
+  ShieldCheck,
+  Wifi,
+  CheckCircle2,
+  UserPlus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
-import { StatsCard } from '../common/StatsCard';
-import { StatusBadge } from '../common/StatusBadge';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
+import { formatHeartbeatAge } from '../common/dashboardHelpers';
+import {
+  AdminPageHeader,
+  AdminStatCard,
+  AdminStatusText,
+  AdminSparkBarChart,
+  AdminDistributionChart,
+} from './adminUi';
 
 interface AdminDashboardProps {
   onNavigateTab: (tab: string) => void;
@@ -33,11 +37,13 @@ interface AdminDashboardProps {
   onOpenRegisterAccount?: () => void;
 }
 
+type ActivityFeedTab = 'mentors' | 'traders' | 'connections' | 'admin-actions' | 'alerts';
+
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onNavigateTab,
   onOpenCreateMentor,
   onOpenAddTrader,
-  onOpenRegisterAccount
+  onOpenRegisterAccount,
 }) => {
   const { isCloudMode } = useAuth();
   const {
@@ -49,60 +55,135 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     tradeMappings,
     syncLogs,
     auditLogs,
+    notifications,
     systemHealth,
     cloudBridgeTelemetry,
     broadcastAnnouncement,
-    refreshCloudData
+    refreshCloudData,
   } = useApp();
 
+  const [activityTab, setActivityTab] = useState<ActivityFeedTab>('mentors');
   const [announcementTitle, setAnnouncementTitle] = useState('');
   const [announcementMsg, setAnnouncementMsg] = useState('');
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
 
-  // Compute metrics across all roles & statuses
-  const admins = users.filter((u) => u.role === 'admin');
+  // Core metrics
   const mentors = users.filter((u) => u.role === 'mentor');
   const traders = users.filter((u) => u.role === 'trader');
   const activeMentors = mentors.filter((m) => m.status === 'active').length;
   const pendingMentors = mentors.filter((m) => m.status === 'pending').length;
-  const suspendedMentors = mentors.filter((m) => m.status === 'suspended').length;
   const activeTraders = traders.filter((t) => t.status === 'active').length;
   const pendingTraders = traders.filter((t) => t.status === 'pending').length;
-  const suspendedTraders = traders.filter((t) => t.status === 'suspended').length;
-  const totalActiveUsers = users.filter((u) => u.status === 'active').length;
-  const totalPendingUsers = users.filter((u) => u.status === 'pending').length;
-  const totalSuspendedUsers = users.filter((u) => u.status === 'suspended').length;
+  const totalPendingApprovals = pendingMentors + pendingTraders;
 
-  const activeSubs = subscriptions.filter((s) => s.status === 'active').length;
-  const expiredSubs = subscriptions.filter((s) => s.status === 'expired').length;
-  const cancelledSubs = subscriptions.filter((s) => s.status === 'cancelled').length;
-  const pendingSubs = subscriptions.filter((s) => s.status === 'pending').length;
-
-  const connectedMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'connected').length;
-  const disconnectedMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'disconnected').length;
-  const errorMT5 = mt5Accounts.filter((a) => a.connectionStatus === 'error').length;
-  const staleMT5 = isCloudMode
+  const connectedTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'connected').length;
+  const staleTerminals = isCloudMode
     ? cloudBridgeTelemetry.staleTerminalsCount || mt5Accounts.filter((a) => a.isStale).length
     : mt5Accounts.filter((a) => a.isStale).length;
+  const disconnectedTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'disconnected').length;
+  const errorTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'error').length;
 
-  const totalExecuted = tradeMappings.filter(
+  const activeCopyAssignments = parentChildLinks.filter((l) => l.status === 'active').length;
+
+  const activeSubscriptions = subscriptions.filter((s) => s.status === 'active');
+  const trialSubscriptions = subscriptions.filter((s) => s.status === 'trial');
+  const demoMrr = activeSubscriptions.reduce((sum, sub) => {
+    return sum + (sub.billingCycle === 'yearly' ? sub.price / 12 : sub.price);
+  }, 0);
+
+  const executedInstructions = tradeMappings.filter(
     (m) => m.status === 'EXECUTED' || m.status === 'CLOSED'
   ).length;
-  const failedTrades = tradeMappings.filter(
+  const pendingInstructions = tradeMappings.filter((m) => m.status === 'PENDING').length;
+  const failedInstructions = tradeMappings.filter(
     (m) => m.status !== 'EXECUTED' && m.status !== 'CLOSED' && m.status !== 'PENDING'
   ).length;
-  const openSignals = isCloudMode
-    ? tradeMappings.filter((m) => m.status === 'EXECUTED' || m.status === 'PENDING').length
-    : trades.filter((t) => t.status === 'OPEN').length;
+
   const effectiveLatencyMs = isCloudMode
     ? cloudBridgeTelemetry.averageCopyLatencyMs || systemHealth.averageCopyLatencyMs
     : systemHealth.averageCopyLatencyMs;
 
+  // Derived Growth Series (grouped by month from actual user records, never fabricated)
+  const userGrowthPoints = useMemo(() => {
+    const buckets = new Map<string, { label: string; primary: number; secondary: number; sortKey: number }>();
+    const addUser = (u: typeof users[number]) => {
+      const ts = Date.parse(u.createdAt);
+      if (!Number.isFinite(ts)) return;
+      const d = new Date(ts);
+      const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+      const existing = buckets.get(key) || { label, primary: 0, secondary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+      if (u.role === 'mentor') existing.primary += 1;
+      if (u.role === 'trader') existing.secondary += 1;
+      buckets.set(key, existing);
+    };
+    users.forEach(addUser);
+    return Array.from(buckets.values())
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .slice(-6)
+      .map(({ label, primary, secondary }) => ({ label, primary, secondary }));
+  }, [users]);
+
+  // Derived Subscription & Revenue Series (Demo Mode only; Cloud Mode explicitly Not Configured)
+  const subscriptionGrowthPoints = useMemo(() => {
+    if (isCloudMode) return [];
+    const buckets = new Map<string, { label: string; primary: number; secondary: number; sortKey: number }>();
+    subscriptions.forEach((s) => {
+      const ts = Date.parse(s.startedAt);
+      if (!Number.isFinite(ts)) return;
+      const d = new Date(ts);
+      const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+      const existing = buckets.get(key) || { label, primary: 0, secondary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+      if (s.status === 'active') existing.primary += 1;
+      else existing.secondary += 1;
+      buckets.set(key, existing);
+    });
+    return Array.from(buckets.values())
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .slice(-6)
+      .map(({ label, primary, secondary }) => ({ label, primary, secondary }));
+  }, [isCloudMode, subscriptions]);
+
+  const monthlyRevenuePoints = useMemo(() => {
+    if (isCloudMode) return [];
+    const buckets = new Map<string, { label: string; primary: number; sortKey: number }>();
+    subscriptions
+      .filter((s) => s.status === 'active' || s.status === 'expired')
+      .forEach((s) => {
+        const ts = Date.parse(s.startedAt);
+        if (!Number.isFinite(ts)) return;
+        const d = new Date(ts);
+        const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+        const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+        const normalized = Math.round(s.billingCycle === 'yearly' ? s.price / 12 : s.price);
+        const existing = buckets.get(key) || { label, primary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+        existing.primary += normalized;
+        buckets.set(key, existing);
+      });
+    return Array.from(buckets.values())
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .slice(-6)
+      .map(({ label, primary }) => ({ label, primary }));
+  }, [isCloudMode, subscriptions]);
+
+  const recentMentors = [...mentors]
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, 6);
+  const recentTraders = [...traders]
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, 6);
+  const recentConnections = [...mt5Accounts]
+    .sort((a, b) => Date.parse(b.lastHeartbeat || '') - Date.parse(a.lastHeartbeat || ''))
+    .slice(0, 6);
+  const recentAdminActions = auditLogs.slice(0, 6);
+  const systemAlerts = notifications.filter((n) => n.type === 'error' || n.type === 'warning').slice(0, 6);
+
   const handleBroadcast = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!announcementTitle || !announcementMsg) return;
-    broadcastAnnouncement(announcementTitle, announcementMsg, 'all');
+    if (!announcementTitle.trim() || !announcementMsg.trim()) return;
+    broadcastAnnouncement(announcementTitle.trim(), announcementMsg.trim(), 'all');
     setAnnouncementTitle('');
     setAnnouncementMsg('');
     setShowBroadcastModal(false);
@@ -110,492 +191,513 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Header & Quick Actions */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-sm">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-bold tracking-tight text-slate-100">
-              System Administration
-            </h1>
-            <span
-              className={`rounded border px-2 py-0.5 text-[10px] font-mono ${
-                isCloudMode
-                  ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
-                  : 'bg-slate-800 border-slate-700 text-slate-300'
-              }`}
-            >
-              {isCloudMode ? 'Cloud Bridge Live' : 'Demo Environment'}
-            </span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">
-            Account management, mentor/trader approvals, bridge terminals, and audit monitoring.
-          </p>
-        </div>
-
-        <div className="flex items-center flex-wrap gap-2">
-          <button
-            onClick={() => {
-              if (onOpenRegisterAccount) {
-                onOpenRegisterAccount();
-              } else {
-                setShowRegisterModal(true);
-              }
-            }}
-            className="flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
-          >
-            <Key className="h-3.5 w-3.5" />
-            <span>Register MT5 Account</span>
-          </button>
-          <button
-            onClick={() => setShowBroadcastModal(true)}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-750 hover:text-white transition-colors"
-          >
-            <Bell className="h-3.5 w-3.5 text-slate-400" />
-            <span>Broadcast Alert</span>
-          </button>
-          <button
-            onClick={onOpenCreateMentor}
-            className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>{isCloudMode ? 'Approve / Provision Mentor' : 'Provision Mentor'}</span>
-          </button>
-          {!isCloudMode && onOpenAddTrader && (
+      <AdminPageHeader
+        title="Platform Overview"
+        meta={isCloudMode ? 'Cloud Demo Bridge · Live Telemetry' : 'Demo Sandbox Mode'}
+        subtitle="Executive command center for TradeSync MT5 mentor approvals, follower terminals, copier execution health, and billing readiness."
+        actions={
+          <>
             <button
-              onClick={onOpenAddTrader}
-              className="flex items-center gap-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+              type="button"
+              onClick={() => {
+                if (onOpenRegisterAccount) onOpenRegisterAccount();
+                else setShowRegisterModal(true);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Key className="h-3.5 w-3.5 text-slate-500" />
+              <span>Register MT5</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBroadcastModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Bell className="h-3.5 w-3.5 text-slate-500" />
+              <span>Broadcast Alert</span>
+            </button>
+            <button
+              type="button"
+              onClick={onOpenCreateMentor}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" />
-              <span>Add Trader</span>
+              <span>{isCloudMode ? 'Approve / Provision Mentor' : 'Provision Mentor'}</span>
             </button>
-          )}
-        </div>
-      </div>
+            {!isCloudMode && onOpenAddTrader && (
+              <button
+                type="button"
+                onClick={onOpenAddTrader}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+              >
+                <UserPlus className="h-3.5 w-3.5" />
+                <span>Add Trader</span>
+              </button>
+            )}
+          </>
+        }
+      />
 
-      {/* Mode Status Notice */}
-      <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2.5 text-xs flex items-center justify-between gap-3 text-slate-400">
-        <div className="flex items-center gap-2">
-          <Info className={`h-4 w-4 shrink-0 ${isCloudMode ? 'text-emerald-400' : 'text-sky-400'}`} />
+      {/* Environment & Demo Safety Notice */}
+      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 text-slate-700">
+          <ShieldCheck className={`h-4 w-4 shrink-0 ${isCloudMode ? 'text-emerald-600' : 'text-sky-600'}`} />
           <span>
             {isCloudMode ? (
               <>
-                <strong>Cloud Demo Bridge Active:</strong> Displaying live Supabase MT5 terminals, copy mappings, and synchronization logs (Demo-only EA safeguard enforced).
+                <strong>Cloud Demo Bridge Active:</strong> Displaying live Supabase profiles, MT5 terminals, copy assignments, and bridge audit telemetry. Real-money accounts remain blocked by EA Demo safeguards.
               </>
             ) : (
               <>
-                <strong>Demo Data Notice:</strong> All metrics, account balances, and copy mappings displayed below represent simulated testnet data.
+                <strong>Demo Sandbox Mode:</strong> Displaying interactive simulated mentors, traders, MT5 accounts, and sandbox billing metrics. Switch to Cloud Auth for live Supabase telemetry.
               </>
             )}
           </span>
         </div>
-        <span className="font-mono text-[11px] text-slate-500 hidden sm:inline">
+        <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap shrink-0 tabular-nums">
           {isCloudMode
             ? cloudBridgeTelemetry.bridgePersistenceReady
-              ? 'Supabase Bridge Verified'
-              : 'Bridge Persistence Pending'
-            : 'Live MT5 binary bridge disarmed'}
+              ? `Bridge Verified · ${effectiveLatencyMs}ms avg`
+              : 'Bridge Verification Pending'
+            : `Simulated Engine · ${effectiveLatencyMs}ms`}
         </span>
       </div>
 
-      {/* Pending Approvals Callout in Cloud Mode */}
-      {totalPendingUsers > 0 && (
-        <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-200">
+      {/* Pending Approvals Callout */}
+      {totalPendingApprovals > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-950">
           <div className="flex items-center gap-2.5">
-            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
             <span>
-              <strong>{totalPendingUsers} account(s) awaiting approval</strong> ({pendingMentors} mentor, {pendingTraders} trader). Review pending registrations to grant platform access.
+              <strong>{totalPendingApprovals} registration(s) awaiting Super Admin approval</strong> ({pendingMentors} mentor, {pendingTraders} trader). Review pending profiles to grant platform access.
             </span>
           </div>
-          <button
-            onClick={onOpenCreateMentor}
-            className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-3 py-1.5 text-xs transition-colors shrink-0"
-          >
-            Review Pending Users
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {pendingMentors > 0 && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('mentors')}
+                className="rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold px-3 py-1.5 text-xs whitespace-nowrap transition-colors"
+              >
+                Review Mentors
+              </button>
+            )}
+            {pendingTraders > 0 && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('traders')}
+                className="rounded-lg border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 font-semibold px-3 py-1.5 text-xs whitespace-nowrap transition-colors"
+              >
+                Review Traders
+              </button>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Primary KPI Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-        <StatsCard
+      {/* 10 Summary KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
+        <AdminStatCard
           title="Total Mentors"
           value={mentors.length}
-          subtitle={`${activeMentors} Active • ${pendingMentors} Pending • ${suspendedMentors} Susp`}
+          subtitle={`${pendingMentors} pending review`}
           icon={Users}
-          accentColor="blue"
-          isDemo={!isCloudMode}
+          tone="blue"
           onClick={() => onNavigateTab('mentors')}
         />
-        <StatsCard
+        <AdminStatCard
+          title="Active Mentors"
+          value={activeMentors}
+          subtitle={mentors.length > 0 ? `${Math.round((activeMentors / mentors.length) * 100)}% verified` : '0 registered'}
+          icon={CheckCircle2}
+          tone="emerald"
+          onClick={() => onNavigateTab('mentors')}
+        />
+        <AdminStatCard
           title="Total Traders"
           value={traders.length}
-          subtitle={`${activeTraders} Active • ${pendingTraders} Pending • ${suspendedTraders} Susp`}
+          subtitle={`${pendingTraders} pending review`}
           icon={UserCheck}
-          accentColor="teal"
-          isDemo={!isCloudMode}
+          tone="blue"
           onClick={() => onNavigateTab('traders')}
         />
-        <StatsCard
-          title={isCloudMode ? 'Billing & Plans Schema' : 'Subscriptions'}
-          value={isCloudMode ? 'Unprovisioned' : activeSubs}
-          subtitle={
-            isCloudMode
-              ? 'No plans/payments tables in DB'
-              : `${activeSubs} Active • ${expiredSubs} Exp • ${cancelledSubs} Canc`
-          }
-          icon={CreditCard}
-          accentColor="slate"
-          isDemo={!isCloudMode}
-          onClick={() => onNavigateTab('plans')}
+        <AdminStatCard
+          title="Active Traders"
+          value={activeTraders}
+          subtitle={traders.length > 0 ? `${Math.round((activeTraders / traders.length) * 100)}% active` : '0 registered'}
+          icon={Activity}
+          tone="emerald"
+          onClick={() => onNavigateTab('traders')}
         />
-        <StatsCard
-          title={isCloudMode ? 'Cloud MT5 Terminals' : 'Demo MT5 Terminals'}
-          value={connectedMT5}
-          subtitle={
-            staleMT5 > 0
-              ? `${connectedMT5} Online • ${staleMT5} Stale • ${disconnectedMT5 + errorMT5} Off`
-              : `${connectedMT5} Connected • ${disconnectedMT5 + errorMT5} Offline`
-          }
+        <AdminStatCard
+          title="Total MT5 Accounts"
+          value={mt5Accounts.length}
+          subtitle={`${mt5Accounts.filter((a) => a.accountRole === 'parent').length} parent · ${mt5Accounts.filter((a) => a.accountRole === 'child').length} child`}
           icon={Server}
-          accentColor={errorMT5 > 0 || staleMT5 > 0 ? 'amber' : 'emerald'}
-          isDemo={!isCloudMode}
-          onClick={() => onNavigateTab('connections')}
+          tone="neutral"
+          onClick={() => onNavigateTab('mt5-accounts')}
+        />
+        <AdminStatCard
+          title="Connected Terminals"
+          value={connectedTerminals}
+          subtitle={staleTerminals > 0 ? `${staleTerminals} stale · ${disconnectedTerminals + errorTerminals} offline` : `${disconnectedTerminals + errorTerminals} offline`}
+          icon={Wifi}
+          tone={errorTerminals > 0 || staleTerminals > 0 ? 'amber' : 'emerald'}
+          onClick={() => onNavigateTab('system-health')}
+        />
+        <AdminStatCard
+          title="Active Copy Assignments"
+          value={activeCopyAssignments}
+          subtitle={`${parentChildLinks.length} total mappings`}
+          icon={Link2}
+          tone="blue"
+          onClick={() => onNavigateTab('copier-monitoring')}
+        />
+        <AdminStatCard
+          title="Active Subscriptions"
+          value={isCloudMode ? 'Not Configured' : activeSubscriptions.length}
+          subtitle={isCloudMode ? 'Billing tables pending' : `${trialSubscriptions.length} trial · ${subscriptions.length} total`}
+          icon={CreditCard}
+          tone={isCloudMode ? 'amber' : 'emerald'}
+          onClick={() => onNavigateTab('subscriptions')}
+        />
+        <AdminStatCard
+          title="Monthly Recurring Rev"
+          value={isCloudMode ? 'Not Configured' : `$${Math.round(demoMrr).toLocaleString()}`}
+          subtitle={isCloudMode ? 'Payments schema pending' : 'Demo sandbox MRR'}
+          icon={DollarSign}
+          tone={isCloudMode ? 'amber' : 'emerald'}
+          onClick={() => onNavigateTab('payments-revenue')}
+        />
+        <AdminStatCard
+          title="Pending Approvals"
+          value={totalPendingApprovals}
+          subtitle={`${pendingMentors} mentors · ${pendingTraders} traders`}
+          icon={Clock}
+          tone={totalPendingApprovals > 0 ? 'amber' : 'neutral'}
+          onClick={() => onNavigateTab(pendingMentors > 0 ? 'mentors' : 'traders')}
         />
       </div>
 
-      {/* MT5 Account Management Quick Navigation Hub */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-        <div
-          onClick={() => onNavigateTab('parent-accounts')}
-          className="group rounded-xl border border-slate-800 bg-slate-900/80 hover:border-cyan-700/80 p-4 transition-all cursor-pointer flex items-center justify-between"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="p-2.5 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400 group-hover:scale-105 transition-transform">
-              <Server className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h4 className="text-sm font-bold text-white group-hover:text-cyan-300 transition-colors">
-                  Parent MT5 Accounts
-                </h4>
-                <span className="rounded bg-cyan-950 border border-cyan-800 px-1.5 py-0.2 text-[10px] font-mono text-cyan-400">
-                  {mt5Accounts.filter((a) => a.accountRole === 'parent').length} Masters
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Manage mentor terminals, inspect connected children, and reassign streams.
-              </p>
-            </div>
-          </div>
-          <ArrowUpRight className="h-4 w-4 text-slate-500 group-hover:text-cyan-400 transition-colors shrink-0" />
-        </div>
-
-        <div
-          onClick={() => onNavigateTab('child-accounts')}
-          className="group rounded-xl border border-slate-800 bg-slate-900/80 hover:border-emerald-700/80 p-4 transition-all cursor-pointer flex items-center justify-between"
-        >
-          <div className="flex items-center gap-3.5">
-            <div className="p-2.5 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-400 group-hover:scale-105 transition-transform">
-              <Layers className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h4 className="text-sm font-bold text-white group-hover:text-emerald-300 transition-colors">
-                  Child MT5 Accounts
-                </h4>
-                <span className="rounded bg-emerald-950 border border-emerald-800 px-1.5 py-0.2 text-[10px] font-mono text-emerald-400">
-                  {mt5Accounts.filter((a) => a.accountRole === 'child').length} Followers
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Audit follower accounts, assign mentor parents, and toggle trading status.
-              </p>
-            </div>
-          </div>
-          <ArrowUpRight className="h-4 w-4 text-slate-500 group-hover:text-emerald-400 transition-colors shrink-0" />
-        </div>
+      {/* 5 Analytics Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <AdminSparkBarChart
+          title="Mentor & Trader Growth"
+          subtitle="Registrations grouped by onboarding month"
+          points={userGrowthPoints}
+          primaryLabel="Mentors"
+          secondaryLabel="Traders"
+        />
+        <AdminSparkBarChart
+          title="Subscription Growth"
+          subtitle="Active vs non-active subscription records"
+          points={subscriptionGrowthPoints}
+          primaryLabel="Active"
+          secondaryLabel="Other"
+          notConfiguredText={
+            isCloudMode
+              ? 'Subscription growth chart requires subscription_plans and subscriptions tables in Supabase.'
+              : undefined
+          }
+        />
+        <AdminSparkBarChart
+          title="Monthly Revenue"
+          subtitle="Normalized monthly recurring billing"
+          points={monthlyRevenuePoints}
+          primaryLabel="MRR ($)"
+          valuePrefix="$"
+          notConfiguredText={
+            isCloudMode
+              ? 'Revenue analytics require live payments and invoices tables. No synthetic MRR is shown in Cloud Mode.'
+              : undefined
+          }
+        />
       </div>
 
-      {/* User, Subscription, Connection, and Signal Status Breakdown */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            User Accounts Status
-          </span>
-          <div className="flex items-baseline gap-2 pt-1">
-            <span className="font-mono text-2xl font-bold text-slate-100">{users.length}</span>
-            <span className="text-xs text-slate-400">Total Users ({admins.length} Admin)</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>Act: <strong className="text-emerald-400">{totalActiveUsers}</strong></div>
-            <div>Pend: <strong className="text-amber-400">{totalPendingUsers}</strong></div>
-            <div>Susp: <strong className="text-rose-400">{totalSuspendedUsers}</strong></div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Subscription Lifecycle
-          </span>
-          {isCloudMode ? (
-            <>
-              <div className="flex items-baseline gap-2 pt-1">
-                <span className="font-mono text-lg font-bold text-amber-300">Not Provisioned</span>
-              </div>
-              <div className="pt-1 text-[11px] border-t border-slate-800 text-slate-400">
-                Requires <code className="font-mono text-slate-300">subscription_plans</code> &amp;{' '}
-                <code className="font-mono text-slate-300">payments</code> tables in Supabase.
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="flex items-baseline gap-2 pt-1">
-                <span className="font-mono text-2xl font-bold text-slate-100">{subscriptions.length}</span>
-                <span className="text-xs text-slate-400">Subscriptions</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-                <div>Active: <strong className="text-emerald-400">{activeSubs}</strong></div>
-                <div>Expired: <strong className="text-amber-400">{expiredSubs}</strong></div>
-                <div>Cancelled: <strong className="text-slate-400">{cancelledSubs}</strong></div>
-                <div>Pending: <strong className="text-sky-400">{pendingSubs}</strong></div>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Connection Status Overview
-          </span>
-          <div className="flex items-baseline gap-2 pt-1">
-            <span className="font-mono text-2xl font-bold text-slate-100">{mt5Accounts.length}</span>
-            <span className="text-xs text-slate-400">Registered ({parentChildLinks.filter((l) => l.status === 'active').length} Links)</span>
-          </div>
-          <div className="grid grid-cols-4 gap-1.5 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>On: <strong className="text-emerald-400">{connectedMT5}</strong></div>
-            <div>Stale: <strong className="text-amber-400">{staleMT5}</strong></div>
-            <div>Off: <strong className="text-slate-400">{disconnectedMT5}</strong></div>
-            <div>Err: <strong className="text-rose-400">{errorMT5}</strong></div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            Copy Signals & Latency
-          </span>
-          <div className="flex items-baseline gap-2 pt-1">
-            <span className="font-mono text-2xl font-bold text-slate-100">
-              {isCloudMode ? tradeMappings.length : trades.length}
-            </span>
-            <span className="text-xs text-slate-400">
-              {isCloudMode ? 'Total Bridge Mappings' : 'Total Deals'}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 pt-1 text-xs border-t border-slate-800 text-slate-400 font-mono">
-            <div>Open Signals: <strong className="text-emerald-400">{openSignals}</strong></div>
-            <div>Executed: <strong className="text-sky-400">{totalExecuted}</strong></div>
-            <div>Failed: <strong className="text-rose-400">{failedTrades}</strong></div>
-            <div>Latency: <strong className="text-slate-200">{effectiveLatencyMs}ms</strong></div>
-          </div>
-        </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <AdminDistributionChart
+          title="Account Connection Statistics"
+          subtitle="Live MT5 terminal telemetry & heartbeat state"
+          items={[
+            { label: 'Connected (EA Active)', value: connectedTerminals, colorClass: 'bg-emerald-600' },
+            { label: 'Stale Heartbeat', value: staleTerminals, colorClass: 'bg-amber-500' },
+            { label: 'Disconnected / Awaiting EA', value: disconnectedTerminals, colorClass: 'bg-slate-400' },
+            { label: 'Connection / Auth Errors', value: errorTerminals, colorClass: 'bg-rose-600' },
+          ]}
+        />
+        <AdminDistributionChart
+          title="Copier Activity Overview"
+          subtitle={`${isCloudMode ? tradeMappings.length : trades.length} total tracked instructions`}
+          items={[
+            { label: 'Executed & Closed Copies', value: executedInstructions, colorClass: 'bg-emerald-600' },
+            { label: 'Pending Queue Instructions', value: pendingInstructions, colorClass: 'bg-sky-600' },
+            { label: 'Failed / Risk Rejected', value: failedInstructions, colorClass: 'bg-rose-600' },
+          ]}
+        />
       </div>
 
-      {/* Grid: Account Connection Records + Recent Platform Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* Connection Records Card */}
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-            <div className="flex items-center gap-2">
-              <Server className="h-4 w-4 text-sky-400" />
-              <h3 className="text-xs font-semibold text-slate-200 uppercase tracking-wider">
-                {isCloudMode ? 'Live Bridge Terminal Records' : 'Connection Records (Demo Accounts)'}
-              </h3>
-            </div>
-            <button
-              onClick={() => onNavigateTab('connections')}
-              className="text-xs text-sky-400 hover:text-sky-300 font-medium flex items-center gap-1"
-            >
-              All Records <ArrowUpRight className="h-3 w-3" />
-            </button>
+      {/* Recent Activity Feeds */}
+      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/70">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Recent Platform Activity</h2>
+            <p className="text-[11px] text-slate-500">Real-time operational feeds across users, terminals, admin events, and alerts.</p>
           </div>
+          <div className="flex items-center flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1">
+            {([
+              { id: 'mentors', label: 'Recent Mentors' },
+              { id: 'traders', label: 'Recent Traders' },
+              { id: 'connections', label: 'Terminal Connections' },
+              { id: 'admin-actions', label: 'Admin Actions' },
+              { id: 'alerts', label: 'System Alerts' },
+            ] as const).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActivityTab(tab.id)}
+                className={`rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors ${
+                  activityTab === tab.id
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
-          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {mt5Accounts.map((acc) => {
-              const user = users.find((u) => u.id === acc.userId);
-              return (
-                <div
-                  key={acc.id}
-                  className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs hover:border-slate-700 transition-colors"
-                >
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono font-semibold text-slate-200">
-                        #{acc.accountNumber}
-                      </span>
-                      <span className="text-[10px] text-slate-500">
-                        ({acc.accountRole === 'parent' ? 'Parent Mentor' : 'Child Trader'})
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      {user?.fullName || 'Verified User'} • {acc.broker} ({acc.server})
-                    </p>
-                    {acc.errorMessage && (
-                      <p className="text-[10px] text-rose-400 truncate max-w-xs" title={acc.errorMessage}>
-                        {acc.errorMessage}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="text-right flex flex-col items-end gap-1">
-                    <StatusBadge status={acc.connectionStatus} size="sm" />
-                    <span className={`font-mono text-[10px] ${acc.isStale ? 'text-amber-400' : 'text-slate-500'}`}>
-                      {acc.connectionStatus === 'connected'
-                        ? acc.isStale
-                          ? 'Stale Heartbeat'
-                          : `${acc.pingMs}ms`
-                        : 'Off'}
-                    </span>
-                  </div>
+        <div className="p-4">
+          {activityTab === 'mentors' && (
+            <div className="space-y-2">
+              {recentMentors.length === 0 ? (
+                <p className="py-6 text-center text-xs text-slate-500">No mentor profiles registered yet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="pb-2.5 pr-4">Mentor</th>
+                        <th className="pb-2.5 pr-4">Email</th>
+                        <th className="pb-2.5 pr-4">Status</th>
+                        <th className="pb-2.5 pr-4">Joined</th>
+                        <th className="pb-2.5 text-right">View</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {recentMentors.map((m) => (
+                        <tr key={m.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 pr-4 font-semibold text-slate-900">{m.fullName}</td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{m.email}</td>
+                          <td className="py-2.5 pr-4"><AdminStatusText status={m.status} /></td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-500 tabular-nums">
+                            {new Date(m.createdAt).toLocaleDateString()}
+                          </td>
+                          <td className="py-2.5 text-right">
+                            <button
+                              type="button"
+                              onClick={() => onNavigateTab('mentors')}
+                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                            >
+                              Manage <ArrowUpRight className="h-3 w-3" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              );
-            })}
-            {mt5Accounts.length === 0 && (
-              <div className="p-6 text-center text-xs text-slate-500">
-                No MT5 accounts registered yet.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Recent Platform Activity & Bridge Sync Logs Card */}
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
-          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-teal-400" />
-              <h3 className="text-xs font-semibold text-slate-200 uppercase tracking-wider">
-                {isCloudMode && auditLogs.length === 0
-                  ? 'Recent Bridge Sync Events'
-                  : 'Recent Platform Activity & Audit'}
-              </h3>
+              )}
             </div>
-            <button
-              onClick={() => onNavigateTab('audit-logs')}
-              className="text-xs text-sky-400 hover:text-sky-300 font-medium flex items-center gap-1"
-            >
-              Full Audit Log <ArrowUpRight className="h-3 w-3" />
-            </button>
-          </div>
+          )}
 
-          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {isCloudMode && auditLogs.length === 0 ? (
-              syncLogs.length > 0 ? (
-                syncLogs.slice(0, 5).map((log) => (
-                  <div
-                    key={log.id}
-                    className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs space-y-1 hover:border-slate-700 transition-colors"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${
-                            log.level === 'success'
-                              ? 'bg-emerald-400'
-                              : log.level === 'error'
-                              ? 'bg-rose-400'
-                              : log.level === 'warn'
-                              ? 'bg-amber-400'
-                              : 'bg-sky-400'
-                          }`}
-                        />
-                        <strong className="text-slate-300">{log.eventType}</strong>
-                        {log.ticket && <span className="text-slate-500">#{log.ticket}</span>}
+          {activityTab === 'traders' && (
+            <div className="space-y-2">
+              {recentTraders.length === 0 ? (
+                <p className="py-6 text-center text-xs text-slate-500">No follower traders registered yet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="pb-2.5 pr-4">Trader</th>
+                        <th className="pb-2.5 pr-4">Email</th>
+                        <th className="pb-2.5 pr-4">Status</th>
+                        <th className="pb-2.5 pr-4">Joined</th>
+                        <th className="pb-2.5 text-right">View</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {recentTraders.map((t) => (
+                        <tr key={t.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 pr-4 font-semibold text-slate-900">{t.fullName}</td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{t.email}</td>
+                          <td className="py-2.5 pr-4"><AdminStatusText status={t.status} /></td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-500 tabular-nums">
+                            {new Date(t.createdAt).toLocaleDateString()}
+                          </td>
+                          <td className="py-2.5 text-right">
+                            <button
+                              type="button"
+                              onClick={() => onNavigateTab('traders')}
+                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                            >
+                              Manage <ArrowUpRight className="h-3 w-3" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activityTab === 'connections' && (
+            <div className="space-y-2">
+              {recentConnections.length === 0 ? (
+                <p className="py-6 text-center text-xs text-slate-500">No MT5 terminals registered yet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="pb-2.5 pr-4">Account #</th>
+                        <th className="pb-2.5 pr-4">Role</th>
+                        <th className="pb-2.5 pr-4">Broker & Server</th>
+                        <th className="pb-2.5 pr-4">Status</th>
+                        <th className="pb-2.5 pr-4">Last Heartbeat</th>
+                        <th className="pb-2.5 text-right">Inspect</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {recentConnections.map((acc) => (
+                        <tr key={acc.id} className="hover:bg-slate-50">
+                          <td className="py-2.5 pr-4 font-mono font-semibold text-slate-900 tabular-nums">#{acc.accountNumber}</td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] uppercase text-slate-600">{acc.accountRole}</td>
+                          <td className="py-2.5 pr-4 text-slate-700">{acc.broker} · <span className="font-mono text-[11px] text-slate-500">{acc.server}</span></td>
+                          <td className="py-2.5 pr-4"><AdminStatusText status={acc.isStale ? 'stale' : acc.connectionStatus} /></td>
+                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600 tabular-nums">{formatHeartbeatAge(acc.lastHeartbeat)}</td>
+                          <td className="py-2.5 text-right">
+                            <button
+                              type="button"
+                              onClick={() => onNavigateTab('mt5-accounts')}
+                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                            >
+                              Open <ArrowUpRight className="h-3 w-3" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activityTab === 'admin-actions' && (
+            <div className="space-y-2">
+              {recentAdminActions.length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-500">
+                  {syncLogs.length > 0
+                    ? `${syncLogs.length} bridge synchronization event(s) available in System Audit Logs.`
+                    : 'No admin audit events recorded in this session.'}
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {recentAdminActions.map((log) => (
+                    <div key={log.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono font-semibold text-slate-900">{log.action}</span>
+                          <AdminStatusText status={log.result} />
+                          <span className="text-[11px] text-slate-500">by {log.actorName}</span>
+                        </div>
+                        <p className="text-slate-600 truncate">{log.details}</p>
                       </div>
-                      <span className="font-mono text-[10px] text-slate-500">
+                      <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
                         {new Date(log.timestamp).toLocaleTimeString()}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-300 leading-normal">{log.details}</p>
-                  </div>
-                ))
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activityTab === 'alerts' && (
+            <div className="space-y-2">
+              {systemAlerts.length === 0 ? (
+                <p className="py-6 text-center text-xs text-slate-500">No active error or warning alerts flagged.</p>
               ) : (
-                <div className="p-6 text-center text-xs text-slate-500">
-                  No bridge synchronization logs recorded yet.
-                </div>
-              )
-            ) : (
-              auditLogs.slice(0, 5).map((log) => (
-                <div
-                  key={log.id}
-                  className="rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 text-xs space-y-1 hover:border-slate-700 transition-colors"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${
-                          log.result === 'success'
-                            ? 'bg-emerald-400'
-                            : log.result === 'failure'
-                            ? 'bg-rose-400'
-                            : 'bg-amber-400'
-                        }`}
-                      />
-                      <strong className="text-slate-300">{log.action}</strong>
-                      <span className="text-slate-500">by {log.actorName}</span>
+                <div className="divide-y divide-slate-100">
+                  {systemAlerts.map((n) => (
+                    <div key={n.id} className="py-2.5 flex items-start justify-between gap-3 text-xs">
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <AdminStatusText status={n.type} />
+                          <span className="font-semibold text-slate-900">{n.title}</span>
+                        </div>
+                        <p className="text-slate-600">{n.message}</p>
+                      </div>
+                      <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                        {new Date(n.timestamp).toLocaleTimeString()}
+                      </span>
                     </div>
-                    <span className="font-mono text-[10px] text-slate-500">
-                      {new Date(log.timestamp).toLocaleTimeString()}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-300 leading-normal">{log.details}</p>
+                  ))}
                 </div>
-              ))
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Broadcast Announcement Modal */}
       {showBroadcastModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-xl space-y-4">
-            <h3 className="text-sm font-semibold text-slate-100">Broadcast System Alert</h3>
-            <p className="text-xs text-slate-400">
-              Send an alert to all active mentors and traders within the dashboard.
-            </p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Broadcast System Alert</h3>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Send an operational notification to all active mentors and traders.
+              </p>
+            </div>
             <form onSubmit={handleBroadcast} className="space-y-3 text-xs">
               <div>
-                <label className="block text-slate-300 mb-1 font-medium">Alert Title</label>
+                <label className="block text-slate-700 mb-1 font-semibold">Alert Title</label>
                 <input
                   type="text"
                   required
                   placeholder="e.g. Scheduled Maintenance Notice"
                   value={announcementTitle}
                   onChange={(e) => setAnnouncementTitle(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
                 />
               </div>
               <div>
-                <label className="block text-slate-300 mb-1 font-medium">Message Body</label>
+                <label className="block text-slate-700 mb-1 font-semibold">Message Body</label>
                 <textarea
                   required
                   rows={3}
-                  placeholder="e.g. Scheduled demo environment update tonight at 23:00 UTC."
+                  placeholder="e.g. Scheduled demo bridge check tonight at 23:00 UTC."
                   value={announcementMsg}
                   onChange={(e) => setAnnouncementMsg(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
                 />
               </div>
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => setShowBroadcastModal(false)}
-                  className="rounded-lg px-3 py-1.5 font-medium text-slate-400 hover:text-slate-200"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 font-semibold text-white transition-colors"
+                  className="rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 font-semibold text-white transition-colors"
                 >
                   Send Alert
                 </button>

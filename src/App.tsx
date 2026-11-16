@@ -10,17 +10,20 @@ import { AuthModal } from './components/common/AuthModal';
 
 // Admin Views
 import { AdminDashboard } from './components/admin/AdminDashboard';
-import { ParentAccountsView } from './components/admin/ParentAccountsView';
-import { ChildAccountsView } from './components/admin/ChildAccountsView';
 import { MentorsManagement } from './components/admin/MentorsManagement';
 import { ProvisionMentorModal } from './components/admin/ProvisionMentorModal';
 import { TradersManagement } from './components/admin/TradersManagement';
 import { AddTraderModal } from './components/admin/AddTraderModal';
+import { MT5AccountsManagementView } from './components/admin/MT5AccountsManagementView';
 import { SubscriptionPlansView } from './components/admin/SubscriptionPlansView';
-import { AccountRelationshipsView } from './components/admin/AccountRelationshipsView';
-import { ConnectionsView } from './components/admin/ConnectionsView';
-import { GlobalLogsView } from './components/admin/GlobalLogsView';
+import { SubscriptionsView } from './components/admin/SubscriptionsView';
+import { PaymentsRevenueView } from './components/admin/PaymentsRevenueView';
 import { SystemHealthView } from './components/admin/SystemHealthView';
+import { TradeCopierMonitoringView } from './components/admin/TradeCopierMonitoringView';
+import { GlobalLogsView } from './components/admin/GlobalLogsView';
+import { AdminNotificationsView } from './components/admin/AdminNotificationsView';
+import { PlatformSettingsView } from './components/admin/PlatformSettingsView';
+import { AdminProfileView } from './components/admin/AdminProfileView';
 
 // Mentor Views
 import { MentorDashboard } from './components/mentor/MentorDashboard';
@@ -42,6 +45,27 @@ import { LotSettingsModal } from './components/trader/LotSettingsModal';
 // Common Views
 import { AccountSettingsView } from './components/common/AccountSettingsView';
 import { NotificationsView } from './components/common/NotificationsView';
+
+const ADMIN_ONLY_TABS = new Set([
+  'mentors',
+  'traders',
+  'mt5-accounts',
+  'parent-accounts',
+  'child-accounts',
+  'admin-parent-accounts',
+  'admin-child-accounts',
+  'plans',
+  'subscriptions',
+  'payments-revenue',
+  'system-health',
+  'connections',
+  'copier-monitoring',
+  'relationships',
+  'audit-logs',
+  'trade-stream',
+  'platform-settings',
+  'admin-profile'
+]);
 
 const AppContent: React.FC = () => {
   const {
@@ -70,12 +94,32 @@ const AppContent: React.FC = () => {
 
   // When role or Cloud/Demo mode changes, reset tab safely to overview
   const role = currentUser.role;
+  const isAdminWorkspace = role === 'admin';
+
   useEffect(() => {
     setCurrentTab('overview');
   }, [role, isCloudMode]);
 
+  useEffect(() => {
+    document.title =
+      role === 'admin'
+        ? 'TradeSync MT5 — Super Admin'
+        : 'TradeSync MT5 - Automated Copy Trading Platform';
+  }, [role]);
+
+  const isRestrictedAdminRoute =
+    role !== 'admin' &&
+    ADMIN_ONLY_TABS.has(currentTab) &&
+    !(role === 'mentor' && currentTab === 'child-accounts');
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-200">
+    <div
+      className={
+        isAdminWorkspace
+          ? 'min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col font-sans selection:bg-sky-500/20 selection:text-sky-900'
+          : 'min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/20 selection:text-cyan-200'
+      }
+    >
       {/* Top Navbar */}
       <Navbar
         onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)}
@@ -109,12 +153,6 @@ const AppContent: React.FC = () => {
                     onOpenAddTrader={() => setIsAddTraderOpen(true)}
                   />
                 )}
-                {(currentTab === 'parent-accounts' || currentTab === 'admin-parent-accounts') && (
-                  <ParentAccountsView />
-                )}
-                {(currentTab === 'child-accounts' || currentTab === 'admin-child-accounts') && (
-                  <ChildAccountsView />
-                )}
                 {currentTab === 'mentors' && (
                   <MentorsManagement
                     isCreateOpen={isCreateMentorOpen}
@@ -127,14 +165,34 @@ const AppContent: React.FC = () => {
                     setIsAddOpen={setIsAddTraderOpen}
                   />
                 )}
+                {currentTab === 'mt5-accounts' && (
+                  <MT5AccountsManagementView key="all" initialTab="all" />
+                )}
+                {(currentTab === 'parent-accounts' || currentTab === 'admin-parent-accounts') && (
+                  <MT5AccountsManagementView key="parent" initialTab="parent" />
+                )}
+                {(currentTab === 'child-accounts' || currentTab === 'admin-child-accounts') && (
+                  <MT5AccountsManagementView key="child" initialTab="child" />
+                )}
                 {currentTab === 'plans' && <SubscriptionPlansView />}
-                {currentTab === 'relationships' && <AccountRelationshipsView />}
-                {currentTab === 'connections' && <ConnectionsView />}
-                {currentTab === 'trade-stream' && <GlobalLogsView />}
-                {currentTab === 'system-health' && <SystemHealthView />}
-                {currentTab === 'audit-logs' && <GlobalLogsView />}
-                {currentTab === 'notifications' && <NotificationsView />}
-                {currentTab === 'settings' && <AccountSettingsView />}
+                {currentTab === 'subscriptions' && <SubscriptionsView />}
+                {currentTab === 'payments-revenue' && <PaymentsRevenueView />}
+                {(currentTab === 'system-health' || currentTab === 'connections') && (
+                  <SystemHealthView />
+                )}
+                {(currentTab === 'copier-monitoring' || currentTab === 'relationships') && (
+                  <TradeCopierMonitoringView />
+                )}
+                {(currentTab === 'audit-logs' || currentTab === 'trade-stream') && (
+                  <GlobalLogsView />
+                )}
+                {currentTab === 'notifications' && (
+                  <AdminNotificationsView onNavigateTab={(tab) => setCurrentTab(tab)} />
+                )}
+                {(currentTab === 'platform-settings' || currentTab === 'settings') && (
+                  <PlatformSettingsView />
+                )}
+                {currentTab === 'admin-profile' && <AdminProfileView />}
               </>
             )}
 
@@ -152,7 +210,7 @@ const AppContent: React.FC = () => {
                 {currentTab === 'invitations' && (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <h2 className="text-xl font-bold text-slate-100">Trader Referral & Invitations</h2>
+                      <h2 className="text-xl font-bold text-slate-100">Trader Referral &amp; Invitations</h2>
                       <button
                         onClick={() => setIsInviteTraderOpen(true)}
                         className="rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors"
@@ -186,7 +244,7 @@ const AppContent: React.FC = () => {
                 {currentTab === 'lot-settings' && (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <h2 className="text-xl font-bold text-slate-100">Lot Size & Risk Controls</h2>
+                      <h2 className="text-xl font-bold text-slate-100">Lot Size &amp; Risk Controls</h2>
                       {traderLink && (
                         <button
                           onClick={() => setIsLotSettingsOpen(true)}
@@ -207,8 +265,8 @@ const AppContent: React.FC = () => {
               </>
             )}
 
-            {/* Super Admin MT5 Accounts Guard */}
-            {role !== 'admin' && (currentTab === 'parent-accounts' || currentTab === 'child-accounts') && (
+            {/* Super Admin Restricted Route Guard */}
+            {isRestrictedAdminRoute && (
               <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-8 text-center space-y-4 shadow-xl">
                 <div className="h-12 w-12 rounded-xl bg-slate-950 border border-slate-800 text-slate-400 mx-auto flex items-center justify-center">
                   <ShieldCheck className="h-6 w-6" />
@@ -216,7 +274,7 @@ const AppContent: React.FC = () => {
                 <div>
                   <h3 className="text-lg font-bold text-white">Restricted Route</h3>
                   <p className="text-xs text-slate-300 max-w-md mx-auto mt-1 leading-relaxed">
-                    Platform-wide {currentTab === 'parent-accounts' ? 'Parent' : 'Child'} MT5 Account administration is restricted to verified administrators.
+                    Platform-wide administration routes are restricted to verified Super Administrators.
                   </p>
                 </div>
                 <button
