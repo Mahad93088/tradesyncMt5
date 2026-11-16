@@ -47,7 +47,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
     lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2'
   );
   const [accountNumber, setAccountNumber] = useState<string>('');
-  const [accountType, setAccountType] = useState<'demo' | 'live'>('demo');
+  const [accountType, setAccountType] = useState<'demo'>('demo');
   const [balance, setBalance] = useState<string | number>(lockedRole === 'parent' ? 50000 : 10000);
   const [currency, setCurrency] = useState<string>('USD');
   const [leverage, setLeverage] = useState<number>(100);
@@ -167,7 +167,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         brokerName: brokerName.trim() || 'XM',
         brokerServer: brokerServer.trim(),
         accountNumber: accountNumber.trim(),
-        accountType,
+        accountType: 'demo',
         balance: parsedBalance,
         equity: parsedBalance,
         currency,
@@ -586,12 +586,15 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                 <label className="text-xs font-semibold text-slate-300">Account Type</label>
                 <select
                   value={accountType}
-                  onChange={(e) => setAccountType(e.target.value as any)}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                  disabled
+                  onChange={() => setAccountType('demo')}
+                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-emerald-300 focus:border-cyan-500 focus:outline-none disabled:opacity-90"
                 >
-                  <option value="demo">Demo Account (Recommended for initial tests)</option>
-                  <option value="live">Live Trading Account</option>
+                  <option value="demo">Demo Account (Demo-Only Safety Enforced)</option>
                 </select>
+                <p className="text-[10px] text-slate-400">
+                  Real-money live accounts are blocked platform-wide (ACCOUNT_TRADE_MODE_DEMO).
+                </p>
               </div>
             </div>
 

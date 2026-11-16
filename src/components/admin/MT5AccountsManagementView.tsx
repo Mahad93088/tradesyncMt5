@@ -153,17 +153,21 @@ export const MT5AccountsManagementView: React.FC<MT5AccountsManagementViewProps>
     if (!confirmToggle.id) return;
     const isConnected = confirmToggle.currentStatus === 'connected';
     const nextStatus = isConnected ? 'disconnected' : 'connected';
-    const res = await mt5AdminService.updateAccountConnection(confirmToggle.id, nextStatus, isCloudMode);
+    const res = isConnected
+      ? await disconnectMT5Account(confirmToggle.id)
+      : await reconnectMT5Account(confirmToggle.id);
+
     if (res.success) {
-      if (isConnected) disconnectMT5Account(confirmToggle.id);
-      else reconnectMT5Account(confirmToggle.id);
       setFeedback({
         type: 'success',
-        message: `Terminal #${confirmToggle.accountNumber} marked ${nextStatus}.`,
+        message: res.message || `Terminal #${confirmToggle.accountNumber} marked ${nextStatus}.`,
       });
       await loadAccounts();
     } else {
-      setFeedback({ type: 'error', message: res.error || 'Failed to update terminal connection state.' });
+      setFeedback({
+        type: 'error',
+        message: res.message || 'Failed to update terminal connection state.',
+      });
     }
   };
 

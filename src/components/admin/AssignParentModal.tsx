@@ -673,12 +673,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         }
       }
 
+      const existingLinkIndex = parentChildLinks.findIndex(
+        (l) => l.traderId === safeTraderId || l.childAccountId === chosenChild.id || toValidUUID(l.childAccountId) === chosenChild.id
+      );
+
       // 1. Execute database mutation via mt5AdminService using real UUIDs and active session
       const res = await mt5AdminService.assignChildToParent({
         mentorId: safeMentorId,
         traderId: safeTraderId,
         parentAccountId: toValidUUID(chosenParent.id),
         childAccountId: toValidUUID(chosenChild.id),
+        replaceExisting: existingLinkIndex >= 0 || Boolean(chosenChild.isAssigned),
         lotSettings: {
           copyMode,
           multiplier: lotMultiplier,
@@ -696,45 +701,43 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         throw new Error(res.error || 'Failed to assign account in Supabase');
       }
 
-      // 2. Synchronize AppContext & localStorage state so the relationship persists immediately
-      const existingLinkIndex = parentChildLinks.findIndex(
-        (l) => l.traderId === safeTraderId || l.childAccountId === chosenChild.id || toValidUUID(l.childAccountId) === chosenChild.id
-      );
+      // 2. Synchronize localStorage state strictly in Local Demo Sandbox mode (never in Cloud Mode)
+      if (!isCloudMode) {
+        const updatedLink: ParentChildLink = {
+          id: res.assignmentId || `link_${Date.now()}`,
+          mentorId: safeMentorId,
+          traderId: safeTraderId,
+          mentorName: chosenParent.mentorName,
+          traderName: chosenChild.traderName,
+          parentAccountId: toValidUUID(chosenParent.id),
+          childAccountId: toValidUUID(chosenChild.id),
+          status: 'active',
+          lotSettings: {
+            mode: 'custom_lot',
+            customType: copyMode,
+            fixedLot,
+            multiplier: lotMultiplier,
+            riskPercent: 1.5,
+            maxLotCap: 5.0,
+            minLotClamp: 0.01,
+            maxDrawdownProtectionPercent: 15.0,
+            copyPendingOrders: true,
+            syncSlTp: true,
+            slippageMaxPips: 3.0,
+          },
+          linkedAt: new Date().toISOString(),
+          totalTradesCopied: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalTradesCopied : 0,
+          totalProfitUSD: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalProfitUSD : 0.0,
+          lastSyncAt: new Date().toISOString(),
+        };
 
-      const updatedLink: ParentChildLink = {
-        id: res.assignmentId || `link_${Date.now()}`,
-        mentorId: safeMentorId,
-        traderId: safeTraderId,
-        mentorName: chosenParent.mentorName,
-        traderName: chosenChild.traderName,
-        parentAccountId: toValidUUID(chosenParent.id),
-        childAccountId: toValidUUID(chosenChild.id),
-        status: 'active',
-        lotSettings: {
-          mode: 'custom_lot',
-          customType: copyMode,
-          fixedLot,
-          multiplier: lotMultiplier,
-          riskPercent: 1.5,
-          maxLotCap: 5.0,
-          minLotClamp: 0.01,
-          maxDrawdownProtectionPercent: 15.0,
-          copyPendingOrders: true,
-          syncSlTp: true,
-          slippageMaxPips: 3.0,
-        },
-        linkedAt: new Date().toISOString(),
-        totalTradesCopied: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalTradesCopied : 0,
-        totalProfitUSD: existingLinkIndex >= 0 ? parentChildLinks[existingLinkIndex].totalProfitUSD : 0.0,
-        lastSyncAt: new Date().toISOString(),
-      };
+        const nextLinks =
+          existingLinkIndex >= 0
+            ? parentChildLinks.map((l, idx) => (idx === existingLinkIndex ? updatedLink : l))
+            : [updatedLink, ...parentChildLinks];
 
-      const nextLinks =
-        existingLinkIndex >= 0
-          ? parentChildLinks.map((l, idx) => (idx === existingLinkIndex ? updatedLink : l))
-          : [updatedLink, ...parentChildLinks];
-
-      localStorage.setItem('tradesync_links', JSON.stringify(nextLinks));
+        localStorage.setItem('tradesync_links', JSON.stringify(nextLinks));
+      }
 
       // 3. Log audit event
       addAuditLog({
@@ -775,7 +778,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
   if (!isOpen) return null;
 
   // Authorization check
-  const isAdmin = currentUser.role === 'admin' || user.role === 'admin';
+  const isAdmin = currentUser?.role === 'admin' || user?.role === 'admin';
   if (!isAdmin) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
@@ -871,36 +874,52 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-800/40">
-                  <button
-                    type="button"
-                    onClick={handleSeedDemoAccounts}
-                    disabled={isSeedingAccounts}
-                    className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-3 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
-                  >
-                    {isSeedingAccounts ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        <span>Provisioning Sandbox...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-3.5 w-3.5" />
-                        <span>⚡ Seed Sandbox Demo Accounts</span>
-                      </>
-                    )}
-                  </button>
+                  {!isCloudMode ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleSeedDemoAccounts}
+                        disabled={isSeedingAccounts}
+                        className="rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-3 py-1.5 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                      >
+                        {isSeedingAccounts ? (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            <span>Provisioning Sandbox...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>⚡ Seed Sandbox Demo Accounts</span>
+                          </>
+                        )}
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCreateDemoDefaultRole(!hasParents ? 'parent' : 'child');
-                      setIsCreateDemoModalOpen(true);
-                    }}
-                    className="rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-600/40 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    <span>Create Custom Demo Account</span>
-                  </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCreateDemoDefaultRole(!hasParents ? 'parent' : 'child');
+                          setIsCreateDemoModalOpen(true);
+                        }}
+                        className="rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-600/40 px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Create Custom Demo Account</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRegisterModalRole(!hasParents ? 'parent' : 'child');
+                        setIsRegisterModalOpen(true);
+                      }}
+                      className="rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white px-3 py-1.5 text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+                    >
+                      <Key className="h-3.5 w-3.5" />
+                      <span>Register MT5 Demo Account</span>
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -1100,7 +1119,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   >
                     <Key className="h-2.5 w-2.5" /> Register XM / Custom Parent
                   </button>
-                  {!hasParents && (
+                  {!isCloudMode && !hasParents && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1265,7 +1284,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
                   >
                     <Key className="h-2.5 w-2.5" /> Register XM / Custom Child
                   </button>
-                  {!hasChildren && (
+                  {!isCloudMode && !hasChildren && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1510,15 +1529,17 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         </div>
       </div>
 
-      {/* Embedded Create Demo Account Modal */}
-      <CreateDemoAccountModal
-        isOpen={isCreateDemoModalOpen}
-        onClose={() => setIsCreateDemoModalOpen(false)}
-        defaultRole={createDemoDefaultRole}
-        onSuccess={() => {
-          onAssignmentSuccess();
-        }}
-      />
+      {/* Embedded Create Demo Account Modal (Local Demo Sandbox Only) */}
+      {!isCloudMode && (
+        <CreateDemoAccountModal
+          isOpen={isCreateDemoModalOpen}
+          onClose={() => setIsCreateDemoModalOpen(false)}
+          defaultRole={createDemoDefaultRole}
+          onSuccess={() => {
+            onAssignmentSuccess();
+          }}
+        />
+      )}
 
       {/* Authoritative MT5 Account Registration Modal (Option A Architecture) */}
       <RegisterMT5AccountModal

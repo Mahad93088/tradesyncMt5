@@ -44,7 +44,7 @@ import {
   INITIAL_SYSTEM_HEALTH,
   INITIAL_NOTIFICATIONS
 } from '../data/mockData';
-import { STANDARD_DEMO_ACCOUNTS } from '../services/mt5AdminService';
+import { STANDARD_DEMO_ACCOUNTS, mt5AdminService } from '../services/mt5AdminService';
 
 export interface CloudBridgeTelemetry {
   bridgePersistenceReady: boolean;
@@ -113,9 +113,11 @@ interface AppContextType {
   editTrader: (traderUserId: string, payload: TraderEditPayload) => void;
 
   // MT5 Actions
-  connectMT5Account: (accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>) => void;
-  disconnectMT5Account: (accountId: string) => void;
-  reconnectMT5Account: (accountId: string) => void;
+  connectMT5Account: (
+    accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>
+  ) => Promise<{ success: boolean; message?: string }>;
+  disconnectMT5Account: (accountId: string) => Promise<{ success: boolean; message?: string }>;
+  reconnectMT5Account: (accountId: string) => Promise<{ success: boolean; message?: string }>;
   toggleAutoTrading: (accountId: string) => void;
 
   // Trader Link & Lot Actions
@@ -1097,54 +1099,132 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // MT5 Actions
-  const connectMT5Account = (accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>) => {
+  const connectMT5Account = async (
+    accountData: Omit<MT5Account, 'id' | 'lastHeartbeat' | 'pingMs' | 'connectionStatus'>
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (accountData.accountType && accountData.accountType !== 'demo') {
+      return {
+        success: false,
+        message: 'Safety block: Only Demo MT5 accounts are permitted (ACCOUNT_TRADE_MODE_DEMO).',
+      };
+    }
+
+    if (isCloudMode && isConfigured) {
+      try {
+        const res = await mt5AdminService.registerMT5Account({
+          accountRole: accountData.accountRole,
+          brokerName: accountData.broker,
+          brokerServer: accountData.server,
+          accountNumber: accountData.accountNumber,
+          accountType: 'demo',
+          balance: accountData.balance,
+          equity: accountData.equity,
+          currency: accountData.currency,
+          leverage: accountData.leverage,
+          userId: currentUser?.id,
+          isCloudMode: true,
+          useSelfServiceEndpoint: currentUser?.role !== 'admin',
+        });
+
+        if (!res.success || !res.account) {
+          return {
+            success: false,
+            message: res.error || 'Failed to register MT5 Demo account with backend.',
+          };
+        }
+
+        await refreshCloudData();
+        return {
+          success: true,
+          message: `Registered MT5 Demo account #${accountData.accountNumber}.`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          message: err?.message || 'Unexpected error registering MT5 Demo account.',
+        };
+      }
+    }
+
     const newAccount: MT5Account = {
       ...accountData,
+      accountType: 'demo',
       id: `mt5_${Date.now()}`,
       connectionStatus: 'connected',
       pingMs: Math.floor(12 + Math.random() * 18),
-      lastHeartbeat: new Date().toISOString()
+      lastHeartbeat: new Date().toISOString(),
     };
 
     setMt5Accounts((prev) => [newAccount, ...prev]);
-
-    // Asynchronously persist to Supabase PostgreSQL if in Cloud Mode
-    if (isCloudMode && currentUser?.id) {
-      supabaseDataService.addAccount({
-        user_id: currentUser.id,
-        account_number: newAccount.accountNumber,
-        broker_server: newAccount.server,
-        broker_name: newAccount.broker,
-        account_role: newAccount.accountRole,
-        account_type: newAccount.accountType,
-        balance: newAccount.balance,
-        equity: newAccount.equity,
-        margin: newAccount.margin,
-        free_margin: newAccount.freeMargin,
-        currency: newAccount.currency,
-        leverage: newAccount.leverage,
-        connection_status: newAccount.connectionStatus,
-        ping_ms: newAccount.pingMs,
-        is_investor_password: newAccount.isInvestorPassword,
-        auto_trading_enabled: newAccount.autoTradingEnabled
-      }).then(({ error }) => {
-        if (error) {
-          console.warn('Supabase persistence notice:', error);
-        }
-      });
-    }
 
     const log: SyncLog = {
       id: `log_${Date.now()}`,
       timestamp: new Date().toISOString(),
       eventType: 'MT5_TERMINAL_CONNECTED',
       level: 'success',
-      details: `MT5 Account #${newAccount.accountNumber} successfully connected to server ${newAccount.server} (${newAccount.accountRole.toUpperCase()}). Ping: ${newAccount.pingMs}ms`
+      details: `MT5 Account #${newAccount.accountNumber} successfully connected to server ${newAccount.server} (${newAccount.accountRole.toUpperCase()}). Ping: ${newAccount.pingMs}ms`,
     };
     setSyncLogs((prev) => [log, ...prev]);
+    return { success: true };
   };
 
-  const disconnectMT5Account = (accountId: string) => {
+  const disconnectMT5Account = async (
+    accountId: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return {
+            success: false,
+            message: sessionCheck.error || 'Authentication session expired. Please sign in again.',
+          };
+        }
+
+        const res = await fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ connectionStatus: 'disconnected' }),
+        });
+
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return {
+            success: false,
+            message: json?.error || `HTTP ${res.status}: Failed to suspend terminal connection.`,
+          };
+        }
+
+        setMt5Accounts((prev) =>
+          prev.map((acc) => {
+            if (acc.id === accountId) {
+              return {
+                ...acc,
+                connectionStatus: 'disconnected',
+                pingMs: 0,
+                errorMessage: 'Suspended / disconnected via dashboard control',
+              };
+            }
+            return acc;
+          })
+        );
+
+        await refreshCloudData();
+        return { success: true, message: json.message || 'Terminal suspended.' };
+      } catch (err: any) {
+        await refreshCloudData();
+        return {
+          success: false,
+          message: err?.message || 'Network error while suspending terminal connection.',
+        };
+      }
+    }
+
     setMt5Accounts((prev) =>
       prev.map((acc) => {
         if (acc.id === accountId) {
@@ -1152,29 +1232,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...acc,
             connectionStatus: 'disconnected',
             pingMs: 0,
-            errorMessage: 'Manually disconnected by user'
+            errorMessage: 'Manually disconnected by user',
           };
         }
         return acc;
       })
     );
 
-    if (isCloudMode && isConfigured) {
-      ensureValidSession().then((sessionCheck) => {
-        if (sessionCheck.valid && sessionCheck.session?.access_token) {
-          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${sessionCheck.session.access_token}`,
-            },
-            body: JSON.stringify({ connectionStatus: 'disconnected' }),
-          }).catch(() => {});
-        }
-      });
-    }
-
-    // Pause any active links attached to this account
     setParentChildLinks((prev) =>
       prev.map((l) => {
         if (l.parentAccountId === accountId || l.childAccountId === accountId) {
@@ -1184,19 +1248,74 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    if (!isCloudMode) {
-      const log: SyncLog = {
-        id: `log_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        eventType: 'MT5_TERMINAL_DISCONNECTED',
-        level: 'warn',
-        details: `MT5 Account ${accountId} disconnected. Associated copy streams paused.`
-      };
-      setSyncLogs((prev) => [log, ...prev]);
-    }
+    const log: SyncLog = {
+      id: `log_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'MT5_TERMINAL_DISCONNECTED',
+      level: 'warn',
+      details: `MT5 Account ${accountId} disconnected. Associated copy streams paused.`,
+    };
+    setSyncLogs((prev) => [log, ...prev]);
+    return { success: true };
   };
 
-  const reconnectMT5Account = (accountId: string) => {
+  const reconnectMT5Account = async (
+    accountId: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return {
+            success: false,
+            message: sessionCheck.error || 'Authentication session expired. Please sign in again.',
+          };
+        }
+
+        const res = await fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ connectionStatus: 'connected' }),
+        });
+
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return {
+            success: false,
+            message: json?.error || `HTTP ${res.status}: Failed to activate terminal connection.`,
+          };
+        }
+
+        setMt5Accounts((prev) =>
+          prev.map((acc) => {
+            if (acc.id === accountId) {
+              return {
+                ...acc,
+                connectionStatus: 'connected',
+                errorMessage: undefined,
+                lastHeartbeat: new Date().toISOString(),
+              };
+            }
+            return acc;
+          })
+        );
+
+        await refreshCloudData();
+        return { success: true, message: json.message || 'Terminal activated.' };
+      } catch (err: any) {
+        await refreshCloudData();
+        return {
+          success: false,
+          message: err?.message || 'Network error while activating terminal connection.',
+        };
+      }
+    }
+
     const ping = Math.floor(15 + Math.random() * 20);
     setMt5Accounts((prev) =>
       prev.map((acc) => {
@@ -1206,47 +1325,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             connectionStatus: 'connected',
             pingMs: ping,
             errorMessage: undefined,
-            lastHeartbeat: new Date().toISOString()
+            lastHeartbeat: new Date().toISOString(),
           };
         }
         return acc;
       })
     );
 
-    if (isCloudMode && isConfigured) {
-      ensureValidSession().then((sessionCheck) => {
-        if (sessionCheck.valid && sessionCheck.session?.access_token) {
-          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${sessionCheck.session.access_token}`,
-            },
-            body: JSON.stringify({ connectionStatus: 'connected' }),
-          }).catch(() => {});
-        }
-      });
-    }
-
-    setParentChildLinks((prev) =>
-      prev.map((l) => {
-        if (l.parentAccountId === accountId || l.childAccountId === accountId) {
-          return { ...l, status: 'active', errorMessage: undefined };
-        }
-        return l;
-      })
-    );
-
-    if (!isCloudMode) {
-      const log: SyncLog = {
-        id: `log_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        eventType: 'MT5_TERMINAL_RESTORED',
-        level: 'success',
-        details: `MT5 Account ${accountId} reconnection verified. Active heartbeat restored (${ping}ms).`
-      };
-      setSyncLogs((prev) => [log, ...prev]);
-    }
+    const log: SyncLog = {
+      id: `log_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'MT5_TERMINAL_RESTORED',
+      level: 'success',
+      details: `MT5 Account ${accountId} reconnection verified. Active heartbeat restored (${ping}ms).`,
+    };
+    setSyncLogs((prev) => [log, ...prev]);
+    return { success: true };
   };
 
   const toggleAutoTrading = (accountId: string) => {

@@ -21,8 +21,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { mt5AdminService } from '../../services/mt5AdminService';
-import { supabase } from '../../lib/supabase';
-import { AccountStatus, User } from '../../types';
+import { AccountStatus } from '../../types';
 
 interface ProvisionMentorModalProps {
   isOpen: boolean;
@@ -75,6 +74,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string>('');
+  const [warningMessage, setWarningMessage] = useState<string>('');
 
   // Load candidate users from Supabase or local state
   const loadCandidates = async () => {
@@ -130,6 +130,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setIsSubmitting(false);
     setShowSuccessToast(false);
     setSuccessMessage('');
+    setWarningMessage('');
 
     loadCandidates();
   }, [isOpen, isCloudMode, subscriptionPlans, currentAuthUser?.id]);
@@ -226,17 +227,22 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
         const res = await mt5AdminService.promoteUserToMentor({
           targetUserId: selectedCandidateId,
           isCloudMode,
+          strategyName: strategyName.trim() || undefined,
+          monthlyFee,
         });
 
-        if (res.success && res.profile) {
-          const targetName = res.profile.full_name || chosenCandidate?.fullName || 'User';
-          const targetEmail = res.profile.email || chosenCandidate?.email || '';
+        if (res.success && (res.profile || !isCloudMode)) {
+          const targetName = res.profile?.full_name || chosenCandidate?.fullName || 'User';
+          const targetEmail = res.profile?.email || chosenCandidate?.email || '';
           const msg = `Successfully approved ${targetName} (${targetEmail}) as active Mentor in public.profiles! Database confirmed update.`;
           setSuccessMessage(msg);
+          if (res.warning) {
+            setWarningMessage(res.warning);
+          }
           setShowSuccessToast(true);
 
           if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile }));
+            window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile || { id: selectedCandidateId } }));
           }
 
           setTimeout(() => {
@@ -257,13 +263,14 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     }
   };
 
-  // Handler for Quick Register & Approve
+  // Handler for Quick Register & Approve (Uses authenticated server-side Auth Admin in Cloud Mode)
   const handleQuickRegisterAndApprove = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors({});
+    setWarningMessage('');
 
-    if (!regFullName.trim()) {
-      setErrors({ regFullName: 'Full Name is required.' });
+    if (!regFullName.trim() || regFullName.trim().length < 2) {
+      setErrors({ regFullName: 'Full Name is required (minimum 2 characters).' });
       return;
     }
     if (!regEmail.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(regEmail.trim())) {
@@ -278,53 +285,68 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setIsSubmitting(true);
 
     try {
-      // 1. Sign up new user in Supabase Auth (trigger creates row in public.profiles with role = 'trader')
-      const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
-        email: regEmail.trim(),
-        password: regPassword,
-        options: {
-          data: {
-            full_name: regFullName.trim(),
-          },
-        },
-      });
+      if (isCloudMode) {
+        const createRes = await mt5AdminService.createAdminUser({
+          fullName: regFullName.trim(),
+          email: regEmail.trim(),
+          password: regPassword,
+          role: 'mentor',
+          status: 'active',
+          strategyName: strategyName.trim() || undefined,
+          monthlyFee,
+        });
 
-      if (signUpErr) {
-        throw signUpErr;
-      }
-
-      if (!signUpData.user?.id) {
-        throw new Error('User creation did not return a valid user identity.');
-      }
-
-      const newUserId = signUpData.user.id;
-
-      // 2. Promote the new user profile to 'mentor' via backend endpoint
-      const promoteRes = await mt5AdminService.promoteUserToMentor({
-        targetUserId: newUserId,
-        isCloudMode,
-      });
-
-      if (!promoteRes.success) {
-        throw new Error(promoteRes.error || 'User registered, but failed to approve as mentor.');
-      }
-
-      setSuccessMessage(
-        `Successfully registered and approved ${regFullName.trim()} (${regEmail.trim()}) as verified Mentor!`
-      );
-      setShowSuccessToast(true);
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: promoteRes.profile }));
-      }
-
-      setTimeout(() => {
-        setIsSubmitting(false);
-        if (onSuccess) {
-          onSuccess(promoteRes.profile);
+        if (!createRes.success || !createRes.profile) {
+          throw new Error(createRes.error || 'Failed to create and approve new mentor.');
         }
-        onClose();
-      }, 1200);
+
+        if (createRes.warning) {
+          setWarningMessage(createRes.warning);
+        }
+
+        setSuccessMessage(
+          `Successfully registered and approved ${regFullName.trim()} (${regEmail.trim()}) as verified Mentor in Supabase without altering your admin session.`
+        );
+        setShowSuccessToast(true);
+
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: createRes.profile }));
+        }
+
+        setTimeout(() => {
+          setIsSubmitting(false);
+          if (onSuccess) {
+            onSuccess(createRes.profile);
+          }
+          onClose();
+        }, 1200);
+      } else {
+        const created = createMentor(
+          {
+            fullName: regFullName.trim(),
+            email: regEmail.trim(),
+            status: 'active',
+          },
+          {
+            strategyName: strategyName.trim() || `${regFullName.trim()}'s Alpha Flow`,
+            monthlyFee: monthlyFee || 0,
+          },
+          selectedPlanId
+        );
+
+        setSuccessMessage(
+          `Created local demo mentor ${regFullName.trim()} (${regEmail.trim()}).`
+        );
+        setShowSuccessToast(true);
+
+        setTimeout(() => {
+          setIsSubmitting(false);
+          if (onSuccess) {
+            onSuccess(created);
+          }
+          onClose();
+        }, 500);
+      }
     } catch (err: any) {
       setErrors({ form: err.message || 'Failed to register and approve new mentor.' });
       setIsSubmitting(false);
@@ -384,6 +406,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
 
   const handleCancel = () => {
     setErrors({});
+    setWarningMessage('');
     setIsSubmitting(false);
     onClose();
   };
@@ -432,7 +455,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           </button>
         </div>
 
-        {/* Workflow Tabs */}
+        {/* Workflow Tabs (Local Demo Sandbox tab hidden in Cloud Mode) */}
         <div className="flex rounded-xl border border-slate-800 bg-slate-950/60 p-1">
           <button
             type="button"
@@ -446,18 +469,20 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
             <UserCheck className="h-3.5 w-3.5" />
             <span>Approve Registered User {isCloudMode && '(Supabase)'}</span>
           </button>
-          <button
-            type="button"
-            onClick={() => { setActiveTab('provision'); setErrors({}); }}
-            className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-1.5 text-xs font-semibold transition-all ${
-              activeTab === 'provision'
-                ? 'bg-sky-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <UserPlus className="h-3.5 w-3.5" />
-            <span>Provision Demo User</span>
-          </button>
+          {!isCloudMode && (
+            <button
+              type="button"
+              onClick={() => { setActiveTab('provision'); setErrors({}); }}
+              className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-1.5 text-xs font-semibold transition-all ${
+                activeTab === 'provision'
+                  ? 'bg-sky-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <UserPlus className="h-3.5 w-3.5" />
+              <span>Provision Demo User</span>
+            </button>
+          )}
         </div>
 
         {/* Error Alert */}
@@ -473,6 +498,14 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 flex items-start gap-2.5">
             <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
             <span>{successMessage}</span>
+          </div>
+        )}
+
+        {/* Schema Persistence Notice / Warning */}
+        {warningMessage && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+            <span>{warningMessage}</span>
           </div>
         )}
 
@@ -648,6 +681,12 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                         />
                       </div>
                     </div>
+
+                    {isCloudMode && (
+                      <p className="text-[11px] text-amber-300/90 leading-relaxed">
+                        Note: Mentor role and active status persist immediately in <code className="font-mono text-slate-200">public.profiles</code>. Strategy name and monthly pricing metadata are not yet stored in Supabase because <code className="font-mono text-slate-200">public.mentor_profiles</code> has not been provisioned.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -769,8 +808,8 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           </div>
         )}
 
-        {/* TAB 2: PROVISION DEMO USER (LOCAL SANDBOX FALLBACK) */}
-        {activeTab === 'provision' && (
+        {/* TAB 2: PROVISION DEMO USER (LOCAL SANDBOX ONLY) */}
+        {!isCloudMode && activeTab === 'provision' && (
           <form onSubmit={handleProvisionSubmit} className="space-y-4 text-xs">
             <div>
               <label className="block text-slate-300 font-medium mb-1">

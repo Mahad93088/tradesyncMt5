@@ -1,11 +1,6 @@
-import { supabase, isSupabaseConfigured, DbMT5Account, DbProfile, DbMentorAssignment, DbTrade } from '../lib/supabase';
-import {
-  ensureValidSession,
-  executeWithAuthRetry,
-  isJwtExpiredError,
-  SessionExpiredError,
-} from '../lib/sessionManager';
-import { MT5Account, User, ParentChildLink, Trade, LotSettings } from '../types';
+import { supabase, isSupabaseConfigured, DbTrade } from '../lib/supabase';
+import { ensureValidSession } from '../lib/sessionManager';
+import { MT5Account, User, ParentChildLink, Trade } from '../types';
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -198,6 +193,7 @@ export interface AssignChildToParentParams {
     riskPercent?: number;
   };
   isCloudMode?: boolean;
+  replaceExisting?: boolean;
 }
 
 export interface AssignChildResult {
@@ -411,228 +407,113 @@ export const mt5AdminService = {
     demoLinks?: ParentChildLink[];
     isCloudMode?: boolean;
   }): Promise<{ data: ParentAccountItem[]; error: string | null; source: 'supabase' | 'demo_harness' }> {
-    const isCloud = options?.isCloudMode && isSupabaseConfigured();
-
-    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts when authenticated
-    if (isCloud) {
-      try {
-        const sessionCheck = await ensureValidSession();
-        if (sessionCheck.valid && sessionCheck.session?.access_token) {
-          const apiRes = await fetch('/api/v1/admin/accounts', {
-            headers: {
-              Authorization: `Bearer ${sessionCheck.session.access_token}`,
-            },
-          });
-          if (apiRes.ok) {
-            const json = await apiRes.json();
-            if (json.success && Array.isArray(json.accounts)) {
-              const profileMap = new Map<string, any>();
-              (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
-
-              const parentAccounts = json.accounts.filter((a: any) => a.account_role === 'parent');
-              const assignments = json.assignments || [];
-
-              const parents: ParentAccountItem[] = parentAccounts.map((acc: any) => {
-                const prof = profileMap.get(acc.user_id);
-                const isMentorVerified = Boolean(prof && prof.role === 'mentor' && prof.status === 'active');
-                const mentorName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isMentorVerified ? 'Verified Mentor' : 'Registered Mentor'));
-                const mentorEmail = prof?.email || (isMentorVerified ? 'mentor@tradesync.io' : 'No profile associated');
-                const mentorStatus = prof?.status || (isMentorVerified ? 'active' : 'pending');
-
-                const assigned = assignments.filter(
-                  (as: any) =>
-                    (as.parent_account_id === acc.id || as.mentor_id === acc.user_id) &&
-                    as.status === 'active'
-                );
-
-                const assignedChildren: LinkedChildItem[] = assigned.map((as: any) => {
-                  const childProf = profileMap.get(as.trader_id);
-                  const childAcc = json.accounts.find(
-                    (a: any) => a.id === as.child_account_id || a.user_id === as.trader_id
-                  );
-                  return {
-                    assignmentId: as.id,
-                    childAccountId: childAcc?.id || as.child_account_id || as.trader_id,
-                    childAccountNumber: childAcc?.account_number || 'Linked Follower',
-                    traderId: as.trader_id,
-                    traderName: childProf?.full_name || (childProf?.email ? childProf.email.split('@')[0] : 'Follower Trader'),
-                    traderEmail: childProf?.email || '',
-                    traderAvatar: childProf?.avatar_url,
-                    brokerName: childAcc?.broker_name || 'XM',
-                    brokerServer: childAcc?.broker_server || 'xmglobal_mt5 2',
-                    connectionStatus: childAcc?.connection_status || 'disconnected',
-                    assignedAt: as.assigned_at,
-                    assignmentStatus: as.status,
-                    lotCopyMode: as.lot_mode || 'multiplier',
-                    lotMultiplier: Number(as.lot_multiplier || 1.0),
-                    fixedLot: Number(as.fixed_lot || 0.1),
-                  };
-                });
-
-                return {
-                  id: acc.id,
-                  userId: acc.user_id,
-                  accountNumber: acc.account_number,
-                  brokerName: acc.broker_name,
-                  brokerServer: acc.broker_server,
-                  accountRole: 'parent',
-                  accountType: acc.account_type,
-                  balance: Number(acc.balance || 0),
-                  equity: Number(acc.equity || 0),
-                  margin: Number(acc.margin || 0),
-                  freeMargin: Number(acc.free_margin || 0),
-                  currency: acc.currency || 'USD',
-                  leverage: acc.leverage || 100,
-                  connectionStatus: acc.connection_status,
-                  pingMs: acc.ping_ms || 15,
-                  autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                  lastSync: acc.last_sync || acc.created_at,
-                  createdAt: acc.created_at,
-                  errorMessage: acc.error_message,
-                  mentorName,
-                  mentorEmail,
-                  mentorAvatar: prof?.avatar_url,
-                  mentorStatus,
-                  isMentorVerified,
-                  assignedChildCount: assignedChildren.length,
-                  assignedChildren,
-                  isLiveBroker: acc.account_type === 'live',
-                  isSimulatedDemo: acc.account_type !== 'live',
-                  dataSource: 'supabase',
-                };
-              });
-
-              return { data: parents, error: null, source: 'supabase' };
-            }
-          }
-        }
-      } catch (e: any) {
-        console.warn('[mt5AdminService] /api/v1/admin/accounts fetch notice:', e.message);
+    if (options?.isCloudMode) {
+      if (!isSupabaseConfigured()) {
+        return { data: [], error: 'Supabase is not configured in Cloud Mode.', source: 'supabase' };
       }
-    }
-
-    if (isCloud) {
       try {
         const sessionCheck = await ensureValidSession();
-        const hasSession = Boolean(sessionCheck.valid && sessionCheck.session);
-
-        if (hasSession) {
-          // 1. Fetch MT5 accounts with role = 'parent'
-          const { data: accountsData, error: accountsError } = await supabase
-            .from('mt5_accounts')
-            .select('*')
-            .order('created_at', { ascending: false });
-
-          if (accountsError && !isJwtExpiredError(accountsError)) {
-            console.warn('[mt5AdminService] accounts query notice:', accountsError.message);
-          }
-
-          // 2. Fetch profiles (with fallback to public mentor_directory view)
-          let profileMap = new Map<string, { full_name?: string; email?: string; avatar_url?: string; status?: string }>();
-          const { data: allProfilesData, error: profilesError } = await supabase
-            .from('profiles')
-            .select('*');
-
-          if (!profilesError && allProfilesData) {
-            allProfilesData.forEach((p: DbProfile) => profileMap.set(p.id, p));
-          } else {
-            // Fallback to public mentor_directory view if profiles is restricted by RLS
-            const { data: directoryData } = await supabase
-              .from('mentor_directory')
-              .select('*');
-            if (directoryData) {
-              directoryData.forEach((p: any) => profileMap.set(p.id, p));
-            }
-          }
-
-          // 3. Fetch active mentor assignments
-          const { data: assignmentsData } = await supabase
-            .from('mentor_assignments')
-            .select('*');
-
-          const parentAccounts = (accountsData || []).filter((a: DbMT5Account) => a.account_role === 'parent');
-
-          if (parentAccounts.length > 0) {
-            const parents: ParentAccountItem[] = parentAccounts.map((acc: DbMT5Account) => {
-              const prof = profileMap.get(acc.user_id);
-              const isMentorVerified = Boolean(prof && (prof as any).role === 'mentor' && prof.status === 'active');
-              const mentorName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isMentorVerified ? 'Verified Mentor' : 'Unlinked Mentor Profile'));
-              const mentorEmail = prof?.email || (isMentorVerified ? 'mentor@tradesync.io' : 'No profile associated');
-              const mentorStatus = (prof?.status as any) || (isMentorVerified ? 'active' : 'pending');
-
-              // Linked children for this mentor / parent account
-              const assignments = (assignmentsData || []).filter(
-                (as: any) =>
-                  (as.parent_account_id === acc.id || as.mentor_id === acc.user_id) &&
-                  as.status === 'active'
-              );
-
-              const assignedChildren: LinkedChildItem[] = assignments.map((as: any) => {
-                const childProf = profileMap.get(as.trader_id);
-                const childAcc = (accountsData || []).find(
-                  (a: DbMT5Account) => a.id === as.child_account_id || a.user_id === as.trader_id
-                );
-                return {
-                  assignmentId: as.id,
-                  childAccountId: childAcc?.id || as.child_account_id || as.trader_id,
-                  childAccountNumber: childAcc?.account_number || 'Linked Child',
-                  traderId: as.trader_id,
-                  traderName: childProf?.full_name || (childProf?.email ? childProf.email.split('@')[0] : 'Follower Trader'),
-                  traderEmail: childProf?.email || '',
-                  traderAvatar: childProf?.avatar_url,
-                  brokerName: childAcc?.broker_name || 'MetaQuotes Demo',
-                  brokerServer: childAcc?.broker_server || 'TradeSync-DemoBridge',
-                  connectionStatus: childAcc?.connection_status || 'connected',
-                  assignedAt: as.assigned_at,
-                  assignmentStatus: as.status,
-                  lotCopyMode: as.lot_mode || 'multiplier',
-                  lotMultiplier: Number(as.lot_multiplier || 1.0),
-                  fixedLot: Number(as.fixed_lot || 0.1),
-                };
-              });
-
-              const isLive = acc.account_type === 'live';
-
-              return {
-                id: acc.id,
-                userId: acc.user_id,
-                accountNumber: acc.account_number,
-                brokerName: acc.broker_name,
-                brokerServer: acc.broker_server,
-                accountRole: 'parent',
-                accountType: acc.account_type,
-                balance: Number(acc.balance || 0),
-                equity: Number(acc.equity || 0),
-                margin: Number(acc.margin || 0),
-                freeMargin: Number(acc.free_margin || 0),
-                currency: acc.currency || 'USD',
-                leverage: acc.leverage || 100,
-                connectionStatus: acc.connection_status,
-                pingMs: acc.ping_ms || 15,
-                autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                lastSync: acc.last_sync || acc.created_at,
-                createdAt: acc.created_at,
-                errorMessage: acc.error_message,
-                mentorName,
-                mentorEmail,
-                mentorAvatar: prof?.avatar_url,
-                mentorStatus,
-                isMentorVerified,
-                assignedChildCount: assignedChildren.length,
-                assignedChildren,
-                isLiveBroker: isLive,
-                isSimulatedDemo: !isLive,
-                dataSource: 'supabase',
-              };
-            });
-
-            return { data: parents, error: null, source: 'supabase' };
-          }
-          return { data: [], error: null, source: 'supabase' };
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            data: [],
+            error: sessionCheck.error || 'Authentication required in Cloud Mode.',
+            source: 'supabase',
+          };
         }
-        return { data: [], error: 'Authentication required in Cloud Mode.', source: 'supabase' };
+
+        const apiRes = await fetch('/api/v1/admin/accounts', {
+          headers: {
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+        });
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (!parsed.ok || !parsed.data?.success || !Array.isArray(parsed.data?.accounts)) {
+          return {
+            data: [],
+            error: parsed.data?.error || parsed.error || `HTTP ${apiRes.status}: Failed to load Supabase parent accounts.`,
+            source: 'supabase',
+          };
+        }
+
+        const json = parsed.data;
+        const profileMap = new Map<string, any>();
+        (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
+
+        const parentAccounts = json.accounts.filter((a: any) => a.account_role === 'parent');
+        const assignments = json.assignments || [];
+
+        const parents: ParentAccountItem[] = parentAccounts.map((acc: any) => {
+          const prof = profileMap.get(acc.user_id);
+          const isMentorVerified = Boolean(prof && prof.role === 'mentor' && prof.status === 'active');
+          const mentorName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isMentorVerified ? 'Verified Mentor' : 'Registered Mentor'));
+          const mentorEmail = prof?.email || 'No profile associated';
+          const mentorStatus = prof?.status || (isMentorVerified ? 'active' : 'pending');
+
+          const assigned = assignments.filter(
+            (as: any) =>
+              (as.parent_account_id === acc.id || as.mentor_id === acc.user_id) &&
+              as.status === 'active'
+          );
+
+          const assignedChildren: LinkedChildItem[] = assigned.map((as: any) => {
+            const childProf = profileMap.get(as.trader_id);
+            const childAcc = json.accounts.find(
+              (a: any) => a.id === as.child_account_id || a.user_id === as.trader_id
+            );
+            return {
+              assignmentId: as.id,
+              childAccountId: childAcc?.id || as.child_account_id || as.trader_id,
+              childAccountNumber: childAcc?.account_number || 'Linked Follower',
+              traderId: as.trader_id,
+              traderName: childProf?.full_name || (childProf?.email ? childProf.email.split('@')[0] : 'Follower Trader'),
+              traderEmail: childProf?.email || '',
+              traderAvatar: childProf?.avatar_url,
+              brokerName: childAcc?.broker_name || 'Unknown Broker',
+              brokerServer: childAcc?.broker_server || 'Unknown Server',
+              connectionStatus: childAcc?.connection_status || 'disconnected',
+              assignedAt: as.assigned_at,
+              assignmentStatus: as.status,
+              lotCopyMode: as.lot_mode || 'multiplier',
+              lotMultiplier: Number(as.lot_multiplier || 1.0),
+              fixedLot: Number(as.fixed_lot || 0.1),
+            };
+          });
+
+          return {
+            id: acc.id,
+            userId: acc.user_id,
+            accountNumber: acc.account_number,
+            brokerName: acc.broker_name,
+            brokerServer: acc.broker_server,
+            accountRole: 'parent',
+            accountType: acc.account_type,
+            balance: Number(acc.balance || 0),
+            equity: Number(acc.equity || 0),
+            margin: Number(acc.margin || 0),
+            freeMargin: Number(acc.free_margin || 0),
+            currency: acc.currency || 'USD',
+            leverage: acc.leverage || 100,
+            connectionStatus: acc.connection_status,
+            pingMs: acc.ping_ms || 0,
+            autoTradingEnabled: acc.auto_trading_enabled ?? true,
+            lastSync: acc.last_sync || acc.created_at,
+            createdAt: acc.created_at,
+            errorMessage: acc.error_message,
+            mentorName,
+            mentorEmail,
+            mentorAvatar: prof?.avatar_url,
+            mentorStatus,
+            isMentorVerified,
+            assignedChildCount: assignedChildren.length,
+            assignedChildren,
+            isLiveBroker: acc.account_type === 'live',
+            isSimulatedDemo: acc.account_type !== 'live',
+            dataSource: 'supabase',
+          };
+        });
+
+        return { data: parents, error: null, source: 'supabase' };
       } catch (err: any) {
-        console.warn('[mt5AdminService] Supabase parent accounts query notice:', err.message);
         return { data: [], error: err.message || 'Failed to load Supabase parent accounts.', source: 'supabase' };
       }
     }
@@ -766,202 +647,106 @@ export const mt5AdminService = {
     demoLinks?: ParentChildLink[];
     isCloudMode?: boolean;
   }): Promise<{ data: ChildAccountItem[]; error: string | null; source: 'supabase' | 'demo_harness' }> {
-    const isCloud = options?.isCloudMode && isSupabaseConfigured();
-
-    // 0. Primary: Query authoritative server endpoint /api/v1/admin/accounts when authenticated
-    if (isCloud) {
-      try {
-        const sessionCheck = await ensureValidSession();
-        if (sessionCheck.valid && sessionCheck.session?.access_token) {
-          const apiRes = await fetch('/api/v1/admin/accounts', {
-            headers: {
-              Authorization: `Bearer ${sessionCheck.session.access_token}`,
-            },
-          });
-          if (apiRes.ok) {
-            const json = await apiRes.json();
-            if (json.success && Array.isArray(json.accounts)) {
-              const profileMap = new Map<string, any>();
-              (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
-
-              const childAccounts = json.accounts.filter((a: any) => a.account_role === 'child');
-              const assignments = json.assignments || [];
-
-              const children: ChildAccountItem[] = childAccounts.map((acc: any) => {
-                const prof = profileMap.get(acc.user_id);
-                const isTraderVerified = Boolean(prof && prof.status === 'active' && prof.role === 'trader');
-                const traderName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isTraderVerified ? 'Follower Trader' : 'Registered Trader'));
-                const traderEmail = prof?.email || '';
-                const traderStatus = prof?.status || (isTraderVerified ? 'active' : 'pending');
-
-                const assignment = assignments.find(
-                  (as: any) =>
-                    ((as.child_account_id && as.child_account_id === acc.id) || as.trader_id === acc.user_id) &&
-                    as.status === 'active'
-                );
-
-                const parentAcc = json.accounts.find(
-                  (a: any) =>
-                    (assignment?.parent_account_id && a.id === assignment.parent_account_id) ||
-                    (assignment && a.user_id === assignment.mentor_id && a.account_role === 'parent')
-                );
-                const mentorProf = assignment ? profileMap.get(assignment.mentor_id) : undefined;
-
-                return {
-                  id: acc.id,
-                  userId: acc.user_id,
-                  accountNumber: acc.account_number,
-                  brokerName: acc.broker_name,
-                  brokerServer: acc.broker_server,
-                  accountRole: 'child',
-                  accountType: acc.account_type,
-                  balance: Number(acc.balance || 0),
-                  equity: Number(acc.equity || 0),
-                  margin: Number(acc.margin || 0),
-                  freeMargin: Number(acc.free_margin || 0),
-                  currency: acc.currency || 'USD',
-                  leverage: acc.leverage || 100,
-                  connectionStatus: acc.connection_status,
-                  pingMs: acc.ping_ms || 18,
-                  autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                  lastSync: acc.last_sync || acc.created_at,
-                  createdAt: acc.created_at,
-                  errorMessage: acc.error_message,
-                  traderName,
-                  traderEmail,
-                  traderAvatar: prof?.avatar_url,
-                  traderStatus,
-                  isTraderVerified,
-                  isAssigned: Boolean(assignment),
-                  assignedMentorId: assignment?.mentor_id,
-                  assignedMentorName: mentorProf?.full_name || (mentorProf?.email ? mentorProf.email.split('@')[0] : 'Assigned Mentor'),
-                  assignedParentAccountId: parentAcc?.id || assignment?.parent_account_id || acc.assigned_parent_id,
-                  assignedParentAccountNumber: parentAcc?.account_number,
-                  assignmentId: assignment?.id,
-                  assignmentStatus: assignment?.status,
-                  assignedAt: assignment?.assigned_at,
-                  copyMode: (assignment?.lot_mode as any) || (assignment ? 'multiplier' : 'unassigned'),
-                  lotMultiplier: assignment?.lot_multiplier !== undefined ? Number(assignment.lot_multiplier) : 1.0,
-                  fixedLot: assignment?.fixed_lot !== undefined ? Number(assignment.fixed_lot) : 0.1,
-                  riskPercent: 1.0,
-                  isLiveBroker: acc.account_type === 'live',
-                  isSimulatedDemo: acc.account_type !== 'live',
-                  dataSource: 'supabase',
-                };
-              });
-
-              return { data: children, error: null, source: 'supabase' };
-            }
-          }
-        }
-      } catch (e: any) {
-        console.warn('[mt5AdminService] /api/v1/admin/accounts getChildAccounts notice:', e.message);
+    if (options?.isCloudMode) {
+      if (!isSupabaseConfigured()) {
+        return { data: [], error: 'Supabase is not configured in Cloud Mode.', source: 'supabase' };
       }
-    }
-
-    if (isCloud) {
       try {
         const sessionCheck = await ensureValidSession();
-        const hasSession = Boolean(sessionCheck.valid && sessionCheck.session);
-
-        if (hasSession) {
-          // 1. Fetch MT5 accounts
-          const { data: accountsData } = await supabase
-            .from('mt5_accounts')
-            .select('*')
-            .order('created_at', { ascending: false });
-
-          // 2. Fetch profiles
-          let profileMap = new Map<string, DbProfile>();
-          const { data: allProfilesData } = await supabase.from('profiles').select('*');
-          if (allProfilesData) {
-            allProfilesData.forEach((p: DbProfile) => profileMap.set(p.id, p));
-          }
-
-          // 3. Fetch active mentor assignments
-          const { data: assignmentsData } = await supabase
-            .from('mentor_assignments')
-            .select('*');
-
-          const childAccounts = (accountsData || []).filter((a: DbMT5Account) => a.account_role === 'child');
-
-          if (childAccounts.length > 0) {
-            const parentAccountsMap = new Map<string, DbMT5Account>();
-            (accountsData || [])
-              .filter((a: DbMT5Account) => a.account_role === 'parent')
-              .forEach((a: DbMT5Account) => parentAccountsMap.set(a.user_id, a));
-
-            const children: ChildAccountItem[] = childAccounts.map((acc: DbMT5Account) => {
-              const prof = profileMap.get(acc.user_id);
-              const isTraderVerified = Boolean(prof && prof.status === 'active' && prof.role === 'trader');
-              const traderName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isTraderVerified ? 'Follower Trader' : 'Unlinked Trader Profile'));
-              const traderEmail = prof?.email || '';
-              const traderStatus = (prof?.status as any) || (isTraderVerified ? 'active' : 'pending');
-              const assignment = (assignmentsData || []).find(
-                (as: any) =>
-                  ((as.child_account_id && as.child_account_id === acc.id) || as.trader_id === acc.user_id) &&
-                  as.status === 'active'
-              );
-
-              const mentorProf = assignment ? profileMap.get(assignment.mentor_id) : undefined;
-              const assignedParentAcc = (accountsData || []).find(
-                (a: DbMT5Account) =>
-                  (assignment?.parent_account_id && a.id === assignment.parent_account_id) ||
-                  (assignment && a.user_id === assignment.mentor_id && a.account_role === 'parent')
-              );
-              const parentAcc = assignedParentAcc || (assignment ? parentAccountsMap.get(assignment.mentor_id) : undefined);
-              const isLive = acc.account_type === 'live';
-
-              return {
-                id: acc.id,
-                userId: acc.user_id,
-                accountNumber: acc.account_number,
-                brokerName: acc.broker_name,
-                brokerServer: acc.broker_server,
-                accountRole: 'child',
-                accountType: acc.account_type,
-                balance: Number(acc.balance || 0),
-                equity: Number(acc.equity || 0),
-                margin: Number(acc.margin || 0),
-                freeMargin: Number(acc.free_margin || 0),
-                currency: acc.currency || 'USD',
-                leverage: acc.leverage || 100,
-                connectionStatus: acc.connection_status,
-                pingMs: acc.ping_ms || 15,
-                autoTradingEnabled: acc.auto_trading_enabled ?? true,
-                lastSync: acc.last_sync || acc.created_at,
-                createdAt: acc.created_at,
-                errorMessage: acc.error_message,
-                traderName,
-                traderEmail,
-                traderAvatar: prof?.avatar_url,
-                traderStatus,
-                isTraderVerified,
-                isAssigned: Boolean(assignment),
-                assignedMentorId: assignment?.mentor_id,
-                assignedMentorName: mentorProf?.full_name,
-                assignedParentAccountId: parentAcc?.id || assignment?.parent_account_id,
-                assignedParentAccountNumber: parentAcc?.account_number,
-                assignmentId: assignment?.id,
-                assignmentStatus: assignment?.status,
-                assignedAt: assignment?.assigned_at,
-                copyMode: (assignment?.lot_mode as any) || (assignment ? 'multiplier' : 'unassigned'),
-                lotMultiplier: assignment?.lot_multiplier !== undefined ? Number(assignment.lot_multiplier) : 1.0,
-                fixedLot: assignment?.fixed_lot !== undefined ? Number(assignment.fixed_lot) : 0.1,
-                riskPercent: 1.5,
-                isLiveBroker: isLive,
-                isSimulatedDemo: !isLive,
-                dataSource: 'supabase',
-              };
-            });
-
-            return { data: children, error: null, source: 'supabase' };
-          }
-          return { data: [], error: null, source: 'supabase' };
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            data: [],
+            error: sessionCheck.error || 'Authentication required in Cloud Mode.',
+            source: 'supabase',
+          };
         }
-        return { data: [], error: 'Authentication required in Cloud Mode.', source: 'supabase' };
+
+        const apiRes = await fetch('/api/v1/admin/accounts', {
+          headers: {
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+        });
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (!parsed.ok || !parsed.data?.success || !Array.isArray(parsed.data?.accounts)) {
+          return {
+            data: [],
+            error: parsed.data?.error || parsed.error || `HTTP ${apiRes.status}: Failed to load Supabase child accounts.`,
+            source: 'supabase',
+          };
+        }
+
+        const json = parsed.data;
+        const profileMap = new Map<string, any>();
+        (json.profiles || []).forEach((p: any) => profileMap.set(p.id, p));
+
+        const childAccounts = json.accounts.filter((a: any) => a.account_role === 'child');
+        const assignments = json.assignments || [];
+
+        const children: ChildAccountItem[] = childAccounts.map((acc: any) => {
+          const prof = profileMap.get(acc.user_id);
+          const isTraderVerified = Boolean(prof && prof.status === 'active' && prof.role === 'trader');
+          const traderName = prof?.full_name || (prof?.email ? prof.email.split('@')[0] : (isTraderVerified ? 'Follower Trader' : 'Registered Trader'));
+          const traderEmail = prof?.email || '';
+          const traderStatus = prof?.status || (isTraderVerified ? 'active' : 'pending');
+
+          const assignment = assignments.find(
+            (as: any) =>
+              ((as.child_account_id && as.child_account_id === acc.id) || as.trader_id === acc.user_id) &&
+              as.status === 'active'
+          );
+
+          const parentAcc = json.accounts.find(
+            (a: any) =>
+              (assignment?.parent_account_id && a.id === assignment.parent_account_id) ||
+              (assignment && a.user_id === assignment.mentor_id && a.account_role === 'parent')
+          );
+          const mentorProf = assignment ? profileMap.get(assignment.mentor_id) : undefined;
+
+          return {
+            id: acc.id,
+            userId: acc.user_id,
+            accountNumber: acc.account_number,
+            brokerName: acc.broker_name,
+            brokerServer: acc.broker_server,
+            accountRole: 'child',
+            accountType: acc.account_type,
+            balance: Number(acc.balance || 0),
+            equity: Number(acc.equity || 0),
+            margin: Number(acc.margin || 0),
+            freeMargin: Number(acc.free_margin || 0),
+            currency: acc.currency || 'USD',
+            leverage: acc.leverage || 100,
+            connectionStatus: acc.connection_status,
+            pingMs: acc.ping_ms || 0,
+            autoTradingEnabled: acc.auto_trading_enabled ?? true,
+            lastSync: acc.last_sync || acc.created_at,
+            createdAt: acc.created_at,
+            errorMessage: acc.error_message,
+            traderName,
+            traderEmail,
+            traderAvatar: prof?.avatar_url,
+            traderStatus,
+            isTraderVerified,
+            isAssigned: Boolean(assignment),
+            assignedMentorId: assignment?.mentor_id,
+            assignedMentorName: mentorProf?.full_name || (mentorProf?.email ? mentorProf.email.split('@')[0] : 'Assigned Mentor'),
+            assignedParentAccountId: parentAcc?.id || assignment?.parent_account_id || acc.assigned_parent_id,
+            assignedParentAccountNumber: parentAcc?.account_number,
+            assignmentId: assignment?.id,
+            assignmentStatus: assignment?.status,
+            assignedAt: assignment?.assigned_at,
+            copyMode: (assignment?.lot_mode as any) || (assignment ? 'multiplier' : 'unassigned'),
+            lotMultiplier: assignment?.lot_multiplier !== undefined ? Number(assignment.lot_multiplier) : 1.0,
+            fixedLot: assignment?.fixed_lot !== undefined ? Number(assignment.fixed_lot) : 0.1,
+            riskPercent: 1.0,
+            isLiveBroker: acc.account_type === 'live',
+            isSimulatedDemo: acc.account_type !== 'live',
+            dataSource: 'supabase',
+          };
+        });
+
+        return { data: children, error: null, source: 'supabase' };
       } catch (err: any) {
-        console.warn('[mt5AdminService] Supabase child accounts query notice:', err.message);
         return { data: [], error: err.message || 'Failed to load Supabase child accounts.', source: 'supabase' };
       }
     }
@@ -1088,8 +873,16 @@ export const mt5AdminService = {
     isCloudMode?: boolean;
     currentUserId?: string;
   }): Promise<{ success: boolean; createdCount: number; accounts?: MT5Account[]; users?: User[]; error?: string }> {
+    if (options?.isCloudMode) {
+      return {
+        success: false,
+        createdCount: 0,
+        error: 'Sandbox demo account seeding is disabled in Cloud Mode. Use Register MT5 Account backed by Supabase.',
+      };
+    }
+
     try {
-      // 1. Read existing local accounts
+      // 1. Read existing local sandbox accounts
       const storedRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
       const localAccounts: MT5Account[] = storedRaw ? JSON.parse(storedRaw) : [];
 
@@ -1116,40 +909,6 @@ export const mt5AdminService = {
         localStorage.setItem('tradesync_users', JSON.stringify(nextUsers));
       }
 
-      // 2. If in Cloud Mode and user is authenticated in Supabase, attempt insert into public.mt5_accounts
-      if (options?.isCloudMode && isSupabaseConfigured()) {
-        try {
-          const sessionCheck = await ensureValidSession();
-          if (sessionCheck.valid && sessionCheck.session) {
-            for (const item of accountsToAdd) {
-              await supabase
-                .from('mt5_accounts')
-                .insert([{
-                  id: item.id,
-                  user_id: item.userId, // Preserves distinct mentor/trader owner UUIDs and prevents self-assignment
-                  account_number: item.accountNumber,
-                  broker_server: item.server,
-                  broker_name: item.broker,
-                  account_role: item.accountRole,
-                  account_type: 'demo',
-                  balance: item.balance,
-                  equity: item.equity,
-                  margin: 0,
-                  free_margin: item.freeMargin,
-                  currency: item.currency,
-                  leverage: item.leverage,
-                  connection_status: 'connected',
-                  ping_ms: item.pingMs || 15,
-                  is_investor_password: true,
-                  auto_trading_enabled: true,
-                }]);
-            }
-          }
-        } catch (cloudErr: any) {
-          console.warn('[mt5AdminService] Notice: Supabase cloud insert skipped, saved to local sandbox:', cloudErr.message);
-        }
-      }
-
       return { success: true, createdCount: accountsToAdd.length, accounts: nextAccounts, users: nextUsers };
     } catch (err: any) {
       console.error('[mt5AdminService] Failed to seed demo accounts:', err);
@@ -1158,12 +917,19 @@ export const mt5AdminService = {
   },
 
   /**
-   * Safely creates a clearly labelled DEMO parent or child account record for testing (Requirement 7 & 8).
-   * Does NOT claim to be connected to a real MT5 terminal.
+   * Safely creates a clearly labelled DEMO parent or child account record in Local Demo Sandbox ONLY.
+   * Disabled in Cloud Mode (never inserts synthetic sandbox accounts into production mt5_accounts).
    */
   async createDemoMT5Account(
     params: CreateDemoAccountParams
   ): Promise<{ success: boolean; data?: MT5Account; owner?: User; error?: string }> {
+    if (params.isCloudMode) {
+      return {
+        success: false,
+        error: 'Sandbox demo account creation is disabled in Cloud Mode. Use Register MT5 Account backed by Supabase.',
+      };
+    }
+
     try {
       const generatedAccNumber =
         params.accountNumber?.trim() ||
@@ -1206,7 +972,7 @@ export const mt5AdminService = {
         avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
       };
 
-      // 1. Save to localStorage sandbox
+      // Save ONLY to localStorage sandbox
       if (typeof localStorage !== 'undefined') {
         const storedRaw = localStorage.getItem('tradesync_mt5_accounts');
         const localAccounts: MT5Account[] = storedRaw ? JSON.parse(storedRaw) : [];
@@ -1215,38 +981,6 @@ export const mt5AdminService = {
         const storedUsersRaw = localStorage.getItem('tradesync_users');
         const localUsers: User[] = storedUsersRaw ? JSON.parse(storedUsersRaw) : [];
         localStorage.setItem('tradesync_users', JSON.stringify([newUser, ...localUsers]));
-      }
-
-      // 2. If in Cloud Mode and user is authenticated in Supabase, insert into public.mt5_accounts
-      if (params.isCloudMode && isSupabaseConfigured()) {
-        try {
-          const sessionCheck = await ensureValidSession();
-          if (sessionCheck.valid && sessionCheck.session) {
-            await supabase
-              .from('mt5_accounts')
-              .insert([{
-                id: newAccount.id,
-                user_id: newAccount.userId, // Distinct owner profile UUID, prevents self-assignment collision
-                account_number: newAccount.accountNumber,
-                broker_server: newAccount.server,
-                broker_name: newAccount.broker,
-                account_role: newAccount.accountRole,
-                account_type: 'demo',
-                balance: newAccount.balance,
-                equity: newAccount.equity,
-                margin: 0,
-                free_margin: newAccount.freeMargin,
-                currency: newAccount.currency,
-                leverage: newAccount.leverage,
-                connection_status: 'disconnected',
-                ping_ms: newAccount.pingMs,
-                is_investor_password: true,
-                auto_trading_enabled: true,
-              }]);
-          }
-        } catch (cloudErr: any) {
-          console.warn('[mt5AdminService] Supabase insert notice:', cloudErr.message);
-        }
       }
 
       return { success: true, data: newAccount, owner: newUser };
@@ -1299,6 +1033,15 @@ export const mt5AdminService = {
     code?: string;
   }> {
     try {
+      // Demo-Only Safety Guard: real-money live accounts are strictly forbidden
+      if (params.accountType && params.accountType !== 'demo') {
+        return {
+          success: false,
+          code: 'DEMO_ONLY_SAFETY_BLOCK',
+          error: 'Safety block: Real-money live MT5 accounts are disabled. Only Demo MT5 accounts are permitted.',
+        };
+      }
+
       // Explicit Local Demo Mode sandbox registration (no Supabase session required)
       if (params.isCloudMode === false) {
         const cleanAccNumber = params.accountNumber.trim();
@@ -1313,7 +1056,7 @@ export const mt5AdminService = {
           accountNumber: cleanAccNumber,
           broker: cleanBroker,
           server: cleanServer,
-          accountType: params.accountType || 'demo',
+          accountType: 'demo',
           balance: parsedBalance,
           equity: Number(params.equity || parsedBalance) || parsedBalance,
           margin: 0,
@@ -1351,17 +1094,31 @@ export const mt5AdminService = {
         };
       }
 
-      const sessionCheck = await ensureValidSession();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (sessionCheck.valid && sessionCheck.session?.access_token) {
-        headers['Authorization'] = `Bearer ${sessionCheck.session.access_token}`;
+      if (!isSupabaseConfigured()) {
+        return {
+          success: false,
+          error: 'Supabase is not configured in Cloud Mode.',
+        };
       }
+
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        return {
+          success: false,
+          error: sessionCheck.error || 'Authentication required to register MT5 accounts in Cloud Mode.',
+        };
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionCheck.session.access_token}`,
+      };
 
       const targetEndpoint = params.useSelfServiceEndpoint
         ? '/api/v1/bridge/accounts/register'
         : '/api/v1/admin/accounts/register';
 
-      // 1. Try server endpoint
+      // 1. Authoritative server registration endpoint
       const response = await fetch(targetEndpoint, {
         method: 'POST',
         headers,
@@ -1370,7 +1127,7 @@ export const mt5AdminService = {
           brokerName: params.brokerName.trim(),
           brokerServer: params.brokerServer.trim(),
           accountNumber: params.accountNumber.trim(),
-          accountType: params.accountType || 'demo',
+          accountType: 'demo',
           balance: Number(params.balance) || 10000,
           equity: Number(params.equity || params.balance) || 10000,
           currency: params.currency || 'USD',
@@ -1456,8 +1213,6 @@ export const mt5AdminService = {
    * Validates database UUIDs strictly before sending to PostgreSQL, preventing syntax errors.
    */
   async assignChildToParent(params: AssignChildToParentParams): Promise<AssignChildResult> {
-    const isCloud = params.isCloudMode && isSupabaseConfigured();
-
     // 1. Structural and Anti-Self-Assignment Checks
     if (!params.mentorId || !params.traderId) {
       return {
@@ -1471,7 +1226,6 @@ export const mt5AdminService = {
     const safeParentAccId = params.parentAccountId ? toValidUUID(params.parentAccountId) : undefined;
     const safeChildAccId = params.childAccountId ? toValidUUID(params.childAccountId) : undefined;
 
-    // Strict Distinction: Never allow MT5 Account UUID to be passed as mentor_id or trader_id
     if (safeParentAccId && safeMentorId === safeParentAccId) {
       return {
         success: false,
@@ -1484,7 +1238,6 @@ export const mt5AdminService = {
         error: 'Security constraint violation: MT5 Account ID cannot be used as trader_id. The follower profile UUID (profiles.id) from public.profiles is required.',
       };
     }
-
     if (safeMentorId.trim() === safeTraderId.trim()) {
       return {
         success: false,
@@ -1492,312 +1245,63 @@ export const mt5AdminService = {
       };
     }
 
-    if (isCloud) {
-      try {
-        // 3. Execute with automatic session verification and JWT expiration retry
-        return await executeWithAuthRetry(async (activeSession) => {
-          // Explicitly ensure Supabase client session uses the current authenticated session
-          await supabase.auth.setSession({
-            access_token: activeSession.access_token,
-            refresh_token: activeSession.refresh_token,
-          });
-
-          // 1. Verify Mentor Eligibility (must exist with role = 'mentor' and status = 'active' in profiles)
-          const { data: mentorProfile, error: mentorCheckErr } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, role, status')
-            .eq('id', safeMentorId)
-            .maybeSingle();
-
-          if (mentorCheckErr) {
-            if (isJwtExpiredError(mentorCheckErr)) throw mentorCheckErr;
-            throw new Error(`Database error verifying mentor profile: ${mentorCheckErr.message}`);
-          }
-
-          if (!mentorProfile) {
-            return {
-              success: false,
-              error: `Security error: Target mentor_id is not a verified active mentor. Profile ID "${safeMentorId}" was not found in public.profiles. Please associate this Parent account with a verified active mentor profile.`,
-            };
-          }
-
-          if (mentorProfile.role !== 'mentor') {
-            return {
-              success: false,
-              error: `Security error: Target mentor_id is not a verified active mentor. User "${mentorProfile.full_name || mentorProfile.email}" has role "${mentorProfile.role}". Only accounts with role 'mentor' can receive follower assignments.`,
-            };
-          }
-
-          if (mentorProfile.status !== 'active') {
-            return {
-              success: false,
-              error: `Security error: Target mentor_id is not a verified active mentor. Mentor account "${mentorProfile.full_name || mentorProfile.email}" is currently ${mentorProfile.status}. Only active mentors can receive assignments.`,
-            };
-          }
-
-          // 2. Verify Trader Eligibility (must exist with status = 'active' in profiles)
-          const { data: traderProfile, error: traderCheckErr } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, role, status')
-            .eq('id', safeTraderId)
-            .maybeSingle();
-
-          if (traderCheckErr) {
-            if (isJwtExpiredError(traderCheckErr)) throw traderCheckErr;
-            throw new Error(`Database error verifying trader profile: ${traderCheckErr.message}`);
-          }
-
-          if (!traderProfile) {
-            return {
-              success: false,
-              error: `Security error: Trader account must be active to create or update an assignment. Follower profile ID "${safeTraderId}" was not found in public.profiles.`,
-            };
-          }
-
-          if (traderProfile.status !== 'active') {
-            return {
-              success: false,
-              error: `Security error: Trader account must be active to create or update an assignment. Trader account "${traderProfile.full_name || traderProfile.email}" is currently ${traderProfile.status}.`,
-            };
-          }
-
-          // 3. Ensure Parent MT5 Account exists and is assigned to the verified mentor in public.mt5_accounts
-          if (safeParentAccId && isValidUUID(safeParentAccId)) {
-            const { data: pAcc, error: pAccErr } = await supabase
-              .from('mt5_accounts')
-              .select('id')
-              .eq('id', safeParentAccId)
-              .maybeSingle();
-
-            if (pAccErr) {
-              if (isJwtExpiredError(pAccErr)) throw pAccErr;
-              throw new Error(`Database error querying parent MT5 account: ${pAccErr.message}`);
-            }
-
-            if (pAcc) {
-              const { error: pErr } = await supabase
-                .from('mt5_accounts')
-                .update({ account_role: 'parent', user_id: safeMentorId })
-                .eq('id', safeParentAccId);
-              if (pErr) {
-                if (isJwtExpiredError(pErr)) throw pErr;
-                throw new Error(`Database error updating parent MT5 account: ${pErr.message}`);
-              }
-            } else {
-              // Account record does not exist in Supabase yet (e.g. demo parent); insert it
-              const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
-              const list: MT5Account[] = stored ? JSON.parse(stored) : [];
-              const localAcc = list.find((a) => a.id === params.parentAccountId || toValidUUID(a.id) === safeParentAccId) ||
-                STANDARD_DEMO_ACCOUNTS.find((i) => i.account.id === params.parentAccountId || toValidUUID(i.account.id) === safeParentAccId)?.account;
-
-              const { error: pUpsertErr } = await supabase.from('mt5_accounts').upsert([{
-                id: safeParentAccId,
-                user_id: safeMentorId,
-                account_number: localAcc?.accountNumber || '8829410',
-                broker_server: localAcc?.server || 'ICMarketsSC-Live04',
-                broker_name: localAcc?.broker || 'IC Markets (SC)',
-                account_role: 'parent',
-                account_type: localAcc?.accountType || 'live',
-                balance: localAcc?.balance || 125480.50,
-                equity: localAcc?.equity || 128910.20,
-                margin: 0,
-                free_margin: localAcc?.freeMargin || 124790.20,
-                currency: localAcc?.currency || 'USD',
-                leverage: localAcc?.leverage || 500,
-                connection_status: 'connected',
-                ping_ms: localAcc?.pingMs || 14,
-                is_investor_password: true,
-                auto_trading_enabled: true,
-              }], { onConflict: 'id' });
-
-              if (pUpsertErr) {
-                if (isJwtExpiredError(pUpsertErr)) throw pUpsertErr;
-                throw new Error(`Database error saving parent MT5 account: ${pUpsertErr.message}`);
-              }
-            }
-          }
-
-          // 4. Ensure Child MT5 Account exists and is assigned to the active trader in public.mt5_accounts
-          if (safeChildAccId && isValidUUID(safeChildAccId)) {
-            const { data: cAcc, error: cAccErr } = await supabase
-              .from('mt5_accounts')
-              .select('id')
-              .eq('id', safeChildAccId)
-              .maybeSingle();
-
-            if (cAccErr) {
-              if (isJwtExpiredError(cAccErr)) throw cAccErr;
-              throw new Error(`Database error querying child MT5 account: ${cAccErr.message}`);
-            }
-
-            if (cAcc) {
-              const { error: cErr } = await supabase
-                .from('mt5_accounts')
-                .update({
-                  account_role: 'child',
-                  user_id: safeTraderId,
-                })
-                .eq('id', safeChildAccId);
-              if (cErr) {
-                if (isJwtExpiredError(cErr)) throw cErr;
-                throw new Error(`Database error updating child MT5 account: ${cErr.message}`);
-              }
-            } else {
-              // Account record does not exist in Supabase yet; insert it
-              const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
-              const list: MT5Account[] = stored ? JSON.parse(stored) : [];
-              const localAcc = list.find((a) => a.id === params.childAccountId || toValidUUID(a.id) === safeChildAccId) ||
-                STANDARD_DEMO_ACCOUNTS.find((i) => i.account.id === params.childAccountId || toValidUUID(i.account.id) === safeChildAccId)?.account;
-
-              const { error: cUpsertErr } = await supabase.from('mt5_accounts').upsert([{
-                id: safeChildAccId,
-                user_id: safeTraderId,
-                account_number: localAcc?.accountNumber || '7729103',
-                broker_server: localAcc?.server || 'Eightcap-Real03',
-                broker_name: localAcc?.broker || 'Eightcap Ltd',
-                account_role: 'child',
-                account_type: localAcc?.accountType || 'demo',
-                balance: localAcc?.balance || 24850.00,
-                equity: localAcc?.equity || 24920.10,
-                margin: 0,
-                free_margin: localAcc?.freeMargin || 24850.00,
-                currency: localAcc?.currency || 'USD',
-                leverage: localAcc?.leverage || 100,
-                connection_status: 'connected',
-                ping_ms: localAcc?.pingMs || 18,
-                is_investor_password: true,
-                auto_trading_enabled: true,
-              }], { onConflict: 'id' });
-
-              if (cUpsertErr) {
-                if (isJwtExpiredError(cUpsertErr)) throw cUpsertErr;
-                throw new Error(`Database error saving child MT5 account: ${cUpsertErr.message}`);
-              }
-            }
-          }
-
-          // 5. Check existing assignment in public.mentor_assignments
-          const { data: existing, error: existingErr } = await supabase
-            .from('mentor_assignments')
-            .select('id, mentor_id, trader_id, status')
-            .eq('trader_id', safeTraderId)
-            .maybeSingle();
-
-          if (existingErr) {
-            if (isJwtExpiredError(existingErr)) throw existingErr;
-            throw new Error(`Database error checking existing assignment: ${existingErr.message}`);
-          }
-
-          // Prepare detailed assignment data recording parent and child account linkages
-          const assignmentPayload: Record<string, any> = {
-            mentor_id: safeMentorId,
-            trader_id: safeTraderId,
-            status: 'active',
-            assigned_at: new Date().toISOString(),
-          };
-
-          if (safeParentAccId && isValidUUID(safeParentAccId)) {
-            assignmentPayload.parent_account_id = safeParentAccId;
-          }
-          if (safeChildAccId && isValidUUID(safeChildAccId)) {
-            assignmentPayload.child_account_id = safeChildAccId;
-          }
-          if (params.lotSettings) {
-            assignmentPayload.lot_mode = params.lotSettings.copyMode || 'multiplier';
-            assignmentPayload.lot_multiplier = params.lotSettings.multiplier || 1.0;
-            assignmentPayload.fixed_lot = params.lotSettings.fixedLot || 0.1;
-          }
-
-          let finalAssignmentId = '';
-
-          if (existing) {
-            // Update existing assignment with parent and child account linkages
-            let updateRes = await supabase
-              .from('mentor_assignments')
-              .update(assignmentPayload)
-              .eq('id', existing.id)
-              .select()
-              .single();
-
-            // If columns parent_account_id/child_account_id do not exist yet in schema, fallback to basic columns
-            if (updateRes.error && (updateRes.error.code === 'PGRST204' || updateRes.error.message.includes('column'))) {
-              updateRes = await supabase
-                .from('mentor_assignments')
-                .update({
-                  mentor_id: safeMentorId,
-                  status: 'active',
-                  assigned_at: new Date().toISOString(),
-                })
-                .eq('id', existing.id)
-                .select()
-                .single();
-            }
-
-            if (updateRes.error) {
-              if (isJwtExpiredError(updateRes.error)) throw updateRes.error;
-              throw new Error(`Database error updating mentor assignment: ${updateRes.error.message}`);
-            }
-            if (!updateRes.data?.id) {
-              throw new Error('Database update did not return an assignment ID.');
-            }
-            finalAssignmentId = updateRes.data.id;
-          } else {
-            // Create fresh assignment in public.mentor_assignments with account linkages
-            let insertRes = await supabase
-              .from('mentor_assignments')
-              .insert([assignmentPayload])
-              .select()
-              .single();
-
-            // If columns do not exist yet in schema, fallback to basic columns
-            if (insertRes.error && (insertRes.error.code === 'PGRST204' || insertRes.error.message.includes('column'))) {
-              insertRes = await supabase
-                .from('mentor_assignments')
-                .insert([{
-                  mentor_id: safeMentorId,
-                  trader_id: safeTraderId,
-                  status: 'active',
-                  assigned_at: new Date().toISOString(),
-                }])
-                .select()
-                .single();
-            }
-
-            if (insertRes.error) {
-              if (isJwtExpiredError(insertRes.error)) throw insertRes.error;
-              throw new Error(`Database error creating mentor assignment: ${insertRes.error.message}`);
-            }
-            if (!insertRes.data?.id) {
-              throw new Error('Database insert did not return an assignment ID.');
-            }
-            finalAssignmentId = insertRes.data.id;
-          }
-
-          // 6. Direct confirmation of persisted assignment record in Supabase
-          const { data: verifiedRecord, error: verifyErr } = await supabase
-            .from('mentor_assignments')
-            .select('id, mentor_id, trader_id, status')
-            .eq('id', finalAssignmentId)
-            .maybeSingle();
-
-          if (verifyErr) {
-            console.warn('[mt5AdminService] Notice during assignment verification read:', verifyErr.message);
-          }
-          if (!verifiedRecord || verifiedRecord.status !== 'active') {
-            throw new Error(`Assignment record verification failed in Supabase for ID "${finalAssignmentId}".`);
-          }
-
-          return { success: true, assignmentId: finalAssignmentId };
-        });
-      } catch (err: any) {
-        console.error('[mt5AdminService] Assignment failed in Supabase:', err);
-        const isExpired = isJwtExpiredError(err) || err.needsReauth || err instanceof SessionExpiredError;
+    if (params.isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
         return {
           success: false,
-          error: isExpired
-            ? 'Your authentication session has expired. Please sign in again to complete the assignment.'
-            : (err.message || 'Supabase database error during assignment.'),
-          needsReauth: isExpired,
+          error: 'Supabase is not configured in Cloud Mode.',
+        };
+      }
+      if (!safeParentAccId || !safeChildAccId || !isValidUUID(safeParentAccId) || !isValidUUID(safeChildAccId)) {
+        return {
+          success: false,
+          error: 'Valid registered Parent and Child MT5 Account UUIDs are required in Cloud Mode.',
+        };
+      }
+
+      try {
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            success: false,
+            needsReauth: true,
+            error: sessionCheck.error || 'Active Super Admin session required to assign MT5 accounts.',
+          };
+        }
+
+        const apiRes = await fetch('/api/v1/admin/assignments', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({
+            mentorId: safeMentorId,
+            traderId: safeTraderId,
+            parentAccountId: safeParentAccId,
+            childAccountId: safeChildAccId,
+            lotSettings: params.lotSettings,
+            replaceExisting: Boolean(params.replaceExisting),
+          }),
+        });
+
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            needsReauth: parsed.status === 401,
+            error: parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to assign account`,
+          };
+        }
+
+        return {
+          success: true,
+          assignmentId: parsed.data.assignmentId,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err.message || 'Network error calling admin assignment endpoint.',
         };
       }
     }
@@ -1807,65 +1311,56 @@ export const mt5AdminService = {
 
   /**
    * Unlinks or removes mentor assignment for a trader.
+   * Cloud Mode routes exclusively through POST /api/v1/admin/assignments/unassign.
    */
   async unassignChild(params: {
     assignmentId?: string;
     traderId: string;
+    childAccountId?: string;
     isCloudMode?: boolean;
   }): Promise<{ success: boolean; error?: string; needsReauth?: boolean }> {
-    const isCloud = params.isCloudMode && isSupabaseConfigured();
+    if (params.isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
+        return { success: false, error: 'Supabase is not configured in Cloud Mode.' };
+      }
 
-    if (isCloud) {
       try {
-        return await executeWithAuthRetry(async (activeSession) => {
-          await supabase.auth.setSession({
-            access_token: activeSession.access_token,
-            refresh_token: activeSession.refresh_token,
-          });
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            success: false,
+            needsReauth: true,
+            error: sessionCheck.error || 'Active Super Admin session required.',
+          };
+        }
 
-          if (params.assignmentId && isValidUUID(params.assignmentId)) {
-            const { error } = await supabase
-              .from('mentor_assignments')
-              .update({ status: 'inactive' })
-              .eq('id', params.assignmentId);
-
-            if (error) {
-              if (isJwtExpiredError(error)) throw error;
-              throw new Error(`Database error unlinking assignment: ${error.message}`);
-            }
-          } else if (isValidUUID(params.traderId)) {
-            const { error } = await supabase
-              .from('mentor_assignments')
-              .update({ status: 'inactive' })
-              .eq('trader_id', params.traderId);
-
-            if (error) {
-              if (isJwtExpiredError(error)) throw error;
-              throw new Error(`Database error unlinking trader: ${error.message}`);
-            }
-          }
-
-          // Also clear assigned_parent_id on child MT5 account if column exists
-          if (params.traderId && isValidUUID(params.traderId)) {
-            try {
-              await supabase
-                .from('mt5_accounts')
-                .update({ assigned_parent_id: null } as any)
-                .eq('user_id', params.traderId)
-                .eq('account_role', 'child');
-            } catch (ignore) {
-              // Ignore if column assigned_parent_id is not in mt5_accounts schema
-            }
-          }
-
-          return { success: true };
+        const apiRes = await fetch('/api/v1/admin/assignments/unassign', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({
+            assignmentId: params.assignmentId && isValidUUID(params.assignmentId) ? params.assignmentId : undefined,
+            traderId: isValidUUID(params.traderId) ? params.traderId : undefined,
+            childAccountId: params.childAccountId && isValidUUID(params.childAccountId) ? params.childAccountId : undefined,
+          }),
         });
+
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            needsReauth: parsed.status === 401,
+            error: parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to unassign child account`,
+          };
+        }
+
+        return { success: true };
       } catch (err: any) {
-        const isExpired = isJwtExpiredError(err) || err.needsReauth || err instanceof SessionExpiredError;
         return {
           success: false,
-          error: isExpired ? 'Your session has expired. Please sign in again.' : (err.message || 'Error unlinking account.'),
-          needsReauth: isExpired,
+          error: err.message || 'Network error unlinking child account.',
         };
       }
     }
@@ -1874,31 +1369,52 @@ export const mt5AdminService = {
   },
 
   /**
-   * Toggles MT5 account connection status (connected / disconnected)
+   * Toggles MT5 account connection status (connected / disconnected) via authenticated backend endpoint.
    */
   async updateAccountConnection(
     accountId: string,
     newStatus: 'connected' | 'disconnected',
     isCloudMode?: boolean
   ): Promise<{ success: boolean; error?: string }> {
-    if (isCloudMode && isSupabaseConfigured() && isValidUUID(accountId)) {
+    if (isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
+        return { success: false, error: 'Supabase is not configured in Cloud Mode.' };
+      }
+      if (!isValidUUID(accountId)) {
+        return { success: false, error: 'Invalid MT5 account UUID.' };
+      }
       try {
-        const { error } = await supabase
-          .from('mt5_accounts')
-          .update({ connection_status: newStatus })
-          .eq('id', accountId);
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return { success: false, error: sessionCheck.error || 'Authentication session expired.' };
+        }
 
-        if (error) return { success: false, error: error.message };
+        const res = await fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({ connectionStatus: newStatus }),
+        });
+
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            error: parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to update terminal connection`,
+          };
+        }
         return { success: true };
       } catch (err: any) {
-        return { success: false, error: err.message };
+        return { success: false, error: err.message || 'Network error updating connection status.' };
       }
     }
     return { success: true };
   },
 
   /**
-   * Toggles trader status between 'active' and 'suspended'
+   * Toggles trader status between 'active' and 'suspended' via POST /api/admin/user-status.
    */
   async toggleTraderStatus(
     traderId: string,
@@ -1908,18 +1424,49 @@ export const mt5AdminService = {
     const newStatus: 'active' | 'suspended' = currentStatus === 'active' ? 'suspended' : 'active';
     const safeTraderId = toValidUUID(traderId);
 
-    if (isCloudMode && isSupabaseConfigured()) {
+    if (isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
+        return {
+          success: false,
+          newStatus: currentStatus === 'active' ? 'active' : 'suspended',
+          error: 'Supabase is not configured in Cloud Mode.',
+        };
+      }
       try {
-        const { error } = await supabase
-          .from('profiles')
-          .update({ status: newStatus })
-          .eq('id', safeTraderId);
-
-        if (error) {
-          console.warn('[mt5AdminService] Supabase profile status update notice:', error.message);
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return {
+            success: false,
+            newStatus: currentStatus === 'active' ? 'active' : 'suspended',
+            error: sessionCheck.error || 'Active Super Admin session required.',
+          };
         }
+
+        const res = await fetch('/api/admin/user-status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({ targetUserId: safeTraderId, status: newStatus }),
+        });
+
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            newStatus: currentStatus === 'active' ? 'active' : 'suspended',
+            error: parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to update trader status`,
+          };
+        }
+
+        return { success: true, newStatus };
       } catch (err: any) {
-        console.warn('[mt5AdminService] Profile status update notice:', err.message);
+        return {
+          success: false,
+          newStatus: currentStatus === 'active' ? 'active' : 'suspended',
+          error: err.message || 'Network error updating trader status.',
+        };
       }
     }
 
@@ -1998,76 +1545,32 @@ export const mt5AdminService = {
     isCloudMode?: boolean,
     localUsers?: User[]
   ): Promise<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: 'mentor'; status: 'active' }>> {
-    if (isCloudMode && isSupabaseConfigured()) {
+    if (isCloudMode) {
+      if (!isSupabaseConfigured()) return [];
       try {
-        // 1. Try selecting directly from profiles (accessible to authenticated admins)
-        const { data: profs, error: profErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, email, avatar_url, role, status')
-          .eq('role', 'mentor')
-          .eq('status', 'active');
-
-        if (!profErr && profs && profs.length > 0) {
-          return profs.map((p) => ({
-            id: p.id,
-            fullName: p.full_name || p.email.split('@')[0],
-            email: p.email,
-            avatarUrl: p.avatar_url,
-            role: 'mentor' as const,
-            status: 'active' as const,
-          }));
-        }
-
-        // 2. Fallback to public mentor_directory view
-        const { data: dir, error: dirErr } = await supabase
-          .from('mentor_directory')
-          .select('id, full_name, avatar_url, role, status');
-
-        if (!dirErr && dir && dir.length > 0) {
-          return dir.map((p: any) => ({
-            id: p.id,
-            fullName: p.full_name || 'Verified Mentor',
-            email: 'mentor@tradesync.io',
-            avatarUrl: p.avatar_url,
-            role: 'mentor' as const,
-            status: 'active' as const,
-          }));
-        }
-
-        // 3. Fallback to authenticated admin endpoint /api/admin/users
         const sessionCheck = await ensureValidSession();
-        let token = sessionCheck.session?.access_token;
-        if (!token) {
-          const { data: directSession } = await supabase.auth.getSession();
-          token = directSession?.session?.access_token;
-        }
-        if (token) {
-          const apiRes = await fetch('/api/admin/users', {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const parsed = await this.safeParseApiResponse(apiRes);
-          if (parsed.ok && Array.isArray(parsed.data?.users)) {
-            const activeMentors = parsed.data.users
-              .filter((u: any) => u.role === 'mentor' && u.status === 'active')
-              .map((u: any) => ({
-                id: u.id,
-                fullName: u.full_name || u.email.split('@')[0],
-                email: u.email,
-                avatarUrl: u.avatar_url,
-                role: 'mentor' as const,
-                status: 'active' as const,
-              }));
-            if (activeMentors.length > 0) {
-              return activeMentors;
-            }
-          }
-        }
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return [];
 
-        // In Cloud Mode, if no active mentors exist in Supabase, return empty array
-        // Never return mock demo IDs in Cloud Mode to prevent database foreign key / trigger failures
+        const apiRes = await fetch('/api/admin/users', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (parsed.ok && Array.isArray(parsed.data?.users)) {
+          return parsed.data.users
+            .filter((u: any) => u.role === 'mentor' && u.status === 'active')
+            .map((u: any) => ({
+              id: u.id,
+              fullName: u.full_name || u.email.split('@')[0],
+              email: u.email,
+              avatarUrl: u.avatar_url,
+              role: 'mentor' as const,
+              status: 'active' as const,
+            }));
+        }
         return [];
       } catch (err) {
-        console.warn('[mt5AdminService] Could not fetch verified mentors from Supabase:', err);
+        console.warn('[mt5AdminService] Could not fetch verified mentors from backend API:', err);
         return [];
       }
     }
@@ -2086,7 +1589,6 @@ export const mt5AdminService = {
       }));
     }
 
-    // Standard demo mentors fallback for demo sandbox
     return STANDARD_DEMO_ACCOUNTS
       .filter((item) => item.owner.role === 'mentor' && item.owner.status === 'active')
       .map((item) => ({
@@ -2106,59 +1608,32 @@ export const mt5AdminService = {
     isCloudMode?: boolean,
     localUsers?: User[]
   ): Promise<Array<{ id: string; fullName: string; email: string; avatarUrl?: string; role: 'trader'; status: 'active' }>> {
-    if (isCloudMode && isSupabaseConfigured()) {
+    if (isCloudMode) {
+      if (!isSupabaseConfigured()) return [];
       try {
-        // 1. Direct query to public.profiles for active traders
-        const { data: profs, error: profErr } = await supabase
-          .from('profiles')
-          .select('id, full_name, email, avatar_url, role, status')
-          .eq('role', 'trader')
-          .eq('status', 'active');
-
-        if (!profErr && profs && profs.length > 0) {
-          return profs.map((p) => ({
-            id: p.id,
-            fullName: p.full_name || p.email.split('@')[0],
-            email: p.email,
-            avatarUrl: p.avatar_url,
-            role: 'trader' as const,
-            status: 'active' as const,
-          }));
-        }
-
-        // 2. Fallback to authenticated admin endpoint /api/admin/users
         const sessionCheck = await ensureValidSession();
-        let token = sessionCheck.session?.access_token;
-        if (!token) {
-          const { data: directSession } = await supabase.auth.getSession();
-          token = directSession?.session?.access_token;
-        }
-        if (token) {
-          const apiRes = await fetch('/api/admin/users', {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const parsed = await this.safeParseApiResponse(apiRes);
-          if (parsed.ok && Array.isArray(parsed.data?.users)) {
-            const activeTraders = parsed.data.users
-              .filter((u: any) => (u.role === 'trader' || !u.role) && u.status === 'active')
-              .map((u: any) => ({
-                id: u.id,
-                fullName: u.full_name || u.email.split('@')[0],
-                email: u.email,
-                avatarUrl: u.avatar_url,
-                role: 'trader' as const,
-                status: 'active' as const,
-              }));
-            if (activeTraders.length > 0) {
-              return activeTraders;
-            }
-          }
-        }
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return [];
 
-        // In Cloud Mode, never return mock demo IDs
+        const apiRes = await fetch('/api/admin/users', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const parsed = await this.safeParseApiResponse(apiRes);
+        if (parsed.ok && Array.isArray(parsed.data?.users)) {
+          return parsed.data.users
+            .filter((u: any) => u.role === 'trader' && u.status === 'active')
+            .map((u: any) => ({
+              id: u.id,
+              fullName: u.full_name || u.email.split('@')[0],
+              email: u.email,
+              avatarUrl: u.avatar_url,
+              role: 'trader' as const,
+              status: 'active' as const,
+            }));
+        }
         return [];
       } catch (err) {
-        console.warn('[mt5AdminService] Could not fetch verified traders from Supabase:', err);
+        console.warn('[mt5AdminService] Could not fetch verified traders from backend API:', err);
         return [];
       }
     }
@@ -2265,29 +1740,6 @@ export const mt5AdminService = {
       );
 
       if (!parsed.ok) {
-        // Deployment resilience: If /api/admin/users returned 404 (e.g. static hosting on Vercel), fall back to direct Supabase query
-        if (parsed.status === 404) {
-          console.warn('[mt5AdminService] /api/admin/users returned 404. Attempting direct Supabase query via authenticated session...');
-          const { data: directProfiles, error: directErr } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, avatar_url, role, status, created_at')
-            .order('created_at', { ascending: false });
-
-          if (!directErr && Array.isArray(directProfiles)) {
-            console.log(`[mt5AdminService:candidates] Direct Supabase profiles count: ${directProfiles.length}`);
-            return directProfiles
-              .filter((u: any) => u.role !== 'admin' && !(u.role === 'mentor' && u.status === 'active'))
-              .map((u: any) => ({
-                id: u.id,
-                fullName: u.full_name || (u.email ? u.email.split('@')[0] : 'Trader'),
-                email: u.email || '',
-                avatarUrl: u.avatar_url,
-                role: u.role || 'trader',
-                status: u.status || 'active',
-              }));
-          }
-        }
-
         const errMsg = parsed.data?.error || parsed.error || `HTTP ${parsed.status}: Failed to fetch registered candidate users`;
         console.error('[mt5AdminService] getCandidateUsersForMentor error:', errMsg);
         throw new Error(errMsg);
@@ -2380,33 +1832,6 @@ export const mt5AdminService = {
 
         const parsed = await this.safeParseApiResponse(res);
         if (!parsed.ok || !parsed.data?.success) {
-          // Deployment resilience: If /api/admin/approve-user returned 404 (e.g. Vercel static routing without serverless), fall back to direct Supabase update
-          if (parsed.status === 404) {
-            console.warn('[mt5AdminService] /api/admin/approve-user returned 404. Attempting direct Supabase update via authenticated admin session...');
-            const { data: directProfile, error: directErr } = await supabase
-              .from('profiles')
-              .update({
-                status: 'active',
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', safeTargetId)
-              .select('id, email, full_name, role, status, updated_at')
-              .single();
-
-            if (!directErr && directProfile) {
-              return {
-                success: true,
-                profile: directProfile,
-                message: `User ${directProfile.email || safeTargetId} successfully approved with active status (direct Supabase sync).`,
-              };
-            } else if (directErr) {
-              return {
-                success: false,
-                error: `Direct database update failed (${directErr.message}). Verify active administrator privileges in public.profiles.`,
-              };
-            }
-          }
-
           return {
             success: false,
             error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to approve user`,
@@ -2453,7 +1878,17 @@ export const mt5AdminService = {
   async promoteUserToMentor(params: {
     targetUserId: string;
     isCloudMode?: boolean;
-  }): Promise<{ success: boolean; error?: string; profile?: any; message?: string }> {
+    strategyName?: string;
+    monthlyFee?: number;
+  }): Promise<{
+    success: boolean;
+    error?: string;
+    profile?: any;
+    message?: string;
+    warning?: string;
+    strategyProfilePersisted?: boolean | null;
+    missingSchemaTable?: string;
+  }> {
     const safeTargetId = toValidUUID(params.targetUserId);
 
     if (params.isCloudMode && isSupabaseConfigured()) {
@@ -2475,39 +1910,13 @@ export const mt5AdminService = {
           body: JSON.stringify({
             targetUserId: safeTargetId,
             newRole: 'mentor',
+            ...(params.strategyName !== undefined ? { strategyName: params.strategyName } : {}),
+            ...(params.monthlyFee !== undefined ? { monthlyFee: params.monthlyFee } : {}),
           }),
         });
 
         const parsed = await this.safeParseApiResponse(res);
         if (!parsed.ok || !parsed.data?.success) {
-          // Deployment resilience: If /api/admin/promote-user returned 404 (e.g. Vercel static routing without serverless), fall back to direct Supabase update
-          if (parsed.status === 404) {
-            console.warn('[mt5AdminService] /api/admin/promote-user returned 404. Attempting direct Supabase update via authenticated admin session...');
-            const { data: directProfile, error: directErr } = await supabase
-              .from('profiles')
-              .update({
-                role: 'mentor',
-                status: 'active',
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', safeTargetId)
-              .select('id, email, full_name, role, status, updated_at')
-              .single();
-
-            if (!directErr && directProfile) {
-              return {
-                success: true,
-                profile: directProfile,
-                message: `User ${directProfile.email || safeTargetId} successfully promoted to mentor (direct Supabase sync).`,
-              };
-            } else if (directErr) {
-              return {
-                success: false,
-                error: `Direct database promotion failed (${directErr.message}). Verify active administrator privileges in public.profiles.`,
-              };
-            }
-          }
-
           return {
             success: false,
             error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to promote user to mentor`,
@@ -2518,6 +1927,9 @@ export const mt5AdminService = {
           success: true,
           profile: parsed.data.profile,
           message: parsed.data.message || `User successfully approved as active mentor`,
+          warning: parsed.data.warning,
+          strategyProfilePersisted: parsed.data.strategyProfilePersisted,
+          missingSchemaTable: parsed.data.missingSchemaTable,
         };
       } catch (err: any) {
         return { success: false, error: err.message || 'Network error during mentor promotion' };
@@ -2548,8 +1960,87 @@ export const mt5AdminService = {
   },
 
   /**
-   * Associates a Parent MT5 account with a verified active mentor profile in public.mt5_accounts.
-   * Super Admins use this when a parent account record does not have a verified active mentor in profiles.
+   * Creates a new user account via authenticated server-side Supabase Auth Admin endpoint (POST /api/admin/users/create).
+   * Preserves the caller's Super Admin browser session and never exposes service-role keys.
+   */
+  async createAdminUser(params: {
+    fullName: string;
+    email: string;
+    password: string;
+    role?: 'mentor' | 'trader';
+    status?: 'active' | 'pending' | 'suspended';
+    strategyName?: string;
+    monthlyFee?: number;
+  }): Promise<{
+    success: boolean;
+    profile?: any;
+    warning?: string;
+    strategyProfilePersisted?: boolean | null;
+    missingSchemaTable?: string;
+    message?: string;
+    error?: string;
+    code?: string;
+  }> {
+    if (!isSupabaseConfigured()) {
+      return {
+        success: false,
+        error: 'Supabase is not configured in Cloud Mode.',
+      };
+    }
+
+    try {
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        return {
+          success: false,
+          error: sessionCheck.error || 'Active Super Admin session required.',
+        };
+      }
+
+      const res = await fetch('/api/admin/users/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionCheck.session.access_token}`,
+        },
+        body: JSON.stringify({
+          fullName: params.fullName,
+          email: params.email,
+          password: params.password,
+          role: params.role || 'mentor',
+          status: params.status || 'active',
+          strategyName: params.strategyName,
+          monthlyFee: params.monthlyFee,
+        }),
+      });
+
+      const parsed = await this.safeParseApiResponse(res);
+      if (!parsed.ok || !parsed.data?.success) {
+        return {
+          success: false,
+          code: parsed.data?.code,
+          error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to create user account`,
+        };
+      }
+
+      return {
+        success: true,
+        profile: parsed.data.profile,
+        warning: parsed.data.warning,
+        strategyProfilePersisted: parsed.data.strategyProfilePersisted,
+        missingSchemaTable: parsed.data.missingSchemaTable,
+        message: parsed.data.message,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || 'Network error creating user account.',
+      };
+    }
+  },
+
+  /**
+   * Associates a Parent MT5 account with a verified active mentor profile via POST /api/v1/admin/accounts/:accountId/owner.
    */
   async associateParentAccountMentor(params: {
     parentAccountId: string;
@@ -2559,86 +2050,50 @@ export const mt5AdminService = {
     const safeParentAccId = toValidUUID(params.parentAccountId);
     const safeMentorProfileId = toValidUUID(params.mentorProfileId);
 
-    if (params.isCloudMode && isSupabaseConfigured()) {
+    if (params.isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
+        return { success: false, error: 'Supabase is not configured in Cloud Mode.' };
+      }
+      if (!isValidUUID(safeParentAccId) || !isValidUUID(safeMentorProfileId)) {
+        return { success: false, error: 'Valid parentAccountId and mentorProfileId UUIDs are required.' };
+      }
+
       try {
-        return await executeWithAuthRetry(async () => {
-          // 1. Verify target mentor is indeed active with role = 'mentor' in public.profiles
-          const { data: mentorProfile, error: mentorErr } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, role, status')
-            .eq('id', safeMentorProfileId)
-            .maybeSingle();
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return { success: false, error: sessionCheck.error || 'Active Super Admin session required.' };
+        }
 
-          if (mentorErr) throw mentorErr;
-          if (!mentorProfile || mentorProfile.role !== 'mentor' || mentorProfile.status !== 'active') {
-            return {
-              success: false,
-              error: 'Security error: Selected user profile is not a verified active mentor in public.profiles.',
-            };
-          }
-
-          // 2. Check if mt5_accounts record exists; update if so, or insert if from sandbox
-          const { data: existingAcc } = await supabase
-            .from('mt5_accounts')
-            .select('id')
-            .eq('id', safeParentAccId)
-            .maybeSingle();
-
-          if (existingAcc) {
-            const { error: accErr } = await supabase
-              .from('mt5_accounts')
-              .update({
-                user_id: safeMentorProfileId,
-                account_role: 'parent',
-              })
-              .eq('id', safeParentAccId);
-
-            if (accErr) throw accErr;
-          } else {
-            const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
-            const list: MT5Account[] = stored ? JSON.parse(stored) : [];
-            const localAcc = list.find(a => a.id === params.parentAccountId || toValidUUID(a.id) === safeParentAccId) ||
-              STANDARD_DEMO_ACCOUNTS.find(i => i.account.id === params.parentAccountId || toValidUUID(i.account.id) === safeParentAccId)?.account;
-
-            if (localAcc) {
-              const { error: insertErr } = await supabase
-                .from('mt5_accounts')
-                .insert([{
-                  id: safeParentAccId,
-                  user_id: safeMentorProfileId,
-                  account_number: localAcc.accountNumber,
-                  broker_server: localAcc.server,
-                  broker_name: localAcc.broker,
-                  account_role: 'parent',
-                  account_type: localAcc.accountType || 'demo',
-                  balance: localAcc.balance,
-                  equity: localAcc.equity,
-                  margin: 0,
-                  free_margin: localAcc.freeMargin,
-                  currency: localAcc.currency,
-                  leverage: localAcc.leverage,
-                  connection_status: 'connected',
-                  ping_ms: localAcc.pingMs || 15,
-                  is_investor_password: true,
-                  auto_trading_enabled: true,
-                }]);
-              if (insertErr) {
-                console.warn('[associateParentAccountMentor] notice creating account in Supabase:', insertErr.message);
-              }
-            }
-          }
-
-          return {
-            success: true,
-            mentor: {
-              id: mentorProfile.id,
-              fullName: mentorProfile.full_name || mentorProfile.email,
-              email: mentorProfile.email,
-            },
-          };
+        const res = await fetch(`/api/v1/admin/accounts/${encodeURIComponent(safeParentAccId)}/owner`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({ profileId: safeMentorProfileId }),
         });
+
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to associate parent mentor`,
+          };
+        }
+
+        const prof = parsed.data.profile;
+        return {
+          success: true,
+          mentor: prof
+            ? {
+                id: prof.id,
+                fullName: prof.full_name || prof.email,
+                email: prof.email,
+              }
+            : undefined,
+        };
       } catch (err: any) {
-        return { success: false, error: err.message };
+        return { success: false, error: err.message || 'Network error associating mentor.' };
       }
     }
 
@@ -2662,7 +2117,7 @@ export const mt5AdminService = {
   },
 
   /**
-   * Associates a Child MT5 account with a verified active trader profile in public.mt5_accounts.
+   * Associates a Child MT5 account with an active trader profile via POST /api/v1/admin/accounts/:accountId/owner.
    */
   async associateChildAccountTrader(params: {
     childAccountId: string;
@@ -2672,84 +2127,50 @@ export const mt5AdminService = {
     const safeChildAccId = toValidUUID(params.childAccountId);
     const safeTraderProfileId = toValidUUID(params.traderProfileId);
 
-    if (params.isCloudMode && isSupabaseConfigured()) {
+    if (params.isCloudMode !== false) {
+      if (!isSupabaseConfigured()) {
+        return { success: false, error: 'Supabase is not configured in Cloud Mode.' };
+      }
+      if (!isValidUUID(safeChildAccId) || !isValidUUID(safeTraderProfileId)) {
+        return { success: false, error: 'Valid childAccountId and traderProfileId UUIDs are required.' };
+      }
+
       try {
-        return await executeWithAuthRetry(async () => {
-          const { data: traderProfile, error: traderErr } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, role, status')
-            .eq('id', safeTraderProfileId)
-            .maybeSingle();
+        const sessionCheck = await ensureValidSession();
+        if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+          return { success: false, error: sessionCheck.error || 'Active Super Admin session required.' };
+        }
 
-          if (traderErr) throw traderErr;
-          if (!traderProfile || traderProfile.status !== 'active') {
-            return {
-              success: false,
-              error: 'Security error: Selected user profile is not an active trader profile in public.profiles.',
-            };
-          }
-
-          const { data: existingAcc } = await supabase
-            .from('mt5_accounts')
-            .select('id')
-            .eq('id', safeChildAccId)
-            .maybeSingle();
-
-          if (existingAcc) {
-            const { error: accErr } = await supabase
-              .from('mt5_accounts')
-              .update({
-                user_id: safeTraderProfileId,
-                account_role: 'child',
-              })
-              .eq('id', safeChildAccId);
-
-            if (accErr) throw accErr;
-          } else {
-            const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('tradesync_mt5_accounts') : null;
-            const list: MT5Account[] = stored ? JSON.parse(stored) : [];
-            const localAcc = list.find(a => a.id === params.childAccountId || toValidUUID(a.id) === safeChildAccId) ||
-              STANDARD_DEMO_ACCOUNTS.find(i => i.account.id === params.childAccountId || toValidUUID(i.account.id) === safeChildAccId)?.account;
-
-            if (localAcc) {
-              const { error: insertErr } = await supabase
-                .from('mt5_accounts')
-                .insert([{
-                  id: safeChildAccId,
-                  user_id: safeTraderProfileId,
-                  account_number: localAcc.accountNumber,
-                  broker_server: localAcc.server,
-                  broker_name: localAcc.broker,
-                  account_role: 'child',
-                  account_type: localAcc.accountType || 'demo',
-                  balance: localAcc.balance,
-                  equity: localAcc.equity,
-                  margin: 0,
-                  free_margin: localAcc.freeMargin,
-                  currency: localAcc.currency,
-                  leverage: localAcc.leverage,
-                  connection_status: 'connected',
-                  ping_ms: localAcc.pingMs || 15,
-                  is_investor_password: true,
-                  auto_trading_enabled: true,
-                }]);
-              if (insertErr) {
-                console.warn('[associateChildAccountTrader] notice creating account in Supabase:', insertErr.message);
-              }
-            }
-          }
-
-          return {
-            success: true,
-            trader: {
-              id: traderProfile.id,
-              fullName: traderProfile.full_name || traderProfile.email,
-              email: traderProfile.email,
-            },
-          };
+        const res = await fetch(`/api/v1/admin/accounts/${encodeURIComponent(safeChildAccId)}/owner`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionCheck.session.access_token}`,
+          },
+          body: JSON.stringify({ profileId: safeTraderProfileId }),
         });
+
+        const parsed = await this.safeParseApiResponse(res);
+        if (!parsed.ok || !parsed.data?.success) {
+          return {
+            success: false,
+            error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to associate child trader`,
+          };
+        }
+
+        const prof = parsed.data.profile;
+        return {
+          success: true,
+          trader: prof
+            ? {
+                id: prof.id,
+                fullName: prof.full_name || prof.email,
+                email: prof.email,
+              }
+            : undefined,
+        };
       } catch (err: any) {
-        return { success: false, error: err.message };
+        return { success: false, error: err.message || 'Network error associating trader.' };
       }
     }
 

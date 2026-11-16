@@ -51,6 +51,7 @@ export const ConnectionsView: React.FC = () => {
   const [copiedTokenAccId, setCopiedTokenAccId] = useState<string | null>(null);
   const [isGeneratingToken, setIsGeneratingToken] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [connectionFeedback, setConnectionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
 
   // One-time Token presentation modal state (e.g. on token generation/rotation)
@@ -168,6 +169,32 @@ export const ConnectionsView: React.FC = () => {
         </div>
         <span className="font-mono text-[10px] text-cyan-400 border border-cyan-800/80 bg-cyan-950/60 px-2 py-0.5 rounded">Option A Active</span>
       </div>
+
+      {connectionFeedback && (
+        <div
+          className={`rounded-lg border px-4 py-2.5 text-xs flex items-center justify-between gap-2 ${
+            connectionFeedback.type === 'error'
+              ? 'border-rose-900/70 bg-rose-950/50 text-rose-300'
+              : 'border-emerald-900/70 bg-emerald-950/50 text-emerald-300'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {connectionFeedback.type === 'error' ? (
+              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{connectionFeedback.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConnectionFeedback(null)}
+            className="text-slate-400 hover:text-white"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* MQL5 EA Bridge Download & Token Provisioning */}
       <div className="rounded-xl border border-cyan-800/60 bg-gradient-to-br from-slate-900 via-cyan-950/20 to-slate-900 p-4 space-y-4 shadow-xl">
@@ -505,12 +532,26 @@ export const ConnectionsView: React.FC = () => {
       <ConfirmationModal
         isOpen={confirmData.isOpen}
         onClose={() => setConfirmData({ isOpen: false, account: null, action: 'disconnect' })}
-        onConfirm={() => {
+        onConfirm={async () => {
           if (confirmData.account) {
-            if (confirmData.action === 'disconnect') {
-              disconnectMT5Account(confirmData.account.id);
+            setConnectionFeedback(null);
+            const acc = confirmData.account;
+            const res =
+              confirmData.action === 'disconnect'
+                ? await disconnectMT5Account(acc.id)
+                : await reconnectMT5Account(acc.id);
+            if (res.success) {
+              setConnectionFeedback({
+                type: 'success',
+                message:
+                  res.message ||
+                  `Terminal #${acc.accountNumber} ${confirmData.action === 'disconnect' ? 'disconnected' : 'reconnected'}.`,
+              });
             } else {
-              reconnectMT5Account(confirmData.account.id);
+              setConnectionFeedback({
+                type: 'error',
+                message: res.message || `Failed to ${confirmData.action} terminal #${acc.accountNumber}.`,
+              });
             }
           }
         }}

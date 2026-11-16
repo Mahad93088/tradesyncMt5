@@ -114,6 +114,27 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     }
   };
 
+  const handleTerminalConnectionToggle = async (
+    accountId: string,
+    action: 'disconnect' | 'reconnect'
+  ) => {
+    setActionBusy(true);
+    setFeedback(null);
+    const res =
+      action === 'disconnect'
+        ? await disconnectMT5Account(accountId)
+        : await reconnectMT5Account(accountId);
+    setActionBusy(false);
+    if (!res.success) {
+      setFeedback({
+        message: res.message || `Failed to ${action} child MT5 terminal.`,
+        isError: true,
+      });
+    } else if (res.message) {
+      setFeedback({ message: res.message, isError: false });
+    }
+  };
+
   const copyingStreamSubtitle = !childAccount
     ? 'Terminal offline'
     : childAccount.isStale
@@ -300,15 +321,17 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                 <StatusBadge status={childAccount.connectionStatus} size="sm" />
                 {childAccount.connectionStatus === 'connected' ? (
                   <button
-                    onClick={() => disconnectMT5Account(childAccount.id)}
-                    className="text-xs text-rose-400 hover:text-rose-300 font-medium"
+                    onClick={() => void handleTerminalConnectionToggle(childAccount.id, 'disconnect')}
+                    disabled={actionBusy}
+                    className="text-xs text-rose-400 hover:text-rose-300 font-medium disabled:opacity-50"
                   >
                     Disconnect
                   </button>
                 ) : (
                   <button
-                    onClick={() => reconnectMT5Account(childAccount.id)}
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-medium"
+                    onClick={() => void handleTerminalConnectionToggle(childAccount.id, 'reconnect')}
+                    disabled={actionBusy}
+                    className="text-xs text-emerald-400 hover:text-emerald-300 font-medium disabled:opacity-50"
                   >
                     Reconnect
                   </button>

@@ -22,7 +22,9 @@ export const supabaseDataService = {
     try {
       const { data, error } = await supabase
         .from('mt5_accounts')
-        .select('*')
+        .select(
+          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, assigned_parent_id, last_sync, error_message, created_at'
+        )
         .order('created_at', { ascending: false });
 
       if (error) return { data: null, error: error.message };
@@ -32,23 +34,12 @@ export const supabaseDataService = {
     }
   },
 
-  async addAccount(account: Omit<DbMT5Account, 'id' | 'created_at' | 'last_sync'>): Promise<{ data: DbMT5Account | null; error: string | null }> {
-    if (!isSupabaseConfigured()) {
-      return { data: null, error: 'Supabase is not configured' };
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('mt5_accounts')
-        .insert([account])
-        .select()
-        .single();
-
-      if (error) return { data: null, error: error.message };
-      return { data: data as DbMT5Account, error: null };
-    } catch (err: any) {
-      return { data: null, error: err.message || 'Error adding MT5 account' };
-    }
+  async addAccount(_account: Omit<DbMT5Account, 'id' | 'created_at' | 'last_sync'>): Promise<{ data: DbMT5Account | null; error: string | null }> {
+    return {
+      data: null,
+      error:
+        'Direct browser insertion into mt5_accounts is disabled. Use authenticated /api/v1/bridge/accounts/register or /api/v1/admin/accounts/register endpoints.',
+    };
   },
 
   async updateAccount(accountId: string, updates: Partial<DbMT5Account>): Promise<{ data: DbMT5Account | null; error: string | null }> {
@@ -61,7 +52,9 @@ export const supabaseDataService = {
         .from('mt5_accounts')
         .update({ ...updates, last_sync: new Date().toISOString() })
         .eq('id', accountId)
-        .select()
+        .select(
+          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, assigned_parent_id, last_sync, error_message, created_at'
+        )
         .single();
 
       if (error) return { data: null, error: error.message };
@@ -186,39 +179,9 @@ export const supabaseDataService = {
       const accountIdMapping: Record<string, string> = {};
 
       for (const acc of localAccounts) {
-        try {
-          const { data, error } = await supabase
-            .from('mt5_accounts')
-            .insert([{
-              user_id: userId,
-              account_number: acc.accountNumber,
-              broker_server: acc.server,
-              broker_name: acc.broker,
-              account_role: acc.accountRole || 'child',
-              account_type: acc.accountType || 'demo',
-              balance: acc.balance,
-              equity: acc.equity,
-              margin: acc.margin,
-              free_margin: acc.freeMargin,
-              currency: acc.currency,
-              leverage: acc.leverage,
-              connection_status: acc.connectionStatus,
-              is_investor_password: acc.isInvestorPassword,
-              auto_trading_enabled: acc.autoTradingEnabled,
-              ping_ms: acc.pingMs || 15,
-            }])
-            .select()
-            .single();
-
-          if (error) {
-            result.errors.push(`Account #${acc.accountNumber}: ${error.message}`);
-          } else if (data) {
-            accountIdMapping[acc.id] = data.id;
-            result.accountsMigrated++;
-          }
-        } catch (e: any) {
-          result.errors.push(`Failed account #${acc.accountNumber}: ${e.message}`);
-        }
+        result.errors.push(
+          `Account #${acc.accountNumber}: Direct browser insertion into mt5_accounts is disabled. Register Demo MT5 accounts via /api/v1/bridge/accounts/register so server-side Demo validation and terminal tokens are provisioned.`
+        );
       }
 
       // 2. Read trades from localStorage
