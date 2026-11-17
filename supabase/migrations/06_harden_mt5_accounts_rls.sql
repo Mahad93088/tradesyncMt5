@@ -6,17 +6,19 @@
 -- 1. Prevents non-admin authenticated users from modifying protected identity,
 --    role, linkage, token, or server-managed telemetry columns on
 --    public.mt5_accounts via direct PostgREST UPDATEs:
---      id, user_id, account_role, account_type, assigned_parent_id,
+--      id, user_id, account_role, account_type,
 --      terminal_token_hash, terminal_token_prefix, terminal_token_created_at,
 --      created_at, balance, equity, margin, free_margin, ping_ms, last_sync,
 --      error_message
+--    (Parent-child copy links are stored in public.mentor_assignments via
+--     parent_account_id and child_account_id.)
 -- 2. Restricts non-admin connection_status transitions so authenticated users
 --    can never establish connection_status = 'connected' (or fake
 --    'connecting'/'error'), while preserving 'disconnected' and user settings
 --    such as auto_trading_enabled.
 -- 3. Enforces active-profile validation, trader->child / mentor->parent parity,
---    Demo-only safety, null linkage/token metadata, and safe DB defaults for
---    telemetry fields during direct client INSERTs.
+--    Demo-only safety (including for authenticated admins), null token metadata,
+--    and safe DB defaults for telemetry fields during direct client INSERTs.
 -- 4. Hardens mt5_accounts INSERT, UPDATE, and DELETE RLS policies while
 --    preserving legitimate tenant SELECT access and Super Admin / service_role
 --    / postgres workflows.
@@ -53,6 +55,7 @@ AS $$
 DECLARE
     v_jwt_role TEXT := '';
     v_claims_raw TEXT := '';
+    v_is_backend_service BOOLEAN := FALSE;
     v_is_privileged BOOLEAN := FALSE;
     v_caller_role TEXT := NULL;
     v_caller_status TEXT := NULL;
@@ -70,11 +73,17 @@ BEGIN
         v_jwt_role := '';
     END;
 
-    v_is_privileged :=
+    v_is_backend_service :=
         current_user IN ('postgres', 'service_role', 'supabase_admin')
         OR session_user IN ('postgres', 'service_role', 'supabase_admin')
-        OR v_jwt_role = 'service_role'
-        OR public.is_admin();
+        OR v_jwt_role = 'service_role';
+
+    v_is_privileged := v_is_backend_service OR public.is_admin();
+
+    -- Demo-only safeguard cannot be bypassed by authenticated admins or clients.
+    IF NOT v_is_backend_service AND NEW.account_type IS DISTINCT FROM 'demo' THEN
+        RAISE EXCEPTION 'Security violation: Only Demo MT5 accounts (account_type = demo) may be created or updated; authenticated administrators cannot create or convert live MT5 accounts.';
+    END IF;
 
     IF NOT v_is_privileged THEN
         IF TG_OP = 'INSERT' THEN
@@ -97,10 +106,6 @@ BEGIN
 
             IF NEW.account_type IS DISTINCT FROM 'demo' THEN
                 RAISE EXCEPTION 'Security violation: Only Demo MT5 accounts (account_type = demo) may be created.';
-            END IF;
-
-            IF NEW.assigned_parent_id IS NOT NULL THEN
-                RAISE EXCEPTION 'Security violation: assigned_parent_id cannot be set on direct client inserts.';
             END IF;
 
             IF NEW.terminal_token_hash IS NOT NULL
@@ -128,12 +133,11 @@ BEGIN
                OR NEW.user_id IS DISTINCT FROM OLD.user_id
                OR NEW.account_role IS DISTINCT FROM OLD.account_role
                OR NEW.account_type IS DISTINCT FROM OLD.account_type
-               OR NEW.assigned_parent_id IS DISTINCT FROM OLD.assigned_parent_id
                OR NEW.terminal_token_hash IS DISTINCT FROM OLD.terminal_token_hash
                OR NEW.terminal_token_prefix IS DISTINCT FROM OLD.terminal_token_prefix
                OR NEW.terminal_token_created_at IS DISTINCT FROM OLD.terminal_token_created_at
                OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
-                RAISE EXCEPTION 'Security violation: Protected mt5_accounts columns (id, user_id, account_role, account_type, assigned_parent_id, terminal_token_*, created_at) cannot be modified by non-admin callers.';
+                RAISE EXCEPTION 'Security violation: Protected mt5_accounts columns (id, user_id, account_role, account_type, terminal_token_*, created_at) cannot be modified by non-admin callers.';
             END IF;
 
             IF NEW.balance IS DISTINCT FROM OLD.balance
@@ -185,30 +189,31 @@ DROP POLICY IF EXISTS "mt5_accounts_insert_policy" ON public.mt5_accounts;
 CREATE POLICY "mt5_accounts_insert_policy"
     ON public.mt5_accounts FOR INSERT
     WITH CHECK (
-        public.is_admin()
-        OR (
-            user_id = auth.uid()
-            AND account_type = 'demo'
-            AND assigned_parent_id IS NULL
-            AND terminal_token_hash IS NULL
-            AND terminal_token_prefix IS NULL
-            AND terminal_token_created_at IS NULL
-            AND connection_status = 'disconnected'
-            AND balance = 0
-            AND equity = 0
-            AND margin = 0
-            AND free_margin = 0
-            AND ping_ms = 0
-            AND error_message IS NULL
-            AND EXISTS (
-                SELECT 1
-                FROM public.profiles p
-                WHERE p.id = auth.uid()
-                  AND p.status = 'active'
-                  AND (
-                      (p.role = 'trader' AND account_role = 'child')
-                      OR (p.role = 'mentor' AND account_role = 'parent')
-                  )
+        account_type = 'demo'
+        AND (
+            public.is_admin()
+            OR (
+                user_id = auth.uid()
+                AND terminal_token_hash IS NULL
+                AND terminal_token_prefix IS NULL
+                AND terminal_token_created_at IS NULL
+                AND connection_status = 'disconnected'
+                AND balance = 0
+                AND equity = 0
+                AND margin = 0
+                AND free_margin = 0
+                AND ping_ms = 0
+                AND error_message IS NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM public.profiles p
+                    WHERE p.id = auth.uid()
+                      AND p.status = 'active'
+                      AND (
+                          (p.role = 'trader' AND account_role = 'child')
+                          OR (p.role = 'mentor' AND account_role = 'parent')
+                      )
+                )
             )
         )
     );
@@ -229,15 +234,17 @@ CREATE POLICY "mt5_accounts_update_policy"
         )
     )
     WITH CHECK (
-        public.is_admin()
-        OR (
-            user_id = auth.uid()
-            AND account_type = 'demo'
-            AND EXISTS (
-                SELECT 1
-                FROM public.profiles p
-                WHERE p.id = auth.uid()
-                  AND p.status = 'active'
+        account_type = 'demo'
+        AND (
+            public.is_admin()
+            OR (
+                user_id = auth.uid()
+                AND EXISTS (
+                    SELECT 1
+                    FROM public.profiles p
+                    WHERE p.id = auth.uid()
+                      AND p.status = 'active'
+                )
             )
         )
     );
@@ -289,8 +296,7 @@ GRANT SELECT (
     error_message,
     created_at,
     terminal_token_prefix,
-    terminal_token_created_at,
-    assigned_parent_id
+    terminal_token_created_at
 ) ON public.mt5_accounts TO authenticated;
 
 GRANT SELECT ON public.mt5_accounts TO service_role, postgres;

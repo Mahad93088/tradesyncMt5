@@ -89,11 +89,31 @@ function createPriority1MockSupabase(state: DbState) {
       let mode: 'select' | 'insert' | 'update' | 'upsert' | 'delete' = 'select';
       let payload: any = null;
       let upsertOnConflict: string | null = null;
+      let selectCols: string | null = null;
 
       const execute = async () => {
         const table = state[tableName];
         if (!table) {
           return { data: null, error: { message: `Table ${String(tableName)} not found` } };
+        }
+
+        // Simulate live Supabase schema where mt5_accounts does NOT have assigned_parent_id
+        if (tableName === 'mt5_accounts') {
+          if (selectCols && selectCols.includes('assigned_parent_id')) {
+            return {
+              data: null,
+              error: { code: '42703', message: 'column mt5_accounts.assigned_parent_id does not exist' },
+            };
+          }
+          if (payload) {
+            const items = Array.isArray(payload) ? payload : [payload];
+            if (items.some((it) => it && typeof it === 'object' && 'assigned_parent_id' in it)) {
+              return {
+                data: null,
+                error: { code: '42703', message: 'column "assigned_parent_id" of relation "mt5_accounts" does not exist' },
+              };
+            }
+          }
         }
 
         if (mode === 'insert') {
@@ -165,7 +185,10 @@ function createPriority1MockSupabase(state: DbState) {
       };
 
       const builder: any = {
-        select() {
+        select(cols?: string) {
+          if (typeof cols === 'string') {
+            selectCols = cols;
+          }
           if (mode !== 'insert' && mode !== 'update' && mode !== 'upsert' && mode !== 'delete') {
             mode = 'select';
           }
@@ -577,8 +600,27 @@ async function runTests() {
     const okAssignJson = await okAssign.json();
     assert.strictEqual(okAssignJson.success, true);
     assert.strictEqual(okAssignJson.assignment.lot_mode, 'fixed');
+    assert.strictEqual(okAssignJson.assignment.parent_account_id, parentAccId);
+    assert.strictEqual(okAssignJson.assignment.child_account_id, childAccId);
+
+    // Verify GET /api/v1/admin/accounts and GET /api/v1/bridge/my-accounts work without mt5_accounts.assigned_parent_id
+    const adminAccsRes = await fetch(`${baseUrl}/api/v1/admin/accounts`, {
+      headers: { Authorization: 'Bearer jwt-admin' },
+    });
+    assert.strictEqual(adminAccsRes.status, 200);
+    const adminAccsJson = await adminAccsRes.json();
     assert.strictEqual(
-      state.mt5_accounts.find((a) => a.id === childAccId)?.assigned_parent_id,
+      adminAccsJson.accounts.find((a: any) => a.id === childAccId)?.assigned_parent_id,
+      parentAccId
+    );
+
+    const myAccsRes = await fetch(`${baseUrl}/api/v1/bridge/my-accounts`, {
+      headers: { Authorization: 'Bearer jwt-trader' },
+    });
+    assert.strictEqual(myAccsRes.status, 200);
+    const myAccsJson = await myAccsRes.json();
+    assert.strictEqual(
+      myAccsJson.accounts.find((a: any) => a.id === childAccId)?.assigned_parent_id,
       parentAccId
     );
 
@@ -650,7 +692,6 @@ async function runTests() {
       body: JSON.stringify({ childAccountId: childAccId }),
     });
     assert.strictEqual(unassignRes.status, 200);
-    assert.strictEqual(state.mt5_accounts.find((a) => a.id === childAccId)?.assigned_parent_id, null);
     assert.strictEqual(state.mentor_assignments.length, 0);
     console.log('[PASS] 3. POST /api/v1/admin/accounts/:id/owner & /assignments/unassign validate existence, Demo-only, and role parity.');
 
@@ -779,6 +820,31 @@ async function runTests() {
     assert.strictEqual(mig06Src.includes('NEW.last_sync IS DISTINCT FROM OLD.last_sync'), true);
     assert.strictEqual(mig06Src.includes('NEW.error_message IS DISTINCT FROM OLD.error_message'), true);
     assert.strictEqual(mig06Src.includes("ALTER COLUMN connection_status SET DEFAULT 'disconnected'"), true);
+    assert.strictEqual(mig06Src.includes('assigned_parent_id'), false, 'Migration 06 must not reference non-existent assigned_parent_id column');
+    assert.strictEqual(mig06Src.includes('v_is_backend_service'), true, 'Trigger must separate backend service_role from authenticated admin');
+    assert.strictEqual(
+      mig06Src.includes("IF NOT v_is_backend_service AND NEW.account_type IS DISTINCT FROM 'demo' THEN"),
+      true,
+      'Trigger must block authenticated admins from inserting/updating live accounts'
+    );
+    assert.strictEqual(
+      /CREATE POLICY "mt5_accounts_insert_policy"[\s\S]*?WITH CHECK \(\s*account_type = 'demo'\s*AND \(\s*public\.is_admin\(\)/m.test(mig06Src),
+      true,
+      'INSERT RLS policy must enforce account_type = demo even for authenticated admins'
+    );
+    assert.strictEqual(
+      /CREATE POLICY "mt5_accounts_update_policy"[\s\S]*?WITH CHECK \(\s*account_type = 'demo'\s*AND \(\s*public\.is_admin\(\)/m.test(mig06Src),
+      true,
+      'UPDATE RLS policy must enforce account_type = demo even for authenticated admins'
+    );
+
+    const apiAppSrc = read('src/server/apiApp.ts');
+    assert.strictEqual(dataSvcSrc.includes('assigned_parent_id'), false, 'supabaseDataService must not query assigned_parent_id');
+    assert.strictEqual(
+      /from\('mt5_accounts'\)[\s\S]{0,400}assigned_parent_id/.test(apiAppSrc),
+      false,
+      'apiApp must not read or write mt5_accounts.assigned_parent_id directly'
+    );
 
     console.log('[PASS] 5. Static security regression & Migration 06 checks all verified.');
     console.log('\nALL PRIORITY 1 SECURITY & DB INTEGRITY TESTS PASSED.');

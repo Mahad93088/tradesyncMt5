@@ -23,7 +23,7 @@ export const supabaseDataService = {
       const { data, error } = await supabase
         .from('mt5_accounts')
         .select(
-          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, assigned_parent_id, last_sync, error_message, created_at'
+          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at'
         )
         .order('created_at', { ascending: false });
 
@@ -53,7 +53,7 @@ export const supabaseDataService = {
         .update({ ...updates, last_sync: new Date().toISOString() })
         .eq('id', accountId)
         .select(
-          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, assigned_parent_id, last_sync, error_message, created_at'
+          'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at'
         )
         .single();
 

@@ -504,10 +504,12 @@ async function runStage1Tests() {
       assert.strictEqual(regChild.status, 200);
       assert.strictEqual(stateValid.mt5_accounts.length, 2);
       const childRow = stateValid.mt5_accounts.find((a) => a.account_number === '55110002')!;
-      assert.strictEqual(childRow.assigned_parent_id, registeredParentId);
+      assert.strictEqual('assigned_parent_id' in childRow, false, 'Must NOT write non-existent assigned_parent_id to mt5_accounts');
 
       assert.strictEqual(stateValid.mentor_assignments.length, 1);
       const assignRow = stateValid.mentor_assignments[0];
+      assert.strictEqual(assignRow.parent_account_id, registeredParentId);
+      assert.strictEqual(assignRow.child_account_id, childRow.id);
       assert.strictEqual(assignRow.lot_mode, 'fixed', 'Must persist lot_mode (not lot_copy_mode)');
       assert.strictEqual('lot_copy_mode' in assignRow, false, 'Must NOT write non-existent lot_copy_mode column');
       assert.strictEqual(assignRow.fixed_lot, 0.25);

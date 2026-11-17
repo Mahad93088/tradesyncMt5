@@ -1739,7 +1739,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
         connection_status: 'disconnected',
         is_investor_password: true,
         auto_trading_enabled: true,
-        assigned_parent_id: verifiedParentAcc ? verifiedParentAcc.id : null,
       };
 
       if (existingAcc) {
@@ -1756,7 +1755,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
             currency: currency || 'USD',
             leverage: Number(leverage) || 100,
             connection_status: 'disconnected',
-            assigned_parent_id: verifiedParentAcc ? verifiedParentAcc.id : null,
             terminal_token_hash: tokenHash,
             terminal_token_prefix: tokenPrefix,
             terminal_token_created_at: new Date().toISOString(),
@@ -2077,7 +2075,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
             currency: currency || 'USD',
             leverage: Number(leverage) || 100,
             connection_status: 'disconnected',
-            ...(verifiedParentAcc ? { assigned_parent_id: verifiedParentAcc.id } : {}),
             terminal_token_hash: tokenHash,
             terminal_token_prefix: tokenPrefix,
             terminal_token_created_at: new Date().toISOString(),
@@ -2106,7 +2103,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
             connection_status: 'disconnected',
             is_investor_password: true,
             auto_trading_enabled: true,
-            assigned_parent_id: verifiedParentAcc ? verifiedParentAcc.id : null,
             terminal_token_hash: tokenHash,
             terminal_token_prefix: tokenPrefix,
             terminal_token_created_at: new Date().toISOString(),
@@ -2222,7 +2218,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (!dbClient) return;
 
       const safeAccountColumns =
-        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at, assigned_parent_id';
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at';
 
       const [accResult, assignResult, profilesResult] = await Promise.all([
         dbClient.from('mt5_accounts').select(safeAccountColumns).order('created_at', { ascending: false }),
@@ -2240,6 +2236,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(500).json({ success: false, error: profilesResult.error.message });
       }
 
+      const parentByChildMap = new Map<string, string>();
+      for (const a of assignResult.data || []) {
+        if (a.child_account_id && a.parent_account_id) {
+          if (a.status === 'active' || !parentByChildMap.has(a.child_account_id)) {
+            parentByChildMap.set(a.child_account_id, a.parent_account_id);
+          }
+        }
+      }
+
       const nowMs = Date.now();
       const enrichedAccounts = (accResult.data || []).map((acc: any) => {
         const eff = computeEffectiveConnectionStatus(
@@ -2251,6 +2256,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         const { terminal_token_hash: _dropHash, ...safeAcc } = acc;
         return {
           ...safeAcc,
+          assigned_parent_id: parentByChildMap.get(acc.id) ?? null,
           connection_status: eff.effectiveStatus,
           is_stale: eff.isStale,
           error_message: eff.errorMessage || null,
@@ -2284,7 +2290,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (!dbClient) return;
 
       const safeAccountColumns =
-        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at, assigned_parent_id';
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at';
 
       const [accRes, asMentorRes, asTraderRes] = await Promise.all([
         dbClient
@@ -2318,10 +2324,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const peerIds = new Set<string>([caller.user.id]);
       const linkedChildIds = new Set<string>();
       const linkedParentIds = new Set<string>();
+      const parentByChildMap = new Map<string, string>();
 
       for (const a of assignments) {
         if (a.mentor_id) peerIds.add(a.mentor_id);
         if (a.trader_id) peerIds.add(a.trader_id);
+        if (a.child_account_id && a.parent_account_id) {
+          if (a.status === 'active' || !parentByChildMap.has(a.child_account_id)) {
+            parentByChildMap.set(a.child_account_id, a.parent_account_id);
+          }
+        }
         if (a.mentor_id === caller.user.id && a.child_account_id) {
           linkedChildIds.add(a.child_account_id);
         }
@@ -2331,7 +2343,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       const safeLinkedChildColumns =
-        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, auto_trading_enabled, last_sync, error_message, assigned_parent_id';
+        'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, auto_trading_enabled, last_sync, error_message';
       const safeLinkedParentColumns =
         'id, user_id, account_number, broker_server, broker_name, account_role, account_type, currency, connection_status, ping_ms, auto_trading_enabled, last_sync, error_message';
 
@@ -2357,6 +2369,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           nowMs
         );
         const { terminal_token_hash: _dropHash, ...rest } = acc;
+        const derivedParentId = parentByChildMap.get(acc.id) ?? null;
         if (isLinkedPeer) {
           const {
             terminal_token_prefix: _dropPrefix,
@@ -2365,6 +2378,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           } = rest;
           return {
             ...peerSafe,
+            ...(acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
             connection_status: eff.effectiveStatus,
             is_stale: eff.isStale,
             error_message: eff.errorMessage || null,
@@ -2372,6 +2386,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
         return {
           ...rest,
+          ...(acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
           connection_status: eff.effectiveStatus,
           is_stale: eff.isStale,
           error_message: eff.errorMessage || null,
@@ -3638,8 +3653,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(422).json({ success: false, error: upsertErr.message });
       }
 
-      await dbClient.from('mt5_accounts').update({ assigned_parent_id: parentAcc.id }).eq('id', resolvedChildId);
-
       await bridgeStore.addSyncLog(
         {
           eventType: 'MENTOR_LINK_CREATED',
@@ -3764,10 +3777,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', assignmentId);
       if (delErr) return res.status(500).json({ success: false, error: delErr.message });
-
-      if (existing.child_account_id) {
-        await dbClient.from('mt5_accounts').update({ assigned_parent_id: null }).eq('id', existing.child_account_id);
-      }
 
       await bridgeStore.addSyncLog(
         {
@@ -4233,18 +4242,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
         persistedAssignment = inserted;
       }
 
-      const { error: childParentUpdErr } = await dbClient
-        .from('mt5_accounts')
-        .update({ assigned_parent_id: cleanParentAccId })
-        .eq('id', cleanChildAccId);
-
-      if (childParentUpdErr) {
-        return res.status(500).json({
-          success: false,
-          error: `Assignment saved, but failed to sync assigned_parent_id: ${childParentUpdErr.message}`,
-        });
-      }
-
       await bridgeStore.addSyncLog(
         {
           eventType: 'ADMIN_ASSIGNMENT_CREATED',
@@ -4306,13 +4303,6 @@ export function createApiApp(deps?: ApiAppDependencies) {
       for (const row of matches) {
         const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', row.id);
         if (delErr) return res.status(500).json({ success: false, error: delErr.message });
-        if (row.child_account_id) {
-          await dbClient.from('mt5_accounts').update({ assigned_parent_id: null }).eq('id', row.child_account_id);
-        }
-      }
-
-      if (isValidUUID(cleanChildAccId)) {
-        await dbClient.from('mt5_accounts').update({ assigned_parent_id: null }).eq('id', cleanChildAccId);
       }
 
       await bridgeStore.addSyncLog(
