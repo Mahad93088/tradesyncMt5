@@ -762,10 +762,23 @@ async function runTests() {
 
     const mig06Src = read('supabase/migrations/06_harden_mt5_accounts_rls.sql');
     assert.strictEqual(mig06Src.includes('protect_mt5_account_security'), true);
+    assert.strictEqual(mig06Src.includes('SECURITY INVOKER'), true, 'Trigger must use SECURITY INVOKER');
+    assert.strictEqual(mig06Src.includes('SECURITY DEFINER'), false, 'Trigger must not use SECURITY DEFINER');
     assert.strictEqual(mig06Src.includes('trg_protect_mt5_account_security'), true);
     assert.strictEqual(mig06Src.includes('REVOKE SELECT (terminal_token_hash) ON public.mt5_accounts'), true);
     assert.strictEqual(mig06Src.includes('mt5_accounts_insert_policy'), true);
     assert.strictEqual(mig06Src.includes('mt5_accounts_update_policy'), true);
+    assert.strictEqual(mig06Src.includes("v_caller_role = 'trader' AND NEW.account_role = 'child'"), true);
+    assert.strictEqual(mig06Src.includes("v_caller_role = 'mentor' AND NEW.account_role = 'parent'"), true);
+    assert.strictEqual(mig06Src.includes("NEW.connection_status IS DISTINCT FROM 'disconnected'"), true);
+    assert.strictEqual(mig06Src.includes('NEW.balance IS DISTINCT FROM OLD.balance'), true);
+    assert.strictEqual(mig06Src.includes('NEW.equity IS DISTINCT FROM OLD.equity'), true);
+    assert.strictEqual(mig06Src.includes('NEW.margin IS DISTINCT FROM OLD.margin'), true);
+    assert.strictEqual(mig06Src.includes('NEW.free_margin IS DISTINCT FROM OLD.free_margin'), true);
+    assert.strictEqual(mig06Src.includes('NEW.ping_ms IS DISTINCT FROM OLD.ping_ms'), true);
+    assert.strictEqual(mig06Src.includes('NEW.last_sync IS DISTINCT FROM OLD.last_sync'), true);
+    assert.strictEqual(mig06Src.includes('NEW.error_message IS DISTINCT FROM OLD.error_message'), true);
+    assert.strictEqual(mig06Src.includes("ALTER COLUMN connection_status SET DEFAULT 'disconnected'"), true);
 
     console.log('[PASS] 5. Static security regression & Migration 06 checks all verified.');
     console.log('\nALL PRIORITY 1 SECURITY & DB INTEGRITY TESTS PASSED.');
