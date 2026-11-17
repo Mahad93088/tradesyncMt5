@@ -846,7 +846,25 @@ async function runTests() {
       'apiApp must not read or write mt5_accounts.assigned_parent_id directly'
     );
 
-    console.log('[PASS] 5. Static security regression & Migration 06 checks all verified.');
+    const mig07Src = read('supabase/migrations/07_add_mentor_assignments_account_columns.sql');
+    assert.strictEqual(mig07Src.includes('ADD COLUMN IF NOT EXISTS parent_account_id UUID REFERENCES public.mt5_accounts(id)'), true);
+    assert.strictEqual(mig07Src.includes('ADD COLUMN IF NOT EXISTS child_account_id UUID REFERENCES public.mt5_accounts(id)'), true);
+    assert.strictEqual(mig07Src.includes("ADD COLUMN IF NOT EXISTS lot_mode TEXT NOT NULL DEFAULT 'parent_lot'"), true);
+    assert.strictEqual(mig07Src.includes('ADD COLUMN IF NOT EXISTS lot_multiplier NUMERIC(10, 2) NOT NULL DEFAULT 1.00'), true);
+    assert.strictEqual(mig07Src.includes('ADD COLUMN IF NOT EXISTS fixed_lot NUMERIC(10, 2) NOT NULL DEFAULT 0.10'), true);
+    assert.strictEqual(mig07Src.includes('idx_mentor_assignments_active_child_unique'), true);
+    assert.strictEqual(mig07Src.includes('idx_mentor_assignments_active_pair_unique'), true);
+    assert.strictEqual(mig07Src.includes('mentor_assignments_lot_mode_check'), true);
+    assert.strictEqual(mig07Src.includes('mentor_assignments_lot_multiplier_check'), true);
+    assert.strictEqual(mig07Src.includes('mentor_assignments_fixed_lot_check'), true);
+    assert.strictEqual(mig07Src.includes('validate_mentor_assignment'), true);
+    assert.strictEqual(
+      /ALTER\s+TABLE\s+public\.mt5_accounts/i.test(mig07Src),
+      false,
+      'Migration 07 must not alter public.mt5_accounts or add assigned_parent_id'
+    );
+
+    console.log('[PASS] 5. Static security regression & Migration 06/07 checks all verified.');
     console.log('\nALL PRIORITY 1 SECURITY & DB INTEGRITY TESTS PASSED.');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
