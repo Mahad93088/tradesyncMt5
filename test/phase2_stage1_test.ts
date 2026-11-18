@@ -49,6 +49,12 @@ function createStage1MockSupabase(
         }
 
         if (mode === 'insert') {
+          if (tableName === 'mentor_assignments' && opts?.failMentorAssignmentsUpsert) {
+            return {
+              data: null,
+              error: { message: 'Security error: simulated trigger/constraint rejection on mentor_assignments' },
+            };
+          }
           const items = Array.isArray(payload) ? payload : [payload];
           const inserted = items.map((item) => {
             const copy = {
@@ -91,6 +97,12 @@ function createStage1MockSupabase(
         }
 
         if (mode === 'update') {
+          if (tableName === 'mentor_assignments' && opts?.failMentorAssignmentsUpsert) {
+            return {
+              data: null,
+              error: { message: 'Security error: simulated trigger/constraint rejection on mentor_assignments' },
+            };
+          }
           const matched = applyFilters(table, filters);
           for (const row of matched) {
             Object.assign(row, payload);

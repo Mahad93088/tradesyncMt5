@@ -165,7 +165,7 @@ export const MT5AccountsManagementView: React.FC<MT5AccountsManagementViewProps>
       await loadAccounts();
     } else {
       setFeedback({
-        type: 'error',
+        type: isCloudMode && !isConnected ? 'success' : 'error',
         message: res.message || 'Failed to update terminal connection state.',
       });
     }
@@ -527,10 +527,14 @@ export const MT5AccountsManagementView: React.FC<MT5AccountsManagementViewProps>
                             className={`rounded-md px-2 py-1 text-[11px] font-semibold border whitespace-nowrap transition-colors ${
                               item.connectionStatus === 'connected'
                                 ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
-                                : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'
                             }`}
                           >
-                            {item.connectionStatus === 'connected' ? 'Suspend' : 'Activate'}
+                            {item.connectionStatus === 'connected'
+                              ? 'Suspend'
+                              : isCloudMode
+                              ? 'EA Heartbeat'
+                              : 'Activate'}
                           </button>
                         </div>
                       </td>
@@ -601,13 +605,27 @@ export const MT5AccountsManagementView: React.FC<MT5AccountsManagementViewProps>
         onConfirm={() => {
           void handleToggleConnection();
         }}
-        title={confirmToggle.currentStatus === 'connected' ? 'Suspend MT5 Terminal' : 'Activate MT5 Terminal'}
+        title={
+          confirmToggle.currentStatus === 'connected'
+            ? 'Suspend MT5 Terminal'
+            : isCloudMode
+            ? 'Await MT5 EA Heartbeat'
+            : 'Activate MT5 Terminal'
+        }
         description={
           confirmToggle.currentStatus === 'connected'
             ? `Suspend terminal #${confirmToggle.accountNumber}? Copier synchronization for this account will pause immediately.`
+            : isCloudMode
+            ? `Terminal #${confirmToggle.accountNumber} activates automatically upon receiving an authenticated MT5 Expert Advisor heartbeat. Refresh bridge status now?`
             : `Reactivate terminal #${confirmToggle.accountNumber} for copier synchronization?`
         }
-        confirmLabel={confirmToggle.currentStatus === 'connected' ? 'Suspend Terminal' : 'Activate Terminal'}
+        confirmLabel={
+          confirmToggle.currentStatus === 'connected'
+            ? 'Suspend Terminal'
+            : isCloudMode
+            ? 'Refresh Bridge Status'
+            : 'Activate Terminal'
+        }
         variant={confirmToggle.currentStatus === 'connected' ? 'danger' : 'primary'}
       />
 

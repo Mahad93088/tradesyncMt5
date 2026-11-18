@@ -25,6 +25,7 @@ import {
   formatTradeProfitDisplay,
   formatHeartbeatAge
 } from '../common/dashboardHelpers';
+import { computeReportingSummary } from '../../context/cloudStateUtils';
 
 interface TraderDashboardProps {
   onNavigateTab: (tab: string) => void;
@@ -57,14 +58,20 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
   const [unlinkConfirmOpen, setUnlinkConfirmOpen] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
+  const [selectedChildId, setSelectedChildId] = useState<string>('');
 
-  // Find child MT5 account
-  const childAccount = mt5Accounts.find(
+  // Support multiple child MT5 accounts belonging to this trader
+  const childAccounts = mt5Accounts.filter(
     (a) => a.userId === currentUser.id && a.accountRole === 'child'
   );
+  const childAccount =
+    childAccounts.find((a) => a.id === selectedChildId) || childAccounts[0] || undefined;
 
-  // Find linked mentor & parent terminal telemetry
-  const link = parentChildLinks.find((l) => l.traderId === currentUser.id);
+  // Find link scoped to selected child account
+  const link = childAccount
+    ? parentChildLinks.find((l) => l.childAccountId === childAccount.id) ||
+      parentChildLinks.find((l) => l.traderId === currentUser.id)
+    : parentChildLinks.find((l) => l.traderId === currentUser.id);
   const linkedParentAccount = link
     ? followerAccounts.find((a) => a.id === link.parentAccountId) ||
       mt5Accounts.find((a) => a.id === link.parentAccountId)
@@ -75,16 +82,26 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
   const mentorProfile =
     !isCloudMode && link ? mentorProfiles.find((m) => m.userId === link.mentorId) : null;
 
-  // Open trades on this child account
-  const openTrades = trades.filter(
-    (t) => childAccount && t.accountId === childAccount.id && t.status === 'OPEN'
-  );
+  // Trades & mappings on selected child account (fallback to all trader trades when unsplit)
+  const scopedTrades = childAccount
+    ? trades.filter((t) => t.accountId === childAccount.id)
+    : [];
+  const openTrades = scopedTrades.filter((t) => t.status === 'OPEN');
   const realOpenTrades = openTrades.filter((t) => !t.isMappingFallback);
   const traderMappings = tradeMappings.filter(
     (m) =>
-      (m.traderId === currentUser.id || (childAccount && m.childAccountId === childAccount.id)) &&
+      (childAccount ? m.childAccountId === childAccount.id : m.traderId === currentUser.id) &&
       (m.status === 'EXECUTED' || m.status === 'PENDING')
   );
+  const scopedMappings = tradeMappings.filter((m) =>
+    childAccount ? m.childAccountId === childAccount.id : m.traderId === currentUser.id
+  );
+  const reporting = computeReportingSummary({
+    trades: scopedTrades,
+    mappings: scopedMappings,
+    accounts: childAccount ? [childAccount] : childAccounts,
+    isCloudMode,
+  });
 
   const linkProfit = link
     ? formatLinkProfitDisplay(link, isCloudMode)
@@ -167,6 +184,20 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {childAccounts.length > 1 && childAccount && (
+            <select
+              value={childAccount.id}
+              onChange={(e) => setSelectedChildId(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:border-emerald-500 focus:outline-none"
+              aria-label="Select Child MT5 Account"
+            >
+              {childAccounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>
+                  #{acc.accountNumber} ({acc.broker})
+                </option>
+              ))}
+            </select>
+          )}
           {childAccount && (
             <button
               onClick={() => toggleAutoTrading(childAccount.id)}
@@ -205,15 +236,13 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
             </button>
           )}
 
-          {!childAccount && (
-            <button
-              onClick={onOpenConnectModal}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
-            >
-              <Plus className="h-4 w-4" />
-              <span>Connect Child MT5</span>
-            </button>
-          )}
+          <button
+            onClick={onOpenConnectModal}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            <span>{childAccount ? 'Add Child MT5' : 'Connect Child MT5'}</span>
+          </button>
         </div>
       </div>
 
@@ -331,9 +360,10 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                   <button
                     onClick={() => void handleTerminalConnectionToggle(childAccount.id, 'reconnect')}
                     disabled={actionBusy}
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-medium disabled:opacity-50"
+                    className="text-xs text-cyan-400 hover:text-cyan-300 font-medium disabled:opacity-50"
+                    title={isCloudMode ? 'Activation requires an authenticated EA heartbeat' : 'Reconnect Demo Terminal'}
                   >
-                    Reconnect
+                    {isCloudMode ? 'Refresh EA Status' : 'Reconnect'}
                   </button>
                 )}
               </div>
@@ -642,7 +672,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                   </div>
                   {isCloudMode && (
                     <p className="pt-1 border-t border-slate-800/80 text-[10px] font-sans text-slate-500">
-                      Sizing rule & lot factors persist in Supabase; safety clamps are UI-enforced.
+                      All 12 sizing &amp; risk controls persist in Supabase and enforce server-side.
                     </p>
                   )}
                 </div>
@@ -652,6 +682,81 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                 Link to a mentor to configure lot sizing.
               </span>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Realized Reporting & Execution Metrics */}
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
+          <div>
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+              Performance &amp; Copier Reporting
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              {reporting.realizedPnlAvailable
+                ? `Computed strictly from ${reporting.realizedClosedCount} settled MT5 deal(s).`
+                : 'Awaiting closed deal data from MT5 Expert Advisor.'}
+            </p>
+          </div>
+          <span className="font-mono text-[11px] text-slate-400">
+            {reporting.executedCopiesCount} Executed • {reporting.failedCopiesCount} Failed
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">Realized P&amp;L</span>
+            <p
+              className={`font-bold text-sm mt-0.5 ${
+                !reporting.realizedPnlAvailable
+                  ? 'text-slate-400 font-normal text-xs'
+                  : reporting.realizedPnlUSD >= 0
+                  ? 'text-emerald-400'
+                  : 'text-rose-400'
+              }`}
+            >
+              {reporting.realizedPnlAvailable
+                ? `${reporting.realizedPnlUSD >= 0 ? '+' : '-'}$${Math.abs(reporting.realizedPnlUSD).toFixed(2)}`
+                : 'Awaiting closed deal data'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">Win Rate</span>
+            <p className="font-bold text-white text-sm mt-0.5">
+              {reporting.winRatePercent !== null ? `${reporting.winRatePercent}%` : '--'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">Profit Factor</span>
+            <p className="font-bold text-white text-sm mt-0.5">
+              {reporting.profitFactor !== null ? reporting.profitFactor.toFixed(2) : '--'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">24h / 7d Realized</span>
+            <p className="font-bold text-slate-200 text-xs mt-1">
+              {reporting.dailyRealizedUSD !== null
+                ? `$${reporting.dailyRealizedUSD.toFixed(2)} / $${(reporting.weeklyRealizedUSD ?? 0).toFixed(2)}`
+                : '-- / --'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">30d Realized</span>
+            <p className="font-bold text-slate-200 text-sm mt-0.5">
+              {reporting.monthlyRealizedUSD !== null ? `$${reporting.monthlyRealizedUSD.toFixed(2)}` : '--'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">Avg Copy Delay</span>
+            <p className="font-bold text-cyan-400 text-sm mt-0.5">
+              {reporting.avgCopyLatencyMs !== null ? `${reporting.avgCopyLatencyMs}ms` : '--'}
+            </p>
           </div>
         </div>
       </div>

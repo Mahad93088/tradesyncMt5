@@ -221,13 +221,17 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
             }
          }
 
+         double dealProfit     = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+         double dealCommission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+         double dealSwap       = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Broadcaster] Parent %s CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f (Remaining: %.2f)",
-                        closeType, dealTicket, position, symbol, volume, price, remainingLots);
+            PrintFormat("[TradeSync Broadcaster] Parent %s CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f (Remaining: %.2f, Profit: %.2f)",
+                        closeType, dealTicket, position, symbol, volume, price, remainingLots, dealProfit);
          }
 
-         BroadcastTradeClose(position, price, closeType, volume, remainingLots, dealTicket);
+         BroadcastTradeClose(position, price, closeType, volume, remainingLots, dealTicket, dealProfit, dealCommission, dealSwap);
       }
    }
    // 3. PENDING ORDER PLACEMENT NOTICE (Fill-Based Copy Protocol)
@@ -295,18 +299,22 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
 //+------------------------------------------------------------------+
 void BroadcastTradeClose(ulong parentTicket, double closePrice,
                          string closeType = "FULL", double closedLots = 0.0,
-                         double remainingLots = 0.0, ulong dealTicket = 0)
+                         double remainingLots = 0.0, ulong dealTicket = 0,
+                         double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0)
 {
    string url = InpServerUrl + "/api/v1/bridge/events/trade-close";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"closePrice\":%.5f,\"closeType\":\"%s\",\"closedLots\":%.2f,\"remainingLots\":%.2f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"closePrice\":%.5f,\"closeType\":\"%s\",\"closedLots\":%.2f,\"remainingLots\":%.2f,\"realizedProfit\":%.2f,\"commission\":%.2f,\"swap\":%.2f}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       dealTicket,
       closePrice,
       EscapeJsonString(closeType),
       closedLots,
-      remainingLots
+      remainingLots,
+      realizedProfit,
+      commission,
+      swap
    );
 
    DispatchOrQueueEvent(url, json, StringFormat("%s_CLOSE#%I64u", closeType, parentTicket));

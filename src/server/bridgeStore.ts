@@ -54,6 +54,7 @@ export interface BridgeInstruction {
   hasTp?: boolean;
   magicNumber: number | string;
   comment: string;
+  slippageMaxPips?: number;
   createdAt: string;
   status: 'QUEUED' | 'IN_FLIGHT' | 'COMPLETED' | 'FAILED';
   leaseExpiresAt?: number;
@@ -65,6 +66,11 @@ export interface ExecutionAckPayload {
   status: MappingExecutionStatus;
   childTicket?: number | string;
   fillPrice?: number;
+  executedLots?: number;
+  realizedProfit?: number;
+  commission?: number;
+  swap?: number;
+  closePrice?: number;
   brokerErrorCode?: number;
   brokerErrorMessage?: string;
   executionLatencyMs?: number;
@@ -560,7 +566,7 @@ export class BridgeStore {
         );
 
         if (!rpcErr && Array.isArray(rpcRows)) {
-          return rpcRows.map((r: any) => {
+          const rpcInstructions: BridgeInstruction[] = rpcRows.map((r: any) => {
             const hasSL = r.sl != null && r.sl !== '';
             const hasTP = r.tp != null && r.tp !== '';
             const parsedLease = r.lease_expires_at ? new Date(r.lease_expires_at).getTime() : NaN;
@@ -584,6 +590,7 @@ export class BridgeStore {
               hasTP,
               hasSl: hasSL,
               hasTp: hasTP,
+              slippageMaxPips: this.instructions.get(r.id)?.slippageMaxPips,
               magicNumber: r.magic_number != null ? String(r.magic_number) : '888999',
               comment: r.comment || '',
               createdAt: r.created_at,
@@ -592,6 +599,8 @@ export class BridgeStore {
               retryCount: Number(r.retry_count) || 0,
             };
           });
+          await this.attachSlippageToInstructions(childAccountId, rpcInstructions, supabaseClient);
+          return rpcInstructions;
         } else if (rpcErr) {
           console.warn('[BridgeStore] claim_pending_instructions RPC notice:', rpcErr.message);
         }
@@ -703,6 +712,7 @@ export class BridgeStore {
               hasTP,
               hasSl: hasSL,
               hasTp: hasTP,
+              slippageMaxPips: this.instructions.get(claimedRow.id)?.slippageMaxPips,
               magicNumber: claimedRow.magic_number != null ? String(claimedRow.magic_number) : '888999',
               comment: claimedRow.comment || '',
               createdAt: claimedRow.created_at,
@@ -713,6 +723,7 @@ export class BridgeStore {
           }
         }
 
+        await this.attachSlippageToInstructions(childAccountId, deliverableInstructions, supabaseClient);
         return deliverableInstructions;
       }
 
@@ -743,6 +754,37 @@ export class BridgeStore {
     }
 
     return result;
+  }
+
+  private async attachSlippageToInstructions(
+    childAccountId: string,
+    instructions: BridgeInstruction[],
+    supabaseClient?: SupabaseClient
+  ): Promise<void> {
+    if (!supabaseClient || instructions.length === 0) return;
+    try {
+      const { data: assignRows, error } = await supabaseClient
+        .from('mentor_assignments')
+        .select('parent_account_id, slippage_max_pips')
+        .eq('child_account_id', childAccountId)
+        .eq('status', 'active');
+      if (error || !Array.isArray(assignRows)) return;
+
+      const slippageByParent = new Map<string, number>();
+      for (const a of assignRows) {
+        if (a?.parent_account_id && a?.slippage_max_pips != null && Number.isFinite(Number(a.slippage_max_pips))) {
+          slippageByParent.set(a.parent_account_id, Number(a.slippage_max_pips));
+        }
+      }
+
+      for (const inst of instructions) {
+        if (inst.slippageMaxPips === undefined && inst.parentAccountId && slippageByParent.has(inst.parentAccountId)) {
+          inst.slippageMaxPips = slippageByParent.get(inst.parentAccountId);
+        }
+      }
+    } catch {
+      // Non-fatal fallback for legacy schemas without slippage_max_pips
+    }
   }
 
   /**
@@ -905,6 +947,9 @@ export class BridgeStore {
             console.error('[BridgeStore] Supabase MODIFY trade_mappings update error:', modMapErr.message);
           }
         }
+
+        // Persist durable child trade lifecycle record without fabricating realized P&L
+        await this.syncChildAckToTradesTable(inst, ack, childTicketStr, supabaseClient);
       } catch (err: any) {
         console.error('[BridgeStore] Supabase ack persistence exception:', err.message);
         return { success: false, statusCode: 500, error: `Database ACK persistence exception: ${err.message}` };
@@ -925,6 +970,10 @@ export class BridgeStore {
         map.status = ack.status;
       } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
         map.status = 'CLOSED';
+        map.closeTime = new Date().toISOString();
+        if (ack.realizedProfit != null && Number.isFinite(Number(ack.realizedProfit))) {
+          map.childProfitUSD = Number(ack.realizedProfit);
+        }
       }
       map.latencyMs = ack.executionLatencyMs || map.latencyMs;
       map.errorMessage = ack.brokerErrorMessage || undefined;
@@ -939,6 +988,358 @@ export class BridgeStore {
     }, supabaseClient);
 
     return { success: true, instruction: inst };
+  }
+
+  /**
+   * Persist durable parent trade OPEN into public.trades (never fabricates realized P&L)
+   */
+  public async recordParentTradeOpen(
+    params: {
+      accountId: string;
+      userId: string;
+      ticket: string;
+      symbol: string;
+      orderType: OrderType;
+      lots: number;
+      openPrice?: number;
+      sl?: number;
+      tp?: number;
+      comment?: string;
+    },
+    supabaseClient?: SupabaseClient
+  ): Promise<void> {
+    if (!supabaseClient || typeof (supabaseClient as any).from !== 'function') return;
+    await this.upsertTradeLifecycle(
+      {
+        accountId: params.accountId,
+        userId: params.userId,
+        ticket: String(params.ticket),
+        symbol: params.symbol,
+        type: params.orderType,
+        volume: params.lots,
+        requestedVolume: params.lots,
+        openPrice: params.openPrice ?? 0,
+        sl: params.sl,
+        tp: params.tp,
+        status: 'OPEN',
+        executionStatus: 'EXECUTED',
+        isRealized: false,
+        profit: null,
+        openTime: new Date().toISOString(),
+        notes: params.comment,
+      },
+      supabaseClient
+    );
+  }
+
+  /**
+   * Persist durable parent trade CLOSE into public.trades and trade_mappings
+   * strictly from authoritative EA deal fields (never invents profit when unavailable).
+   */
+  public async recordParentTradeClose(
+    params: {
+      accountId: string;
+      userId?: string;
+      ticket: string;
+      closePrice?: number;
+      realizedProfit?: number;
+      commission?: number;
+      swap?: number;
+    },
+    supabaseClient?: SupabaseClient
+  ): Promise<void> {
+    if (!supabaseClient || typeof (supabaseClient as any).from !== 'function') return;
+    const nowIso = new Date().toISOString();
+    const hasProfit = params.realizedProfit != null && Number.isFinite(Number(params.realizedProfit));
+
+    try {
+      const updateFields: Record<string, any> = {
+        status: 'CLOSED',
+        close_time: nowIso,
+        updated_at: nowIso,
+      };
+      if (params.closePrice != null && Number.isFinite(Number(params.closePrice))) {
+        updateFields.close_price = Number(params.closePrice);
+      }
+      if (hasProfit) {
+        updateFields.profit = Number(params.realizedProfit);
+        updateFields.is_realized = true;
+      }
+      if (params.commission != null && Number.isFinite(Number(params.commission))) {
+        updateFields.commission = Number(params.commission);
+      }
+      if (params.swap != null && Number.isFinite(Number(params.swap))) {
+        updateFields.swap = Number(params.swap);
+      }
+
+      const { data: existing } = await supabaseClient
+        .from('trades')
+        .select('id')
+        .eq('account_id', params.accountId)
+        .eq('ticket', String(params.ticket))
+        .maybeSingle();
+
+      if (existing?.id) {
+        const { error: updErr } = await supabaseClient
+          .from('trades')
+          .update(updateFields)
+          .eq('id', existing.id);
+        if (updErr) {
+          // Retry with pre-Migration-08 column subset if updated_at/is_realized missing in DB or mock
+          const legacyFields: Record<string, any> = {
+            status: 'CLOSED',
+            close_time: nowIso,
+          };
+          if (updateFields.close_price !== undefined) legacyFields.close_price = updateFields.close_price;
+          if (updateFields.profit !== undefined) legacyFields.profit = updateFields.profit;
+          if (updateFields.commission !== undefined) legacyFields.commission = updateFields.commission;
+          if (updateFields.swap !== undefined) legacyFields.swap = updateFields.swap;
+          await supabaseClient.from('trades').update(legacyFields).eq('id', existing.id);
+        }
+      }
+
+      if (hasProfit || params.closePrice != null) {
+        const mapPatch: Record<string, any> = {
+          close_time: nowIso,
+          updated_at: nowIso,
+        };
+        if (hasProfit) mapPatch.parent_profit_usd = Number(params.realizedProfit);
+        if (params.closePrice != null && Number.isFinite(Number(params.closePrice))) {
+          mapPatch.close_price = Number(params.closePrice);
+        }
+        await supabaseClient
+          .from('trade_mappings')
+          .update(mapPatch)
+          .eq('parent_account_id', params.accountId)
+          .eq('parent_trade_ticket', String(params.ticket));
+      }
+    } catch {
+      // Non-fatal in pre-Migration-08 or legacy test mocks
+    }
+  }
+
+  private async syncChildAckToTradesTable(
+    inst: BridgeInstruction,
+    ack: ExecutionAckPayload,
+    childTicketStr: string | undefined,
+    supabaseClient: SupabaseClient
+  ): Promise<void> {
+    try {
+      const { data: childAcc } = await supabaseClient
+        .from('mt5_accounts')
+        .select('id, user_id')
+        .eq('id', inst.childAccountId)
+        .maybeSingle();
+
+      const ownerUserId = childAcc?.user_id;
+      if (!ownerUserId) return;
+
+      const nowIso = new Date().toISOString();
+      if (inst.action === 'OPEN') {
+        const effectiveTicket = childTicketStr || `failed_${inst.instructionId}`;
+        const isExecuted = ack.status === 'EXECUTED';
+        await this.upsertTradeLifecycle(
+          {
+            accountId: inst.childAccountId,
+            userId: ownerUserId,
+            ticket: effectiveTicket,
+            symbol: inst.symbol,
+            type: inst.orderType,
+            volume: isExecuted ? Number(ack.executedLots ?? inst.lots) : 0,
+            requestedVolume: inst.lots,
+            openPrice: ack.fillPrice != null && Number.isFinite(Number(ack.fillPrice)) ? Number(ack.fillPrice) : (inst.openPrice ?? 0),
+            sl: inst.sl,
+            tp: inst.tp,
+            status: isExecuted ? 'OPEN' : 'CANCELLED',
+            openTime: nowIso,
+            mappingId: `map_${inst.instructionId}`,
+            parentTicket: String(inst.parentTicket),
+            executionStatus: ack.status,
+            rejectionReason: ack.brokerErrorMessage || undefined,
+            isRealized: false,
+            profit: null,
+            notes: inst.comment,
+          },
+          supabaseClient
+        );
+      } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
+        const targetTicket = childTicketStr || (inst.childTicket ? String(inst.childTicket) : undefined);
+        const hasRealized = ack.realizedProfit != null && Number.isFinite(Number(ack.realizedProfit));
+        const closePriceVal =
+          ack.closePrice != null && Number.isFinite(Number(ack.closePrice))
+            ? Number(ack.closePrice)
+            : ack.fillPrice != null && Number.isFinite(Number(ack.fillPrice))
+            ? Number(ack.fillPrice)
+            : undefined;
+
+        const patch: Record<string, any> = {
+          status: 'CLOSED',
+          close_time: nowIso,
+          execution_status: 'CLOSED',
+          updated_at: nowIso,
+        };
+        if (closePriceVal !== undefined) patch.close_price = closePriceVal;
+        if (hasRealized) {
+          patch.profit = Number(ack.realizedProfit);
+          patch.is_realized = true;
+        }
+        if (ack.commission != null && Number.isFinite(Number(ack.commission))) {
+          patch.commission = Number(ack.commission);
+        }
+        if (ack.swap != null && Number.isFinite(Number(ack.swap))) {
+          patch.swap = Number(ack.swap);
+        }
+
+        if (targetTicket) {
+          const { error: updErr } = await supabaseClient
+            .from('trades')
+            .update(patch)
+            .eq('account_id', inst.childAccountId)
+            .eq('ticket', targetTicket);
+          if (updErr) {
+            const legacyPatch: Record<string, any> = { status: 'CLOSED', close_time: nowIso };
+            if (closePriceVal !== undefined) legacyPatch.close_price = closePriceVal;
+            if (hasRealized) legacyPatch.profit = Number(ack.realizedProfit);
+            await supabaseClient
+              .from('trades')
+              .update(legacyPatch)
+              .eq('account_id', inst.childAccountId)
+              .eq('ticket', targetTicket);
+          }
+        }
+
+        const mapPatch: Record<string, any> = {
+          close_time: nowIso,
+          updated_at: nowIso,
+        };
+        if (hasRealized) mapPatch.child_profit_usd = Number(ack.realizedProfit);
+        if (closePriceVal !== undefined) mapPatch.close_price = closePriceVal;
+        await supabaseClient
+          .from('trade_mappings')
+          .update(mapPatch)
+          .eq('parent_trade_ticket', String(inst.parentTicket))
+          .eq('child_account_id', inst.childAccountId);
+      } else if (inst.action === 'MODIFY' && ack.status === 'EXECUTED') {
+        const targetTicket = childTicketStr || (inst.childTicket ? String(inst.childTicket) : undefined);
+        if (targetTicket) {
+          await supabaseClient
+            .from('trades')
+            .update({
+              sl: inst.sl ?? null,
+              tp: inst.tp ?? null,
+              updated_at: nowIso,
+            })
+            .eq('account_id', inst.childAccountId)
+            .eq('ticket', targetTicket);
+        }
+      }
+    } catch {
+      // Graceful non-fatal fallback if trades table or extended columns are absent in mock/legacy DB
+    }
+  }
+
+  private async upsertTradeLifecycle(
+    record: {
+      accountId: string;
+      userId: string;
+      ticket: string;
+      symbol: string;
+      type: OrderType;
+      volume: number;
+      requestedVolume?: number;
+      openPrice: number;
+      closePrice?: number;
+      sl?: number;
+      tp?: number;
+      profit: number | null;
+      pips?: number;
+      status: 'OPEN' | 'CLOSED' | 'PENDING' | 'CANCELLED';
+      openTime: string;
+      closeTime?: string;
+      commission?: number;
+      swap?: number;
+      mappingId?: string;
+      parentTicket?: string;
+      executionStatus?: string;
+      rejectionReason?: string;
+      isRealized: boolean;
+      notes?: string;
+    },
+    supabaseClient: SupabaseClient
+  ): Promise<void> {
+    try {
+      const { data: existing, error: findErr } = await supabaseClient
+        .from('trades')
+        .select('id')
+        .eq('account_id', record.accountId)
+        .eq('ticket', record.ticket)
+        .maybeSingle();
+
+      if (findErr) return;
+
+      const fullPayload: Record<string, any> = {
+        account_id: record.accountId,
+        user_id: record.userId,
+        ticket: record.ticket,
+        symbol: record.symbol,
+        type: record.type,
+        volume: record.volume,
+        requested_volume: record.requestedVolume ?? record.volume,
+        open_price: record.openPrice,
+        close_price: record.closePrice ?? null,
+        sl: record.sl ?? null,
+        tp: record.tp ?? null,
+        profit: record.profit,
+        pips: record.pips ?? null,
+        status: record.status,
+        open_time: record.openTime,
+        close_time: record.closeTime ?? null,
+        commission: record.commission ?? 0,
+        swap: record.swap ?? 0,
+        mapping_id: record.mappingId ?? null,
+        parent_ticket: record.parentTicket ?? null,
+        execution_status: record.executionStatus ?? null,
+        rejection_reason: record.rejectionReason ?? null,
+        is_realized: record.isRealized,
+        notes: record.notes ?? null,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (existing?.id) {
+        const { error: updErr } = await supabaseClient.from('trades').update(fullPayload).eq('id', existing.id);
+        if (updErr) {
+          const {
+            requested_volume: _rv,
+            mapping_id: _mi,
+            parent_ticket: _pt,
+            execution_status: _es,
+            rejection_reason: _rr,
+            is_realized: _ir,
+            updated_at: _ua,
+            ...basePayload
+          } = fullPayload;
+          await supabaseClient.from('trades').update(basePayload).eq('id', existing.id);
+        }
+      } else {
+        const insertPayload: Record<string, any> = { id: crypto.randomUUID(), ...fullPayload };
+        const { error: insErr } = await supabaseClient.from('trades').insert([insertPayload]);
+        if (insErr) {
+          const {
+            requested_volume: _rv,
+            mapping_id: _mi,
+            parent_ticket: _pt,
+            execution_status: _es,
+            rejection_reason: _rr,
+            is_realized: _ir,
+            updated_at: _ua,
+            ...basePayload
+          } = insertPayload;
+          await supabaseClient.from('trades').insert([basePayload]);
+        }
+      }
+    } catch {
+      // Graceful fallback for unit tests whose DbState omits public.trades
+    }
   }
 
   public getChildTicketForParent(parentTicket: number | string, childAccountId: string): string | undefined {
@@ -998,10 +1399,14 @@ export class BridgeStore {
             parentLots: Number(r.parent_lots),
             childLots: Number(r.child_lots),
             openTime: r.open_time,
+            closeTime: r.close_time || undefined,
+            closePrice: r.close_price != null ? Number(r.close_price) : undefined,
             latencyMs: Number(r.latency_ms) || 0,
             status: r.status as MappingExecutionStatus,
             errorMessage: r.error_message || undefined,
             retryCount: Number(r.retry_count) || 0,
+            parentProfitUSD: r.parent_profit_usd != null ? Number(r.parent_profit_usd) : undefined,
+            childProfitUSD: r.child_profit_usd != null ? Number(r.child_profit_usd) : undefined,
           }));
         }
       } catch (err: any) {

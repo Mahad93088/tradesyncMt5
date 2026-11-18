@@ -3,6 +3,7 @@ import { LotSettings } from '../types';
 export interface LotCalculationInput {
   parentSymbol: string;
   parentLots: number;
+  orderType?: string;
   parentEquity?: number;
   parentBalance?: number;
   childEquity?: number;
@@ -24,12 +25,20 @@ export interface LotCalculationResult {
 
 export class RiskEngine {
   /**
-   * Round a number to a specific precision (e.g., broker lot step)
+   * Align a volume DOWN to a valid broker lot step without ever silently increasing volume.
+   */
+  public static floorToStep(value: number, step: number = 0.01): number {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    if (!Number.isFinite(step) || step <= 0) return Number(value.toFixed(2));
+    const steps = Math.floor((value + 1e-9) / step);
+    return Number((steps * step).toFixed(4));
+  }
+
+  /**
+   * Round a number to a specific precision (kept for compatibility, delegates safely).
    */
   public static roundToStep(value: number, step: number = 0.01): number {
-    if (step <= 0) return Number(value.toFixed(2));
-    const inv = 1.0 / step;
-    return Number((Math.round(value * inv) / inv).toFixed(2));
+    return this.floorToStep(value, step);
   }
 
   /**
@@ -52,7 +61,54 @@ export class RiskEngine {
   }
 
   /**
-   * Validate risk & lot settings configuration before order sizing
+   * Parse persisted mentor_assignments row into strict LotSettings with safe defaults
+   */
+  public static normalizeLotSettingsFromRow(row: Record<string, any> | null | undefined): LotSettings {
+    const rawLotMode = String(row?.lot_mode || 'parent_lot').trim().toLowerCase();
+    let mode: 'parent_lot' | 'custom_lot' = 'parent_lot';
+    let customType: 'fixed' | 'multiplier' | 'equity_ratio' | 'risk_percent' = 'multiplier';
+
+    if (rawLotMode === 'fixed' || rawLotMode === 'fixed_lot') {
+      mode = 'custom_lot';
+      customType = 'fixed';
+    } else if (rawLotMode === 'multiplier') {
+      mode = 'custom_lot';
+      customType = 'multiplier';
+    } else if (rawLotMode === 'equity_ratio') {
+      mode = 'custom_lot';
+      customType = 'equity_ratio';
+    } else if (rawLotMode === 'risk_percent') {
+      mode = 'custom_lot';
+      customType = 'risk_percent';
+    }
+
+    const numOr = (val: unknown, fallback: number): number => {
+      const n = Number(val);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const boolOr = (val: unknown, fallback: boolean): boolean =>
+      typeof val === 'boolean' ? val : fallback;
+
+    return {
+      mode,
+      customType,
+      fixedLot: numOr(row?.fixed_lot, 0.1),
+      multiplier: numOr(row?.lot_multiplier, 1.0),
+      riskPercent: numOr(row?.risk_percent, 1.0),
+      maxLotCap: numOr(row?.max_lot_cap, 50.0),
+      minLotClamp: numOr(row?.min_lot_clamp, 0.01),
+      maxDrawdownProtectionPercent: numOr(row?.max_drawdown_percent, 20.0),
+      copyPendingOrders: boolOr(row?.copy_pending_orders, true),
+      syncSlTp: boolOr(row?.sync_sl_tp, true),
+      slippageMaxPips: numOr(row?.slippage_max_pips, 3.0),
+      symbolPrefix: typeof row?.symbol_prefix === 'string' ? row.symbol_prefix : '',
+      symbolSuffix: typeof row?.symbol_suffix === 'string' ? row.symbol_suffix : '',
+    };
+  }
+
+  /**
+   * Validate risk & lot settings configuration before order sizing or persistence
    */
   public static validateLotSettings(lotSettings: LotSettings): { valid: boolean; reason?: string } {
     if (!lotSettings) {
@@ -69,8 +125,8 @@ export class RiskEngine {
         return { valid: false, reason: `Unsupported custom lot type: ${String(lotSettings.customType)}` };
       }
       if (lotSettings.customType === 'fixed') {
-        if (!Number.isFinite(lotSettings.fixedLot) || lotSettings.fixedLot <= 0) {
-          return { valid: false, reason: 'Fixed lot size must be a positive finite number.' };
+        if (!Number.isFinite(lotSettings.fixedLot) || lotSettings.fixedLot < 0.01 || lotSettings.fixedLot > 100) {
+          return { valid: false, reason: 'Fixed lot size must be between 0.01 and 100 lots.' };
         }
       }
       if (lotSettings.customType === 'multiplier') {
@@ -85,17 +141,20 @@ export class RiskEngine {
       }
     }
 
-    if (lotSettings.riskPercent !== undefined && (!Number.isFinite(lotSettings.riskPercent) || lotSettings.riskPercent < 0 || lotSettings.riskPercent > 100)) {
-      return { valid: false, reason: 'Risk percentage must be between 0 and 100.' };
+    if (
+      lotSettings.riskPercent !== undefined &&
+      (!Number.isFinite(lotSettings.riskPercent) || lotSettings.riskPercent <= 0 || lotSettings.riskPercent > 100)
+    ) {
+      return { valid: false, reason: 'Risk percentage must be > 0 and <= 100.' };
     }
 
     const minClamp = lotSettings.minLotClamp ?? 0.01;
     const maxCap = lotSettings.maxLotCap ?? 100.0;
-    if (!Number.isFinite(minClamp) || minClamp <= 0) {
-      return { valid: false, reason: 'Minimum lot clamp must be greater than 0.' };
+    if (!Number.isFinite(minClamp) || minClamp < 0.01 || minClamp > 100) {
+      return { valid: false, reason: 'Minimum lot clamp must be between 0.01 and 100.' };
     }
-    if (!Number.isFinite(maxCap) || maxCap <= 0 || maxCap < minClamp) {
-      return { valid: false, reason: 'Maximum lot cap must be >= minimum lot clamp.' };
+    if (!Number.isFinite(maxCap) || maxCap < 0.01 || maxCap > 100 || maxCap < minClamp) {
+      return { valid: false, reason: 'Maximum lot cap must be >= minimum lot clamp and <= 100.' };
     }
 
     const maxDd = lotSettings.maxDrawdownProtectionPercent ?? 0;
@@ -103,13 +162,18 @@ export class RiskEngine {
       return { valid: false, reason: 'Max drawdown protection percent must be between 0 and <100.' };
     }
 
+    const slippage = lotSettings.slippageMaxPips ?? 3.0;
+    if (!Number.isFinite(slippage) || slippage < 0 || slippage > 100) {
+      return { valid: false, reason: 'Max slippage pips must be between 0 and 100.' };
+    }
+
     for (const [label, aff] of [
       ['symbolPrefix', lotSettings.symbolPrefix],
       ['symbolSuffix', lotSettings.symbolSuffix],
     ] as const) {
       if (aff !== undefined && aff !== null) {
-        const trimmed = String(aff).trim();
-        if (trimmed.length > 16 || /[\s\r\n\t]/.test(trimmed)) {
+        const strVal = String(aff);
+        if (strVal.length > 16 || /[\s\r\n\t]/.test(strVal)) {
           return { valid: false, reason: `Invalid ${label}: must be <= 16 non-whitespace characters.` };
         }
       }
@@ -119,12 +183,14 @@ export class RiskEngine {
   }
 
   /**
-   * Calculate child execution lots and validate against drawdown/broker limits
+   * Calculate child execution lots and validate against drawdown, order type, and broker limits.
+   * Safety invariant: NEVER silently increase requested/calculated volume above rawLots.
    */
   public static calculateChildLots(input: LotCalculationInput): LotCalculationResult {
     const {
       parentSymbol,
       parentLots,
+      orderType,
       parentEquity = 10000,
       parentBalance = 10000,
       childEquity = 10000,
@@ -162,6 +228,24 @@ export class RiskEngine {
       };
     }
 
+    // 0. Pending Order Filter Guard
+    if (orderType) {
+      const cleanType = String(orderType).trim().toUpperCase();
+      const isPending =
+        cleanType === 'BUY_LIMIT' ||
+        cleanType === 'SELL_LIMIT' ||
+        cleanType === 'BUY_STOP' ||
+        cleanType === 'SELL_STOP';
+      if (isPending && lotSettings.copyPendingOrders === false) {
+        return {
+          valid: false,
+          childLots: 0,
+          childSymbol,
+          reason: `Pending order ${cleanType} skipped: copyPendingOrders is disabled.`,
+        };
+      }
+    }
+
     // 1. Drawdown Guard
     if (lotSettings.maxDrawdownProtectionPercent > 0 && childBalance > 0) {
       const currentDrawdownPercent = ((childBalance - childEquity) / childBalance) * 100;
@@ -181,11 +265,11 @@ export class RiskEngine {
     if (lotSettings.mode === 'custom_lot') {
       switch (lotSettings.customType) {
         case 'fixed':
-          rawLots = lotSettings.fixedLot > 0 ? lotSettings.fixedLot : 0.01;
+          rawLots = lotSettings.fixedLot;
           break;
 
         case 'multiplier':
-          rawLots = parentLots * (lotSettings.multiplier > 0 ? lotSettings.multiplier : 1.0);
+          rawLots = parentLots * lotSettings.multiplier;
           break;
 
         case 'equity_ratio':
@@ -193,14 +277,17 @@ export class RiskEngine {
             const ratio = childEquity / parentEquity;
             rawLots = parentLots * ratio;
           } else {
-            rawLots = parentLots * (lotSettings.multiplier || 1.0);
+            return {
+              valid: false,
+              childLots: 0,
+              childSymbol,
+              reason: 'Equity ratio mode requires positive parent and child account equity.',
+            };
           }
           break;
 
         case 'risk_percent': {
-          // Standard estimation: 1% risk on $10k account = ~0.10 lots on EURUSD
-          // normalized: (childBalance * (riskPercent / 100)) / 1000
-          const riskFraction = (lotSettings.riskPercent || 1.0) / 100;
+          const riskFraction = lotSettings.riskPercent / 100;
           rawLots = (childBalance * riskFraction) / 1000;
           break;
         }
@@ -210,16 +297,30 @@ export class RiskEngine {
       }
     }
 
-    // 3. Broker constraint clamping
-    const step = brokerLimits.lotStep && brokerLimits.lotStep > 0 ? brokerLimits.lotStep : 0.01;
-    const minClamp = Math.max(
-      lotSettings.minLotClamp > 0 ? lotSettings.minLotClamp : 0.01,
-      brokerLimits.minLot || 0.01
-    );
-    const maxClamp = Math.min(
-      lotSettings.maxLotCap > 0 ? lotSettings.maxLotCap : 100.0,
-      brokerLimits.maxLot || 100.0
-    );
+    // 3. Broker constraint & step validation (strictly never increase volume)
+    const rawStep = brokerLimits.lotStep ?? 0.01;
+    const rawBrokerMin = brokerLimits.minLot ?? 0.01;
+    const rawBrokerMax = brokerLimits.maxLot ?? 100.0;
+
+    if (!Number.isFinite(rawStep) || rawStep <= 0) {
+      return {
+        valid: false,
+        childLots: 0,
+        childSymbol,
+        reason: `Invalid broker lotStep: ${String(rawStep)}`,
+      };
+    }
+    if (!Number.isFinite(rawBrokerMin) || rawBrokerMin <= 0 || !Number.isFinite(rawBrokerMax) || rawBrokerMax < rawBrokerMin) {
+      return {
+        valid: false,
+        childLots: 0,
+        childSymbol,
+        reason: `Invalid broker min/max lot bounds (${rawBrokerMin}..${rawBrokerMax}).`,
+      };
+    }
+
+    const minClamp = Math.max(lotSettings.minLotClamp > 0 ? lotSettings.minLotClamp : 0.01, rawBrokerMin);
+    const maxClamp = Math.min(lotSettings.maxLotCap > 0 ? lotSettings.maxLotCap : 100.0, rawBrokerMax);
 
     if (maxClamp < minClamp) {
       return {
@@ -230,16 +331,45 @@ export class RiskEngine {
       };
     }
 
-    let stepped = this.roundToStep(rawLots, step);
+    // Align downward to broker step so we never silently inflate risk/volume
+    let stepped = this.floorToStep(rawLots, rawStep);
 
-    if (stepped < minClamp) {
-      stepped = minClamp;
+    // For fixed or direct parent_lot mode, reject off-step invalid volumes if floor changed more than rounding dust
+    if (
+      (lotSettings.mode === 'parent_lot' || (lotSettings.mode === 'custom_lot' && lotSettings.customType === 'fixed')) &&
+      Math.abs(rawLots - stepped) > 1e-6
+    ) {
+      return {
+        valid: false,
+        childLots: 0,
+        childSymbol,
+        reason: `Requested volume (${rawLots}) does not align with broker lot step (${rawStep}).`,
+      };
     }
+
+    // CRITICAL SAFETY RULE: Never silently increase volume below minClamp; reject cleanly instead.
+    if (stepped + 1e-9 < minClamp) {
+      return {
+        valid: false,
+        childLots: 0,
+        childSymbol,
+        reason: `Calculated volume (${stepped}) is below minimum allowed lot (${minClamp}) and will not be silently increased.`,
+      };
+    }
+
+    // Safe downward clamp if calculated volume exceeds maxLotCap / broker maxLot
     if (stepped > maxClamp) {
-      stepped = maxClamp;
+      stepped = this.floorToStep(maxClamp, rawStep);
+      if (stepped + 1e-9 < minClamp || stepped <= 0) {
+        return {
+          valid: false,
+          childLots: 0,
+          childSymbol,
+          reason: `Maximum lot cap (${maxClamp}) is incompatible with broker step (${rawStep}) and minimum (${minClamp}).`,
+        };
+      }
     }
 
-    // Final verification that stepped lots are positive
     if (!Number.isFinite(stepped) || stepped <= 0) {
       return {
         valid: false,
@@ -251,7 +381,7 @@ export class RiskEngine {
 
     return {
       valid: true,
-      childLots: stepped,
+      childLots: Number(stepped.toFixed(2)),
       childSymbol,
     };
   }

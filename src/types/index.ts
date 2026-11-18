@@ -161,6 +161,7 @@ export interface Trade {
   symbol: string;
   type: OrderType;
   lots: number;
+  requestedVolume?: number;
   openPrice: number;
   closePrice?: number;
   sl?: number;
@@ -172,6 +173,13 @@ export interface Trade {
   status: OrderStatus;
   magicNumber?: number | string;
   comment?: string;
+  parentTicket?: number | string;
+  executionStatus?: string;
+  rejectionReason?: string;
+  isRealized?: boolean;
+  commission?: number;
+  swap?: number;
+  pips?: number;
   isMappingFallback?: boolean;
 }
 
@@ -199,6 +207,8 @@ export interface TradeMapping {
   parentLots: number;
   childLots: number;
   openTime: string;
+  closeTime?: string;
+  closePrice?: number;
   latencyMs: number;
   status: MappingExecutionStatus;
   errorMessage?: string;

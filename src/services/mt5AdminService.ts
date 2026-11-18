@@ -158,6 +158,14 @@ export interface ChildAccountItem {
   lotMultiplier: number;
   fixedLot: number;
   riskPercent: number;
+  maxLotCap?: number;
+  minLotClamp?: number;
+  maxDrawdownProtectionPercent?: number;
+  copyPendingOrders?: boolean;
+  syncSlTp?: boolean;
+  slippageMaxPips?: number;
+  symbolPrefix?: string;
+  symbolSuffix?: string;
   // Source info
   isLiveBroker: boolean;
   isSimulatedDemo: boolean;
@@ -174,6 +182,11 @@ export interface AccountTradeItem {
   closePrice?: number;
   profit: number;
   pips?: number;
+  commission?: number;
+  swap?: number;
+  isRealized?: boolean;
+  executionStatus?: string;
+  rejectionReason?: string;
   status: string;
   openTime: string;
   closeTime?: string;
@@ -187,10 +200,18 @@ export interface AssignChildToParentParams {
   parentAccountId?: string; // Parent MT5 account UUID from mt5_accounts.id
   childAccountId?: string; // Child MT5 account UUID from mt5_accounts.id
   lotSettings?: {
-    copyMode?: 'multiplier' | 'fixed' | 'parent_lot';
+    copyMode?: 'multiplier' | 'fixed' | 'fixed_lot' | 'parent_lot' | 'equity_ratio' | 'risk_percent';
     multiplier?: number;
     fixedLot?: number;
     riskPercent?: number;
+    maxLotCap?: number;
+    minLotClamp?: number;
+    slippageMaxPips?: number;
+    maxDrawdownProtectionPercent?: number;
+    syncSlTp?: boolean;
+    copyPendingOrders?: boolean;
+    symbolPrefix?: string;
+    symbolSuffix?: string;
   };
   isCloudMode?: boolean;
   replaceExisting?: boolean;
@@ -738,7 +759,18 @@ export const mt5AdminService = {
             copyMode: (assignment?.lot_mode as any) || (assignment ? 'multiplier' : 'unassigned'),
             lotMultiplier: assignment?.lot_multiplier !== undefined ? Number(assignment.lot_multiplier) : 1.0,
             fixedLot: assignment?.fixed_lot !== undefined ? Number(assignment.fixed_lot) : 0.1,
-            riskPercent: 1.0,
+            riskPercent: assignment?.risk_percent !== undefined ? Number(assignment.risk_percent) : 1.0,
+            maxLotCap: assignment?.max_lot_cap !== undefined ? Number(assignment.max_lot_cap) : 50,
+            minLotClamp: assignment?.min_lot_clamp !== undefined ? Number(assignment.min_lot_clamp) : 0.01,
+            maxDrawdownProtectionPercent:
+              assignment?.max_drawdown_percent !== undefined ? Number(assignment.max_drawdown_percent) : 20,
+            copyPendingOrders:
+              assignment?.copy_pending_orders !== undefined ? Boolean(assignment.copy_pending_orders) : true,
+            syncSlTp: assignment?.sync_sl_tp !== undefined ? Boolean(assignment.sync_sl_tp) : true,
+            slippageMaxPips:
+              assignment?.slippage_max_pips !== undefined ? Number(assignment.slippage_max_pips) : 30,
+            symbolPrefix: assignment?.symbol_prefix || '',
+            symbolSuffix: assignment?.symbol_suffix || '',
             isLiveBroker: acc.account_type === 'live',
             isSimulatedDemo: acc.account_type !== 'live',
             dataSource: 'supabase',
@@ -855,6 +887,14 @@ export const mt5AdminService = {
         lotMultiplier: link?.lotSettings?.multiplier || 1.0,
         fixedLot: link?.lotSettings?.fixedLot || 0.1,
         riskPercent: link?.lotSettings?.riskPercent || 2.0,
+        maxLotCap: link?.lotSettings?.maxLotCap ?? 50,
+        minLotClamp: link?.lotSettings?.minLotClamp ?? 0.01,
+        maxDrawdownProtectionPercent: link?.lotSettings?.maxDrawdownProtectionPercent ?? 20,
+        copyPendingOrders: link?.lotSettings?.copyPendingOrders ?? true,
+        syncSlTp: link?.lotSettings?.syncSlTp ?? true,
+        slippageMaxPips: link?.lotSettings?.slippageMaxPips ?? 30,
+        symbolPrefix: link?.lotSettings?.symbolPrefix || '',
+        symbolSuffix: link?.lotSettings?.symbolSuffix || '',
         isLiveBroker: acc.accountType === 'live',
         isSimulatedDemo: true,
         dataSource: 'demo_harness',
@@ -1014,6 +1054,14 @@ export const mt5AdminService = {
       multiplier?: number;
       fixedLot?: number;
       riskPercent?: number;
+      maxLotCap?: number;
+      minLotClamp?: number;
+      slippageMaxPips?: number;
+      maxDrawdownProtectionPercent?: number;
+      syncSlTp?: boolean;
+      copyPendingOrders?: boolean;
+      symbolPrefix?: string;
+      symbolSuffix?: string;
     };
     isCloudMode?: boolean;
     useSelfServiceEndpoint?: boolean;
@@ -1493,19 +1541,25 @@ export const mt5AdminService = {
           .limit(100);
 
         if (!error && data && data.length > 0) {
-          return data.map((t: DbTrade) => ({
+          return data.map((t: any) => ({
             id: t.id,
             ticket: String(t.ticket || t.id.slice(0, 8)),
             symbol: t.symbol,
             type: t.type,
-            volume: Number(t.volume || 0.1),
+            volume: Number(t.volume || 0),
             openPrice: Number(t.open_price || 0),
             closePrice: t.close_price ? Number(t.close_price) : undefined,
-            profit: Number(t.profit || 0),
-            pips: t.pips,
+            profit: t.profit != null ? Number(t.profit) : 0,
+            pips: t.pips != null ? Number(t.pips) : undefined,
+            commission: t.commission != null ? Number(t.commission) : undefined,
+            swap: t.swap != null ? Number(t.swap) : undefined,
+            isRealized: t.is_realized !== undefined ? Boolean(t.is_realized) : t.profit != null,
+            executionStatus: t.execution_status || undefined,
+            rejectionReason: t.rejection_reason || undefined,
             status: t.status || 'OPEN',
             openTime: t.open_time,
             closeTime: t.close_time || undefined,
+            notes: t.notes || undefined,
             dataSource: 'supabase',
           }));
         }

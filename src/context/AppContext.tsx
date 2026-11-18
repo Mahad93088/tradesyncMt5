@@ -1263,57 +1263,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     accountId: string
   ): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      try {
-        const sessionCheck = await ensureValidSession();
-        const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) {
-          return {
-            success: false,
-            message: sessionCheck.error || 'Authentication session expired. Please sign in again.',
-          };
-        }
-
-        const res = await fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/connection`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ connectionStatus: 'connected' }),
-        });
-
-        const json = await res.json().catch(() => null);
-        if (!res.ok || !json?.success) {
-          await refreshCloudData();
-          return {
-            success: false,
-            message: json?.error || `HTTP ${res.status}: Failed to activate terminal connection.`,
-          };
-        }
-
-        setMt5Accounts((prev) =>
-          prev.map((acc) => {
-            if (acc.id === accountId) {
-              return {
-                ...acc,
-                connectionStatus: 'connected',
-                errorMessage: undefined,
-                lastHeartbeat: new Date().toISOString(),
-              };
-            }
-            return acc;
-          })
-        );
-
-        await refreshCloudData();
-        return { success: true, message: json.message || 'Terminal activated.' };
-      } catch (err: any) {
-        await refreshCloudData();
-        return {
-          success: false,
-          message: err?.message || 'Network error while activating terminal connection.',
-        };
-      }
+      await refreshCloudData();
+      return {
+        success: false,
+        message:
+          'EA Heartbeat Required: Connection transitions to Connected automatically once your MT5 Expert Advisor sends an authenticated heartbeat.',
+      };
     }
 
     const ping = Math.floor(15 + Math.random() * 20);
@@ -1413,6 +1368,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             copyMode,
             multiplier: settings.multiplier,
             fixedLot: settings.fixedLot,
+            riskPercent: settings.riskPercent,
+            maxLotCap: settings.maxLotCap,
+            minLotClamp: settings.minLotClamp,
+            slippageMaxPips: settings.slippageMaxPips,
+            maxDrawdownProtectionPercent: settings.maxDrawdownProtectionPercent,
+            syncSlTp: settings.syncSlTp,
+            copyPendingOrders: settings.copyPendingOrders,
+            symbolPrefix: settings.symbolPrefix || '',
+            symbolSuffix: settings.symbolSuffix || '',
           }),
         });
         const json = await res.json().catch(() => null);
@@ -1421,9 +1385,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return { success: false, message: json?.error || `HTTP ${res.status}: Failed to save lot settings.` };
         }
         await refreshCloudData();
+        const unpersisted: string[] = Array.isArray(json.unpersistedSchemaFields)
+          ? json.unpersistedSchemaFields
+          : [];
         return {
           success: true,
-          message: 'Saved persisted lot sizing configuration to Supabase.',
+          message:
+            unpersisted.length > 0
+              ? `Saved core lot settings; awaiting Migration 08 for columns: ${unpersisted.join(', ')}.`
+              : 'Saved full 12-control lot & risk configuration to Supabase.',
           persistedFields: json.persistedFields,
           unpersistedSchemaFields: json.unpersistedSchemaFields,
         };
@@ -1562,6 +1532,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               copyMode,
               multiplier: lotSettings.multiplier,
               fixedLot: lotSettings.fixedLot,
+              riskPercent: lotSettings.riskPercent,
+              maxLotCap: lotSettings.maxLotCap,
+              minLotClamp: lotSettings.minLotClamp,
+              slippageMaxPips: lotSettings.slippageMaxPips,
+              maxDrawdownProtectionPercent: lotSettings.maxDrawdownProtectionPercent,
+              syncSlTp: lotSettings.syncSlTp,
+              copyPendingOrders: lotSettings.copyPendingOrders,
+              symbolPrefix: lotSettings.symbolPrefix || '',
+              symbolSuffix: lotSettings.symbolSuffix || '',
             },
           }),
         });

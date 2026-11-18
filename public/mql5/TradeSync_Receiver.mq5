@@ -41,6 +41,12 @@ struct ProcessedInstructionRecord
    int      errCode;
    string   errMsg;
    uint     latencyMs;
+   double   executedLots;
+   double   closePrice;
+   bool     hasRealizedProfit;
+   double   realizedProfit;
+   double   commission;
+   double   swap;
    datetime recordedAt;
 };
 
@@ -53,6 +59,12 @@ struct PendingAckRecord
    int      errCode;
    string   errMsg;
    uint     latencyMs;
+   double   executedLots;
+   double   closePrice;
+   bool     hasRealizedProfit;
+   double   realizedProfit;
+   double   commission;
+   double   swap;
    int      attempts;
    datetime nextRetryAt;
 };
@@ -657,7 +669,8 @@ int FindProcessedInstructionIndex(string instructionId)
    return -1;
 }
 
-void RecordProcessedInstruction(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+void RecordProcessedInstruction(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs,
+                                double executedLots = 0.0, double closePrice = 0.0, bool hasRealizedProfit = false, double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0)
 {
    if(StringLen(instructionId) == 0) return;
 
@@ -678,14 +691,20 @@ void RecordProcessedInstruction(string instructionId, string status, ulong child
       }
    }
 
-   g_ProcessedCache[targetIdx].instructionId = instructionId;
-   g_ProcessedCache[targetIdx].status        = status;
-   g_ProcessedCache[targetIdx].childTicket   = childTicket;
-   g_ProcessedCache[targetIdx].fillPrice     = fillPrice;
-   g_ProcessedCache[targetIdx].errCode       = errCode;
-   g_ProcessedCache[targetIdx].errMsg        = errMsg;
-   g_ProcessedCache[targetIdx].latencyMs     = latencyMs;
-   g_ProcessedCache[targetIdx].recordedAt    = TimeLocal();
+   g_ProcessedCache[targetIdx].instructionId     = instructionId;
+   g_ProcessedCache[targetIdx].status            = status;
+   g_ProcessedCache[targetIdx].childTicket       = childTicket;
+   g_ProcessedCache[targetIdx].fillPrice         = fillPrice;
+   g_ProcessedCache[targetIdx].errCode           = errCode;
+   g_ProcessedCache[targetIdx].errMsg            = errMsg;
+   g_ProcessedCache[targetIdx].latencyMs         = latencyMs;
+   g_ProcessedCache[targetIdx].executedLots      = executedLots;
+   g_ProcessedCache[targetIdx].closePrice        = closePrice;
+   g_ProcessedCache[targetIdx].hasRealizedProfit = hasRealizedProfit;
+   g_ProcessedCache[targetIdx].realizedProfit    = realizedProfit;
+   g_ProcessedCache[targetIdx].commission        = commission;
+   g_ProcessedCache[targetIdx].swap              = swap;
+   g_ProcessedCache[targetIdx].recordedAt        = TimeLocal();
 }
 
 //+------------------------------------------------------------------+
@@ -702,6 +721,10 @@ void ExecuteSingleInstruction(string instJson)
    double lots          = ExtractJsonDouble(instJson, "lots");
    ulong  parentTicket  = ExtractJsonUlong(instJson, "parentTicket");
    ulong  childTicket   = ExtractJsonUlong(instJson, "childTicket");
+   double slippageMaxPips = ExtractJsonDouble(instJson, "slippageMaxPips");
+   ulong  maxSlipPoints = (slippageMaxPips > 0.0)
+      ? (ulong)MathMin((double)InpMaxSlippagePoints, MathMax(1.0, slippageMaxPips * 10.0))
+      : InpMaxSlippagePoints;
 
    // Distinguish explicit SL/TP presence vs omission
    bool hasSL = false;
@@ -736,7 +759,8 @@ void ExecuteSingleInstruction(string instJson)
       ProcessedInstructionRecord cached = g_ProcessedCache[processedIdx];
       PrintFormat("[TradeSync Receiver] DUPLICATE INSTRUCTION GUARD: Instruction %s already processed (%s, ticket #%I64u). Skipping re-execution and ensuring ACK delivery.",
                   instructionId, cached.status, cached.childTicket);
-      QueueOrRetryExistingAck(cached.instructionId, cached.status, cached.childTicket, cached.fillPrice, cached.errCode, cached.errMsg, cached.latencyMs);
+      QueueOrRetryExistingAck(cached.instructionId, cached.status, cached.childTicket, cached.fillPrice, cached.errCode, cached.errMsg, cached.latencyMs,
+                              cached.executedLots, cached.closePrice, cached.hasRealizedProfit, cached.realizedProfit, cached.commission, cached.swap);
       return;
    }
 
@@ -794,14 +818,20 @@ void ExecuteSingleInstruction(string instJson)
          return;
       }
 
-      // Validate Volume limits against broker
+      // Validate Volume limits against broker (never silently increase below minLot)
       double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
       double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
       double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
 
-      if(lots < minLot) lots = minLot;
       if(lots > maxLot) lots = maxLot;
-      if(lotStep > 0) lots = MathRound(lots / lotStep) * lotStep;
+      if(lotStep > 0) lots = MathFloor((lots + 1e-9) / lotStep) * lotStep;
+      if(lots < minLot - 1e-9)
+      {
+         SendAck(instructionId, "FAILED", 0, 0.0, 10014,
+                 StringFormat("Requested volume %.2f below broker minimum %.2f for %s", lots, minLot, symbol),
+                 GetTickCount() - startTicks);
+         return;
+      }
 
       // Check Free Margin
       double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
@@ -824,6 +854,7 @@ void ExecuteSingleInstruction(string instJson)
          }
       }
 
+      g_Trade.SetDeviationInPoints(maxSlipPoints);
       double openSL = hasSL ? sl : 0.0;
       double openTP = hasTP ? tp : 0.0;
       bool success = false;
@@ -835,6 +866,7 @@ void ExecuteSingleInstruction(string instJson)
       {
          success = g_Trade.Sell(lots, symbol, 0, openSL, openTP, tradeComment);
       }
+      g_Trade.SetDeviationInPoints(InpMaxSlippagePoints);
 
       uint latency = GetTickCount() - startTicks;
       uint retcode = g_Trade.ResultRetcode();
@@ -848,7 +880,7 @@ void ExecuteSingleInstruction(string instJson)
             PrintFormat("[TradeSync Receiver] EXECUTED: %s %s %.2f lots on child ticket #%I64u @ %.5f (Parent #%I64u, Latency: %u ms)",
                         orderType, symbol, lots, placedTicket, fillPrice, parentTicket, latency);
          }
-         SendAck(instructionId, "EXECUTED", placedTicket, fillPrice, (int)retcode, "OK", latency);
+         SendAck(instructionId, "EXECUTED", placedTicket, fillPrice, (int)retcode, "OK", latency, lots);
       }
       else
       {
@@ -912,18 +944,62 @@ void ExecuteSingleInstruction(string instJson)
          }
       }
 
-      bool closed = g_Trade.PositionClose(childTicket, InpMaxSlippagePoints);
+      double posVolume = PositionGetDouble(POSITION_VOLUME);
+      long posIdentifier = PositionGetInteger(POSITION_IDENTIFIER);
+
+      bool closed = g_Trade.PositionClose(childTicket, maxSlipPoints);
       latency = GetTickCount() - startTicks;
       uint retcode = g_Trade.ResultRetcode();
 
       if(closed || retcode == TRADE_RETCODE_DONE)
       {
+         double execLots = posVolume;
+         double closePx = g_Trade.ResultPrice();
+         double dealProfit = 0.0, dealComm = 0.0, dealSwap = 0.0;
+         bool hasDealProfit = false;
+         ulong resDeal = g_Trade.ResultDeal();
+
+         if(resDeal > 0 && HistoryDealSelect(resDeal))
+         {
+            double dv = HistoryDealGetDouble(resDeal, DEAL_VOLUME);
+            double dp = HistoryDealGetDouble(resDeal, DEAL_PRICE);
+            if(dv > 0.0) execLots = dv;
+            if(dp > 0.0) closePx = dp;
+            dealProfit = HistoryDealGetDouble(resDeal, DEAL_PROFIT);
+            dealComm   = HistoryDealGetDouble(resDeal, DEAL_COMMISSION);
+            dealSwap   = HistoryDealGetDouble(resDeal, DEAL_SWAP);
+            hasDealProfit = true;
+         }
+         else if(posIdentifier > 0 && HistorySelectByPosition(posIdentifier))
+         {
+            int totalDeals = HistoryDealsTotal();
+            for(int d = totalDeals - 1; d >= 0; d--)
+            {
+               ulong dt = HistoryDealGetTicket(d);
+               if(dt == 0) continue;
+               long de = HistoryDealGetInteger(dt, DEAL_ENTRY);
+               if(de == DEAL_ENTRY_OUT || de == DEAL_ENTRY_OUT_BY)
+               {
+                  double dv = HistoryDealGetDouble(dt, DEAL_VOLUME);
+                  double dp = HistoryDealGetDouble(dt, DEAL_PRICE);
+                  if(dv > 0.0) execLots = dv;
+                  if(dp > 0.0) closePx = dp;
+                  dealProfit = HistoryDealGetDouble(dt, DEAL_PROFIT);
+                  dealComm   = HistoryDealGetDouble(dt, DEAL_COMMISSION);
+                  dealSwap   = HistoryDealGetDouble(dt, DEAL_SWAP);
+                  hasDealProfit = true;
+                  break;
+               }
+            }
+         }
+
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Receiver] CLOSED child position #%I64u (Parent #%I64u, Latency: %u ms)",
-                        childTicket, parentTicket, latency);
+            PrintFormat("[TradeSync Receiver] CLOSED child position #%I64u (Parent #%I64u, Profit: %.2f, Latency: %u ms)",
+                        childTicket, parentTicket, dealProfit, latency);
          }
-         SendAck(instructionId, "EXECUTED", childTicket, g_Trade.ResultPrice(), (int)retcode, "Closed successfully", latency);
+         SendAck(instructionId, "EXECUTED", childTicket, closePx, (int)retcode, "Closed successfully", latency,
+                 execLots, closePx, hasDealProfit, dealProfit, dealComm, dealSwap);
       }
       else
       {
@@ -1040,8 +1116,23 @@ bool TrySendAckNow(const PendingAckRecord &ack, bool &retryable)
    }
 
    string url = InpServerUrl + "/api/v1/bridge/instructions/ack";
+   string dealFields = "";
+   if(ack.executedLots > 0.0)
+   {
+      dealFields += StringFormat(",\"executedLots\":%.2f", ack.executedLots);
+   }
+   if(ack.closePrice > 0.0)
+   {
+      dealFields += StringFormat(",\"closePrice\":%.5f", ack.closePrice);
+   }
+   if(ack.hasRealizedProfit)
+   {
+      dealFields += StringFormat(",\"realizedProfit\":%.2f,\"commission\":%.2f,\"swap\":%.2f",
+                                 ack.realizedProfit, ack.commission, ack.swap);
+   }
+
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"instructionId\":\"%s\",\"status\":\"%s\",\"childTicket\":\"%I64u\",\"fillPrice\":%.5f,\"brokerErrorCode\":%d,\"brokerErrorMessage\":\"%s\",\"executionLatencyMs\":%u}",
+      "{\"account_number\":\"%I64u\",\"instructionId\":\"%s\",\"status\":\"%s\",\"childTicket\":\"%I64u\",\"fillPrice\":%.5f,\"brokerErrorCode\":%d,\"brokerErrorMessage\":\"%s\",\"executionLatencyMs\":%u%s}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       EscapeJsonString(ack.instructionId),
       EscapeJsonString(ack.status),
@@ -1049,7 +1140,8 @@ bool TrySendAckNow(const PendingAckRecord &ack, bool &retryable)
       ack.fillPrice,
       ack.errCode,
       EscapeJsonString(ack.errMsg),
-      ack.latencyMs
+      ack.latencyMs,
+      dealFields
    );
 
    char postData[];
@@ -1172,7 +1264,8 @@ void FlushPendingAcks()
 //+------------------------------------------------------------------+
 //| Ensure cached ACK is either already queued or sent now           |
 //+------------------------------------------------------------------+
-void QueueOrRetryExistingAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+void QueueOrRetryExistingAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs,
+                             double executedLots = 0.0, double closePrice = 0.0, bool hasRealizedProfit = false, double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0)
 {
    int count = ArraySize(g_PendingAcks);
    for(int i = 0; i < count; i++)
@@ -1184,15 +1277,21 @@ void QueueOrRetryExistingAck(string instructionId, string status, ulong childTic
    }
 
    PendingAckRecord ack;
-   ack.instructionId = instructionId;
-   ack.status        = status;
-   ack.childTicket   = childTicket;
-   ack.fillPrice     = fillPrice;
-   ack.errCode       = errCode;
-   ack.errMsg        = errMsg;
-   ack.latencyMs     = latencyMs;
-   ack.attempts      = 1;
-   ack.nextRetryAt   = TimeLocal();
+   ack.instructionId     = instructionId;
+   ack.status            = status;
+   ack.childTicket       = childTicket;
+   ack.fillPrice         = fillPrice;
+   ack.errCode           = errCode;
+   ack.errMsg            = errMsg;
+   ack.latencyMs         = latencyMs;
+   ack.executedLots      = executedLots;
+   ack.closePrice        = closePrice;
+   ack.hasRealizedProfit = hasRealizedProfit;
+   ack.realizedProfit    = realizedProfit;
+   ack.commission        = commission;
+   ack.swap              = swap;
+   ack.attempts          = 1;
+   ack.nextRetryAt       = TimeLocal();
 
    bool retryable = false;
    if(!TrySendAckNow(ack, retryable) && retryable)
@@ -1205,20 +1304,28 @@ void QueueOrRetryExistingAck(string instructionId, string status, ulong childTic
 //| Post Execution Acknowledgment back to TradeSync Bridge API       |
 //| Records result locally and retries automatically on failures     |
 //+------------------------------------------------------------------+
-void SendAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs)
+void SendAck(string instructionId, string status, ulong childTicket, double fillPrice, int errCode, string errMsg, uint latencyMs,
+             double executedLots = 0.0, double closePrice = 0.0, bool hasRealizedProfit = false, double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0)
 {
-   RecordProcessedInstruction(instructionId, status, childTicket, fillPrice, errCode, errMsg, latencyMs);
+   RecordProcessedInstruction(instructionId, status, childTicket, fillPrice, errCode, errMsg, latencyMs,
+                              executedLots, closePrice, hasRealizedProfit, realizedProfit, commission, swap);
 
    PendingAckRecord ack;
-   ack.instructionId = instructionId;
-   ack.status        = status;
-   ack.childTicket   = childTicket;
-   ack.fillPrice     = fillPrice;
-   ack.errCode       = errCode;
-   ack.errMsg        = errMsg;
-   ack.latencyMs     = latencyMs;
-   ack.attempts      = 1;
-   ack.nextRetryAt   = TimeLocal();
+   ack.instructionId     = instructionId;
+   ack.status            = status;
+   ack.childTicket       = childTicket;
+   ack.fillPrice         = fillPrice;
+   ack.errCode           = errCode;
+   ack.errMsg            = errMsg;
+   ack.latencyMs         = latencyMs;
+   ack.executedLots      = executedLots;
+   ack.closePrice        = closePrice;
+   ack.hasRealizedProfit = hasRealizedProfit;
+   ack.realizedProfit    = realizedProfit;
+   ack.commission        = commission;
+   ack.swap              = swap;
+   ack.attempts          = 1;
+   ack.nextRetryAt       = TimeLocal();
 
    bool retryable = false;
    if(!TrySendAckNow(ack, retryable) && retryable)

@@ -25,6 +25,7 @@ import {
   formatHeartbeatAge,
   formatTradeProfitDisplay,
 } from '../common/dashboardHelpers';
+import { computeReportingSummary } from '../../context/cloudStateUtils';
 
 interface MentorDashboardProps {
   onNavigateTab: (tab: string) => void;
@@ -88,6 +89,13 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
         .map((m) => [String(m.parentTradeTicket), m])
     ).values()
   );
+
+  const reporting = computeReportingSummary({
+    trades: parentTrades,
+    mappings: mentorMappings,
+    accounts: parentAccount ? [parentAccount] : [],
+    isCloudMode,
+  });
 
   const handleCopyCode = () => {
     navigator.clipboard.writeText(inviteCode);
@@ -203,24 +211,26 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
           accentColor="teal"
           onClick={() => onNavigateTab('child-accounts')}
         />
-        {isCloudMode ? (
-          <StatsCard
-            title="Mirrored Signals"
-            value={mentorMappings.length}
-            subtitle={`${executedMappings.length} executed across followers`}
-            icon={TrendingUp}
-            accentColor="emerald"
-            onClick={() => onNavigateTab('trade-activity')}
-          />
-        ) : (
-          <StatsCard
-            title="Strategy Win Rate"
-            value={`${profile?.winRate || 0}%`}
-            subtitle={`Profit Factor: ${profile?.profitFactor || 0}`}
-            icon={TrendingUp}
-            accentColor="emerald"
-          />
-        )}
+        <StatsCard
+          title={reporting.realizedPnlAvailable ? 'Realized Strategy P&L' : 'Mirrored Signals'}
+          value={
+            reporting.realizedPnlAvailable
+              ? `${reporting.realizedPnlUSD >= 0 ? '+' : '-'}$${Math.abs(reporting.realizedPnlUSD).toFixed(2)}`
+              : isCloudMode
+              ? mentorMappings.length
+              : `${profile?.winRate || 0}%`
+          }
+          subtitle={
+            reporting.realizedPnlAvailable
+              ? `Win Rate: ${reporting.winRatePercent ?? 0}% • PF: ${reporting.profitFactor?.toFixed(2) ?? '0.00'}`
+              : isCloudMode
+              ? 'Awaiting closed deal data'
+              : `Profit Factor: ${profile?.profitFactor || 0}`
+          }
+          icon={TrendingUp}
+          accentColor="emerald"
+          onClick={() => onNavigateTab('trade-activity')}
+        />
         <StatsCard
           title="Master MT5 Equity"
           value={parentAccount ? `$${parentAccount.equity.toLocaleString()}` : '$0.00'}
@@ -255,6 +265,44 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
           icon={Zap}
           accentColor={isStreamConnected ? 'emerald' : parentAccount?.isStale ? 'amber' : 'rose'}
         />
+      </div>
+
+      {/* Realized Reporting Strip */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs font-mono">
+        <div>
+          <span className="text-[10px] text-slate-500 uppercase font-sans">Win Rate / PF</span>
+          <p className="font-bold text-white mt-0.5">
+            {reporting.winRatePercent !== null
+              ? `${reporting.winRatePercent}% / ${(reporting.profitFactor ?? 0).toFixed(2)}`
+              : 'Awaiting closed deal data'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-500 uppercase font-sans">24h Realized</span>
+          <p className="font-bold text-slate-200 mt-0.5">
+            {reporting.dailyRealizedUSD !== null ? `$${reporting.dailyRealizedUSD.toFixed(2)}` : '--'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-500 uppercase font-sans">7d / 30d Realized</span>
+          <p className="font-bold text-slate-200 mt-0.5">
+            {reporting.weeklyRealizedUSD !== null
+              ? `$${reporting.weeklyRealizedUSD.toFixed(2)} / $${(reporting.monthlyRealizedUSD ?? 0).toFixed(2)}`
+              : '-- / --'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-500 uppercase font-sans">Avg Follower Delay</span>
+          <p className="font-bold text-cyan-400 mt-0.5">
+            {reporting.avgCopyLatencyMs !== null ? `${reporting.avgCopyLatencyMs}ms` : '--'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] text-slate-500 uppercase font-sans">Executed / Failed</span>
+          <p className="font-bold text-slate-200 mt-0.5">
+            {executedMappings.length} / <span className="text-rose-400">{reporting.failedCopiesCount}</span>
+          </p>
+        </div>
       </div>
 
       {/* Grid: Parent MT5 Terminal Node + Invitation & Plan Box */}

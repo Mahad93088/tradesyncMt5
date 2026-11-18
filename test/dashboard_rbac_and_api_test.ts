@@ -513,7 +513,20 @@ async function runTests() {
     assert.strictEqual(validLotRes.status, 200);
     const validLotJson: any = await validLotRes.json();
     assert.strictEqual(validLotJson.assignment.lot_mode, 'equity_ratio');
-    assert.deepStrictEqual(validLotJson.persistedFields, ['lot_mode', 'lot_multiplier', 'fixed_lot']);
+    assert.deepStrictEqual(validLotJson.persistedFields, [
+      'lot_mode',
+      'lot_multiplier',
+      'fixed_lot',
+      'risk_percent',
+      'max_lot_cap',
+      'min_lot_clamp',
+      'slippage_max_pips',
+      'max_drawdown_percent',
+      'sync_sl_tp',
+      'copy_pending_orders',
+      'symbol_prefix',
+      'symbol_suffix',
+    ]);
 
     // Pause ('paused' -> normalized to DB 'inactive')
     const pauseRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/status`, {

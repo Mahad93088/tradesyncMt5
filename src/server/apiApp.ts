@@ -745,13 +745,37 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      let strategyProfilePersisted: boolean | null = hasStrategyMetadata ? false : null;
       const dbClient = getServiceRoleClient();
+      if (dbClient && hasStrategyMetadata && newRole === 'mentor') {
+        try {
+          const inviteCode = `TS-${String(targetUserId).slice(0, 8).toUpperCase()}`;
+          const { error: mpErr } = await dbClient
+            .from('mentor_profiles')
+            .upsert(
+              [
+                {
+                  user_id: targetUserId,
+                  strategy_name: String(strategyName || 'Master Strategy').trim() || 'Master Strategy',
+                  monthly_fee: monthlyFee != null && Number.isFinite(Number(monthlyFee)) ? Math.max(0, Number(monthlyFee)) : 0,
+                  invite_code: inviteCode,
+                  updated_at: new Date().toISOString(),
+                },
+              ],
+              { onConflict: 'user_id' }
+            );
+          if (!mpErr) strategyProfilePersisted = true;
+        } catch {
+          strategyProfilePersisted = false;
+        }
+      }
+
       if (dbClient) {
         await bridgeStore.addSyncLog(
           {
             eventType: 'ADMIN_USER_ROLE_PROMOTED',
             level: 'info',
-            details: `Admin ${caller.profile?.email || caller.user.id} updated user ${targetProfile.email || targetUserId} to role='${newRole}', status='active'.${hasStrategyMetadata ? ' Note: strategy metadata not persisted (mentor_profiles table not provisioned).' : ''}`,
+            details: `Admin ${caller.profile?.email || caller.user.id} updated user ${targetProfile.email || targetUserId} to role='${newRole}', status='active'.${hasStrategyMetadata && !strategyProfilePersisted ? ' Note: strategy metadata not persisted (mentor_profiles table not provisioned).' : ''}`,
           },
           dbClient
         );
@@ -761,13 +785,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         success: true,
         message: `User ${targetProfile.email || targetUserId} successfully updated to ${newRole} with active status`,
         profile: updatedProfile,
-        ...(hasStrategyMetadata
+        ...(hasStrategyMetadata && !strategyProfilePersisted
           ? {
               strategyProfilePersisted: false,
               missingSchemaTable: 'mentor_profiles',
               warning:
                 'Account role and active status were saved, but strategy profile fields (strategyName/monthlyFee) could not be persisted because the public.mentor_profiles table is not provisioned in PostgreSQL.',
             }
+          : hasStrategyMetadata
+          ? { strategyProfilePersisted: true }
           : {}),
       });
     } catch (err: any) {
@@ -1043,24 +1069,49 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      let strategyProfilePersisted: boolean | null = hasStrategyMetadata ? false : null;
+      if (hasStrategyMetadata && requestedRole === 'mentor') {
+        try {
+          const inviteCode = `TS-${String(newUserId).slice(0, 8).toUpperCase()}`;
+          const { error: mpErr } = await dbClient
+            .from('mentor_profiles')
+            .upsert(
+              [
+                {
+                  user_id: newUserId,
+                  strategy_name: String(strategyName || 'Master Strategy').trim() || 'Master Strategy',
+                  monthly_fee: monthlyFee != null && Number.isFinite(Number(monthlyFee)) ? Math.max(0, Number(monthlyFee)) : 0,
+                  invite_code: inviteCode,
+                  updated_at: nowIso,
+                },
+              ],
+              { onConflict: 'user_id' }
+            );
+          if (!mpErr) strategyProfilePersisted = true;
+        } catch {
+          strategyProfilePersisted = false;
+        }
+      }
+
       await bridgeStore.addSyncLog(
         {
           eventType: 'ADMIN_USER_CREATED',
           level: 'info',
-          details: `Admin ${caller.profile?.email || caller.user.id} created ${requestedRole} user ${cleanEmail} (status='${requestedStatus}') via Auth Admin without altering admin session.${hasStrategyMetadata ? ' Strategy profile metadata not persisted (public.mentor_profiles missing).' : ''}`,
+          details: `Admin ${caller.profile?.email || caller.user.id} created ${requestedRole} user ${cleanEmail} (status='${requestedStatus}') via Auth Admin without altering admin session.${hasStrategyMetadata && !strategyProfilePersisted ? ' Strategy profile metadata not persisted (public.mentor_profiles missing).' : ''}`,
         },
         dbClient
       );
 
-      const strategyWarning = hasStrategyMetadata
-        ? 'User account was created and activated, but strategy profile fields (strategyName/monthlyFee) were not saved because the public.mentor_profiles table is not provisioned yet.'
-        : undefined;
+      const strategyWarning =
+        hasStrategyMetadata && !strategyProfilePersisted
+          ? 'User account was created and activated, but strategy profile fields (strategyName/monthlyFee) were not saved because the public.mentor_profiles table is not provisioned yet.'
+          : undefined;
 
       return res.status(201).json({
         success: true,
         profile: persistedProfile,
-        strategyProfilePersisted: !hasStrategyMetadata ? null : false,
-        missingSchemaTable: hasStrategyMetadata ? 'mentor_profiles' : undefined,
+        strategyProfilePersisted,
+        missingSchemaTable: hasStrategyMetadata && !strategyProfilePersisted ? 'mentor_profiles' : undefined,
         warning: strategyWarning,
         message: `Successfully registered and approved ${cleanName} (${cleanEmail}) as ${requestedRole}.`,
       });
@@ -1074,6 +1125,262 @@ export function createApiApp(deps?: ApiAppDependencies) {
   // MT5 Expert Advisor Bridge Architecture Endpoints (Durable Persistence Required)
   // ==============================================================================
   const bridgeStore = BridgeStore.getInstance();
+
+  const parseAndValidateAssignmentLotFields = (
+    rawLotSettings: any,
+    existingRow?: Record<string, any> | null,
+    defaultCopyMode: string = 'parent_lot'
+  ): {
+    error?: string;
+    code?: string;
+    normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent';
+    dbFields: Record<string, any>;
+    lotSettings: ReturnType<typeof RiskEngine.normalizeLotSettingsFromRow>;
+  } => {
+    const rawCopyMode = String(
+      rawLotSettings?.copyMode ??
+        rawLotSettings?.lotMode ??
+        (rawLotSettings?.mode === 'custom_lot' ? rawLotSettings?.customType : rawLotSettings?.mode) ??
+        existingRow?.lot_mode ??
+        defaultCopyMode
+    )
+      .trim()
+      .toLowerCase();
+
+    let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'parent_lot';
+    let uiMode: 'parent_lot' | 'custom_lot' = 'parent_lot';
+    let uiCustomType: 'fixed' | 'multiplier' | 'equity_ratio' | 'risk_percent' = 'multiplier';
+
+    if (rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot') {
+      normalizedLotMode = 'fixed';
+      uiMode = 'custom_lot';
+      uiCustomType = 'fixed';
+    } else if (rawCopyMode === 'multiplier') {
+      normalizedLotMode = 'multiplier';
+      uiMode = 'custom_lot';
+      uiCustomType = 'multiplier';
+    } else if (rawCopyMode === 'equity_ratio') {
+      normalizedLotMode = 'equity_ratio';
+      uiMode = 'custom_lot';
+      uiCustomType = 'equity_ratio';
+    } else if (rawCopyMode === 'risk_percent') {
+      normalizedLotMode = 'risk_percent';
+      uiMode = 'custom_lot';
+      uiCustomType = 'risk_percent';
+    } else if (rawCopyMode === 'parent_lot') {
+      normalizedLotMode = 'parent_lot';
+      uiMode = 'parent_lot';
+      uiCustomType = 'multiplier';
+    } else {
+      return {
+        error: `Invalid lot mode "${rawCopyMode}". Supported values: parent_lot, multiplier, fixed, equity_ratio, risk_percent.`,
+        code: 'INVALID_LOT_MODE',
+        normalizedLotMode: 'parent_lot',
+        dbFields: {},
+        lotSettings: RiskEngine.normalizeLotSettingsFromRow(existingRow),
+      };
+    }
+
+    const numVal = (v: unknown, fallback: number) => (v !== undefined && v !== null && v !== '' ? Number(v) : fallback);
+    const mult = numVal(rawLotSettings?.multiplier, existingRow?.lot_multiplier != null ? Number(existingRow.lot_multiplier) : 1.0);
+    const fixed = numVal(rawLotSettings?.fixedLot, existingRow?.fixed_lot != null ? Number(existingRow.fixed_lot) : 0.1);
+    const riskPct = numVal(rawLotSettings?.riskPercent, existingRow?.risk_percent != null ? Number(existingRow.risk_percent) : 1.0);
+    const maxCap = numVal(rawLotSettings?.maxLotCap, existingRow?.max_lot_cap != null ? Number(existingRow.max_lot_cap) : 50.0);
+    const minClamp = numVal(rawLotSettings?.minLotClamp, existingRow?.min_lot_clamp != null ? Number(existingRow.min_lot_clamp) : 0.01);
+    const slippage = numVal(rawLotSettings?.slippageMaxPips, existingRow?.slippage_max_pips != null ? Number(existingRow.slippage_max_pips) : 3.0);
+    const maxDd = numVal(
+      rawLotSettings?.maxDrawdownProtectionPercent ?? rawLotSettings?.maxDrawdownPercent,
+      existingRow?.max_drawdown_percent != null ? Number(existingRow.max_drawdown_percent) : 20.0
+    );
+    const syncSlTp =
+      typeof rawLotSettings?.syncSlTp === 'boolean'
+        ? rawLotSettings.syncSlTp
+        : typeof existingRow?.sync_sl_tp === 'boolean'
+        ? existingRow.sync_sl_tp
+        : true;
+    const copyPendingOrders =
+      typeof rawLotSettings?.copyPendingOrders === 'boolean'
+        ? rawLotSettings.copyPendingOrders
+        : typeof existingRow?.copy_pending_orders === 'boolean'
+        ? existingRow.copy_pending_orders
+        : true;
+    const symbolPrefix =
+      rawLotSettings?.symbolPrefix !== undefined
+        ? String(rawLotSettings.symbolPrefix ?? '').trim()
+        : String(existingRow?.symbol_prefix ?? '');
+    const symbolSuffix =
+      rawLotSettings?.symbolSuffix !== undefined
+        ? String(rawLotSettings.symbolSuffix ?? '').trim()
+        : String(existingRow?.symbol_suffix ?? '');
+
+    const candidateLotSettings = {
+      mode: uiMode,
+      customType: uiCustomType,
+      fixedLot: fixed,
+      multiplier: mult,
+      riskPercent: riskPct,
+      maxLotCap: maxCap,
+      minLotClamp: minClamp,
+      maxDrawdownProtectionPercent: maxDd,
+      copyPendingOrders,
+      syncSlTp,
+      slippageMaxPips: slippage,
+      symbolPrefix,
+      symbolSuffix,
+    };
+
+    const validation = RiskEngine.validateLotSettings(candidateLotSettings);
+    if (!validation.valid) {
+      return {
+        error: validation.reason || 'Invalid lot/risk settings.',
+        code: 'INVALID_LOT_SETTINGS',
+        normalizedLotMode,
+        dbFields: {},
+        lotSettings: candidateLotSettings,
+      };
+    }
+
+    if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
+      return {
+        error: 'Lot multiplier must be greater than 0 and at most 100.',
+        code: 'INVALID_LOT_MULTIPLIER',
+        normalizedLotMode,
+        dbFields: {},
+        lotSettings: candidateLotSettings,
+      };
+    }
+    if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
+      return {
+        error: 'Fixed lot size must be between 0.01 and 100 lots.',
+        code: 'INVALID_FIXED_LOT',
+        normalizedLotMode,
+        dbFields: {},
+        lotSettings: candidateLotSettings,
+      };
+    }
+
+    const dbFields = {
+      lot_mode: normalizedLotMode,
+      lot_multiplier: mult,
+      fixed_lot: fixed,
+      risk_percent: riskPct,
+      max_lot_cap: maxCap,
+      min_lot_clamp: minClamp,
+      slippage_max_pips: slippage,
+      max_drawdown_percent: maxDd,
+      sync_sl_tp: syncSlTp,
+      copy_pending_orders: copyPendingOrders,
+      symbol_prefix: symbolPrefix,
+      symbol_suffix: symbolSuffix,
+    };
+
+    return {
+      normalizedLotMode,
+      dbFields,
+      lotSettings: candidateLotSettings,
+    };
+  };
+
+  const isMissingRiskColumnError = (err: any): boolean => {
+    const msg = String(err?.message || '').toLowerCase();
+    return err?.code === '42703' || msg.includes('does not exist') || msg.includes('schema cache');
+  };
+
+  const upsertAssignmentByChildAccount = async (
+    dbClient: SupabaseClient,
+    params: {
+      mentorId: string;
+      traderId: string;
+      parentAccountId: string;
+      childAccountId: string;
+      dbFields: Record<string, any>;
+    }
+  ): Promise<{ assignment: any; persistedFields: string[]; error?: string }> => {
+    const nowIso = new Date().toISOString();
+    const { data: existingRows, error: findErr } = await dbClient
+      .from('mentor_assignments')
+      .select('*')
+      .eq('child_account_id', params.childAccountId);
+
+    if (findErr) {
+      return { assignment: null, persistedFields: [], error: findErr.message };
+    }
+
+    let targetExisting = Array.isArray(existingRows) && existingRows.length > 0 ? existingRows[0] : null;
+    if (!targetExisting) {
+      // Check legacy rows for this trader/mentor that lack child_account_id
+      const { data: legacyRows } = await dbClient
+        .from('mentor_assignments')
+        .select('*')
+        .eq('mentor_id', params.mentorId)
+        .eq('trader_id', params.traderId);
+      const legacyNullChild = (legacyRows || []).find((r: any) => !r.child_account_id);
+      if (legacyNullChild) targetExisting = legacyNullChild;
+    }
+
+    const corePayload = {
+      mentor_id: params.mentorId,
+      trader_id: params.traderId,
+      parent_account_id: params.parentAccountId,
+      child_account_id: params.childAccountId,
+      status: 'active',
+      lot_mode: params.dbFields.lot_mode ?? 'parent_lot',
+      lot_multiplier: params.dbFields.lot_multiplier ?? 1.0,
+      fixed_lot: params.dbFields.fixed_lot ?? 0.1,
+      assigned_at: nowIso,
+    };
+
+    const fullPayload = {
+      ...corePayload,
+      ...params.dbFields,
+    };
+
+    if (targetExisting?.id) {
+      const { data: updated, error: updErr } = await dbClient
+        .from('mentor_assignments')
+        .update(fullPayload)
+        .eq('id', targetExisting.id)
+        .select('*')
+        .single();
+
+      if (!updErr) {
+        return { assignment: updated, persistedFields: Object.keys(params.dbFields) };
+      }
+      if (isMissingRiskColumnError(updErr)) {
+        const { data: fallbackUpd, error: fallbackErr } = await dbClient
+          .from('mentor_assignments')
+          .update(corePayload)
+          .eq('id', targetExisting.id)
+          .select('*')
+          .single();
+        if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
+        return { assignment: fallbackUpd, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+      }
+      return { assignment: null, persistedFields: [], error: updErr.message };
+    }
+
+    const insertRow = { id: crypto.randomUUID(), ...fullPayload };
+    const { data: inserted, error: insErr } = await dbClient
+      .from('mentor_assignments')
+      .insert([insertRow])
+      .select('*')
+      .single();
+
+    if (!insErr) {
+      return { assignment: inserted, persistedFields: Object.keys(params.dbFields) };
+    }
+    if (isMissingRiskColumnError(insErr)) {
+      const fallbackRow = { id: crypto.randomUUID(), ...corePayload };
+      const { data: fallbackIns, error: fallbackErr } = await dbClient
+        .from('mentor_assignments')
+        .insert([fallbackRow])
+        .select('*')
+        .single();
+      if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
+      return { assignment: fallbackIns, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+    }
+    return { assignment: null, persistedFields: [], error: insErr.message };
+  };
 
   /**
   /**
@@ -1568,50 +1875,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
         targetUserId = matchedProfiles[0].id;
       }
 
-      // Normalize and validate child lot configuration + parent linkage upfront before database writes
-      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' = 'parent_lot';
-      let validatedMultiplier = 1.0;
-      let validatedFixedLot = 0.1;
-
-      if (role === 'child' && lotSettings) {
-        const rawCopyMode = String(lotSettings.copyMode || 'parent_lot').trim().toLowerCase();
-        if (rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot') {
-          normalizedLotMode = 'fixed';
-        } else if (rawCopyMode === 'multiplier') {
-          normalizedLotMode = 'multiplier';
-        } else if (rawCopyMode === 'parent_lot') {
-          normalizedLotMode = 'parent_lot';
-        } else {
-          return res.status(400).json({
-            success: false,
-            code: 'INVALID_LOT_MODE',
-            error: `Invalid lotSettings.copyMode "${lotSettings.copyMode}". Supported values: parent_lot, multiplier, fixed, fixed_lot.`,
-          });
-        }
-
-        if (lotSettings.multiplier !== undefined) {
-          const mult = Number(lotSettings.multiplier);
-          if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
-            return res.status(400).json({
-              success: false,
-              code: 'INVALID_LOT_MULTIPLIER',
-              error: 'Lot multiplier must be greater than 0 and at most 100.',
-            });
-          }
-          validatedMultiplier = mult;
-        }
-
-        if (lotSettings.fixedLot !== undefined) {
-          const fixed = Number(lotSettings.fixedLot);
-          if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
-            return res.status(400).json({
-              success: false,
-              code: 'INVALID_FIXED_LOT',
-              error: 'Fixed lot size must be between 0.01 and 100 lots.',
-            });
-          }
-          validatedFixedLot = fixed;
-        }
+      let parsedLotConfig = parseAndValidateAssignmentLotFields(role === 'child' ? lotSettings : undefined, null, 'parent_lot');
+      if (role === 'child' && parsedLotConfig.error) {
+        return res.status(400).json({
+          success: false,
+          code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
+          error: parsedLotConfig.error,
+        });
       }
 
       let verifiedParentAcc: { id: string; user_id: string; account_role: string } | null = null;
@@ -1787,35 +2057,24 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
       }
 
-      // If child account and verified parentAccountId provided, establish link in mentor_assignments
+      // If child account and verified parentAccountId provided, establish link in mentor_assignments keyed by child_account_id
       if (role === 'child' && verifiedParentAcc) {
-        const { error: assignErr } = await dbClient
-          .from('mentor_assignments')
-          .upsert(
-            [
-              {
-                mentor_id: verifiedParentAcc.user_id,
-                trader_id: targetUserId,
-                parent_account_id: verifiedParentAcc.id,
-                child_account_id: accountId,
-                status: 'active',
-                lot_mode: normalizedLotMode,
-                lot_multiplier: validatedMultiplier,
-                fixed_lot: validatedFixedLot,
-                assigned_at: new Date().toISOString(),
-              },
-            ],
-            { onConflict: 'mentor_id,trader_id' }
-          );
+        const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
+          mentorId: verifiedParentAcc.user_id,
+          traderId: targetUserId!,
+          parentAccountId: verifiedParentAcc.id,
+          childAccountId: accountId,
+          dbFields: parsedLotConfig.dbFields,
+        });
 
-        if (assignErr) {
+        if (upsertRes.error) {
           if (!existingAcc) {
             await dbClient.from('mt5_accounts').delete().eq('id', accountId);
           }
           return res.status(422).json({
             success: false,
             code: 'MENTOR_ASSIGNMENT_FAILED',
-            error: `Account assignment to mentor failed: ${assignErr.message}`,
+            error: `Account assignment to mentor failed: ${upsertRes.error}`,
           });
         }
       }
@@ -1951,44 +2210,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const cleanBrokerServer = String(brokerServer).trim();
       const cleanBrokerName = String(brokerName || 'XM').trim();
 
-      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'parent_lot';
-      let validatedMultiplier = 1.0;
-      let validatedFixedLot = 0.1;
-
-      if (role === 'child' && lotSettings) {
-        const rawCopyMode = String(lotSettings.copyMode || lotSettings.mode || 'parent_lot').trim().toLowerCase();
-        if (rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot') {
-          normalizedLotMode = 'fixed';
-        } else if (rawCopyMode === 'multiplier') {
-          normalizedLotMode = 'multiplier';
-        } else if (rawCopyMode === 'equity_ratio') {
-          normalizedLotMode = 'equity_ratio';
-        } else if (rawCopyMode === 'risk_percent') {
-          normalizedLotMode = 'risk_percent';
-        } else if (rawCopyMode === 'parent_lot') {
-          normalizedLotMode = 'parent_lot';
-        } else {
-          return res.status(400).json({
-            success: false,
-            code: 'INVALID_LOT_MODE',
-            error: `Invalid lot mode "${rawCopyMode}".`,
-          });
-        }
-
-        if (lotSettings.multiplier !== undefined) {
-          const mult = Number(lotSettings.multiplier);
-          if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
-            return res.status(400).json({ success: false, code: 'INVALID_LOT_MULTIPLIER', error: 'Lot multiplier must be > 0 and <= 100.' });
-          }
-          validatedMultiplier = mult;
-        }
-        if (lotSettings.fixedLot !== undefined) {
-          const fixed = Number(lotSettings.fixedLot);
-          if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
-            return res.status(400).json({ success: false, code: 'INVALID_FIXED_LOT', error: 'Fixed lot must be between 0.01 and 100.' });
-          }
-          validatedFixedLot = fixed;
-        }
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(role === 'child' ? lotSettings : undefined, null, 'parent_lot');
+      if (role === 'child' && parsedLotConfig.error) {
+        return res.status(400).json({
+          success: false,
+          code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
+          error: parsedLotConfig.error,
+        });
       }
 
       let verifiedParentAcc: { id: string; user_id: string; account_role: string } | null = null;
@@ -2115,33 +2343,22 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (role === 'child' && verifiedParentAcc) {
-        const { error: assignErr } = await dbClient
-          .from('mentor_assignments')
-          .upsert(
-            [
-              {
-                mentor_id: verifiedParentAcc.user_id,
-                trader_id: targetUserId,
-                parent_account_id: verifiedParentAcc.id,
-                child_account_id: accountId,
-                status: 'active',
-                lot_mode: normalizedLotMode,
-                lot_multiplier: validatedMultiplier,
-                fixed_lot: validatedFixedLot,
-                assigned_at: new Date().toISOString(),
-              },
-            ],
-            { onConflict: 'mentor_id,trader_id' }
-          );
+        const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
+          mentorId: verifiedParentAcc.user_id,
+          traderId: targetUserId,
+          parentAccountId: verifiedParentAcc.id,
+          childAccountId: accountId,
+          dbFields: parsedLotConfig.dbFields,
+        });
 
-        if (assignErr) {
+        if (upsertRes.error) {
           if (!existingAcc) {
             await dbClient.from('mt5_accounts').delete().eq('id', accountId);
           }
           return res.status(422).json({
             success: false,
             code: 'MENTOR_ASSIGNMENT_FAILED',
-            error: `Account assignment to mentor failed: ${assignErr.message}`,
+            error: `Account assignment to mentor failed: ${upsertRes.error}`,
           });
         }
       }
@@ -2433,8 +2650,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
   });
 
   /**
-   * 2e. Persist MT5 Account Connection Toggle (Admin or Account Owner)
+   * 2e. Persist MT5 Account Disconnection (Admin or Account Owner)
    * POST /api/v1/bridge/accounts/:accountId/connection
+   * Security invariant: Dashboard users & admins CANNOT spoof connectionStatus = 'connected'.
+   * Only an authenticated MT5 Expert Advisor heartbeat (POST /api/v1/bridge/heartbeat) can set 'connected'.
    */
   registerRoute('post', '/api/v1/bridge/accounts/:accountId/connection', async (req: Request, res: Response) => {
     try {
@@ -2467,48 +2686,33 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (status === 'connected') {
-        if (acc.account_type && acc.account_type !== 'demo') {
-          return res.status(403).json({
-            success: false,
-            code: 'DEMO_ONLY_SAFETY_BLOCK',
-            error: 'Safety block: Live MT5 accounts cannot be activated in Demo-Only mode.',
-          });
-        }
-
-        const { data: ownerProf, error: ownerErr } = await dbClient
-          .from('profiles')
-          .select('id, status')
-          .eq('id', acc.user_id)
-          .maybeSingle();
-
-        if (ownerErr) return res.status(500).json({ success: false, error: ownerErr.message });
-        if (!ownerProf || ownerProf.status !== 'active') {
-          return res.status(403).json({
-            success: false,
-            code: 'ACCOUNT_OWNER_INACTIVE',
-            error: `Cannot activate terminal: owner profile is '${ownerProf?.status || 'missing'}'.`,
-          });
-        }
+        return res.status(403).json({
+          success: false,
+          code: 'EA_HEARTBEAT_REQUIRED',
+          error:
+            'Forbidden: Terminals can only transition to connected via an authenticated MetaTrader 5 EA heartbeat (POST /api/v1/bridge/heartbeat).',
+        });
       }
 
-      const updatePayload: Record<string, any> =
-        status === 'connected'
-          ? { connection_status: 'connected', last_sync: new Date().toISOString(), error_message: null }
-          : { connection_status: 'disconnected', ping_ms: 0, error_message: 'Manually disconnected via dashboard' };
+      const updatePayload: Record<string, any> = {
+        connection_status: 'disconnected',
+        ping_ms: 0,
+        error_message: 'Manually disconnected via dashboard',
+      };
 
       const { error: updErr } = await dbClient.from('mt5_accounts').update(updatePayload).eq('id', accountId);
       if (updErr) return res.status(500).json({ success: false, error: updErr.message });
 
       await bridgeStore.addSyncLog(
         {
-          eventType: status === 'connected' ? 'TERMINAL_ACTIVATED' : 'TERMINAL_SUSPENDED',
-          level: status === 'disconnected' ? 'warn' : 'info',
-          details: `User ${caller.profile?.email || caller.user.id} marked MT5 terminal #${acc.account_number || accountId} as ${status}.`,
+          eventType: 'TERMINAL_SUSPENDED',
+          level: 'warn',
+          details: `User ${caller.profile?.email || caller.user.id} marked MT5 terminal #${acc.account_number || accountId} as disconnected.`,
         },
         dbClient
       );
 
-      return res.status(200).json({ success: true, accountId, connectionStatus: status });
+      return res.status(200).json({ success: true, accountId, connectionStatus: 'disconnected' });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to update connection state' });
     }
@@ -2615,10 +2819,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
     // Resolve assigned active child accounts from PostgreSQL
     interface ChildCandidate {
       childAccountId: string;
-      lotMode: 'parent_lot' | 'custom_lot';
-      customType: 'fixed' | 'multiplier' | 'equity_ratio' | 'risk_percent';
-      lotMultiplier: number;
-      fixedLot: number;
+      lotSettings: ReturnType<typeof RiskEngine.normalizeLotSettingsFromRow>;
       childBalance: number;
       childEquity: number;
     }
@@ -2672,10 +2873,27 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      // 2. Query active mentor assignments specifically paired with this parent account
+      // Persist durable parent trade OPEN into public.trades
+      await bridgeStore.recordParentTradeOpen(
+        {
+          accountId: parentAcc.id,
+          userId: parentAcc.user_id,
+          ticket: parentTicketStr,
+          symbol: String(symbol).trim(),
+          orderType: type,
+          lots: parentLotsNum,
+          openPrice: openPrice != null && openPrice !== '' ? Number(openPrice) : 0,
+          sl: sl != null && sl !== '' ? Number(sl) : undefined,
+          tp: tp != null && tp !== '' ? Number(tp) : undefined,
+          comment: String(comment || 'TradeSync Master'),
+        },
+        dbClient
+      );
+
+      // 2. Query active mentor assignments specifically paired with this parent account (including persisted risk settings)
       const { data: assignments, error: assignErr } = await dbClient
         .from('mentor_assignments')
-        .select('id, mentor_id, trader_id, child_account_id, lot_mode, lot_multiplier, fixed_lot, status')
+        .select('*')
         .eq('parent_account_id', auth.terminal.accountId)
         .eq('status', 'active');
 
@@ -2731,36 +2949,9 @@ export function createApiApp(deps?: ApiAppDependencies) {
             continue;
           }
 
-          const rawLotMode = String(a.lot_mode || 'parent_lot').trim().toLowerCase();
-          let resolvedMode: 'parent_lot' | 'custom_lot' = 'parent_lot';
-          let resolvedCustomType: 'fixed' | 'multiplier' | 'equity_ratio' | 'risk_percent' = 'multiplier';
-
-          if (rawLotMode === 'fixed' || rawLotMode === 'fixed_lot') {
-            resolvedMode = 'custom_lot';
-            resolvedCustomType = 'fixed';
-          } else if (rawLotMode === 'multiplier') {
-            resolvedMode = 'custom_lot';
-            resolvedCustomType = 'multiplier';
-          } else if (rawLotMode === 'equity_ratio') {
-            resolvedMode = 'custom_lot';
-            resolvedCustomType = 'equity_ratio';
-          } else if (rawLotMode === 'risk_percent') {
-            resolvedMode = 'custom_lot';
-            resolvedCustomType = 'risk_percent';
-          } else {
-            resolvedMode = 'parent_lot';
-            resolvedCustomType = 'multiplier';
-          }
-
-          const parsedMultiplier = a.lot_multiplier != null ? Number(a.lot_multiplier) : 1.0;
-          const parsedFixedLot = a.fixed_lot != null ? Number(a.fixed_lot) : 0.1;
-
           assignedChildren.push({
             childAccountId: a.child_account_id,
-            lotMode: resolvedMode,
-            customType: resolvedCustomType,
-            lotMultiplier: Number.isFinite(parsedMultiplier) ? parsedMultiplier : 1.0,
-            fixedLot: Number.isFinite(parsedFixedLot) ? parsedFixedLot : 0.1,
+            lotSettings: RiskEngine.normalizeLotSettingsFromRow(a),
             childBalance: Number(childAcc.balance) || 10000,
             childEquity: Number(childAcc.equity) || Number(childAcc.balance) || 10000,
           });
@@ -2800,23 +2991,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const sizing = RiskEngine.calculateChildLots({
         parentSymbol: symbol,
         parentLots: parentLotsNum,
+        orderType: type,
         parentEquity,
         parentBalance,
         childEquity: child.childEquity,
         childBalance: child.childBalance,
-        lotSettings: {
-          mode: child.lotMode,
-          customType: child.customType,
-          fixedLot: child.fixedLot,
-          multiplier: child.lotMultiplier,
-          riskPercent: 1.0,
-          maxLotCap: 50.0,
-          minLotClamp: 0.01,
-          maxDrawdownProtectionPercent: 20.0,
-          copyPendingOrders: true,
-          syncSlTp: true,
-          slippageMaxPips: 30,
-        },
+        lotSettings: child.lotSettings,
       });
 
       if (!sizing.valid) {
@@ -2832,6 +3012,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
         continue;
       }
 
+      const shouldSyncSlTp = child.lotSettings.syncSlTp !== false;
+      const effectiveSl = shouldSyncSlTp && sl != null && sl !== '' ? Number(sl) : undefined;
+      const effectiveTp = shouldSyncSlTp && tp != null && tp !== '' ? Number(tp) : undefined;
+      const hasSL = effectiveSl !== undefined && Number.isFinite(effectiveSl);
+      const hasTP = effectiveTp !== undefined && Number.isFinite(effectiveTp);
+
       // Durable idempotent queueing
       const idempotencyKey = `${parentTicketStr}_${child.childAccountId}_OPEN`;
       const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
@@ -2845,12 +3031,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
           orderType: type,
           lots: sizing.childLots,
           openPrice: openPrice != null && openPrice !== '' ? Number(openPrice) : undefined,
-          sl: sl != null && sl !== '' ? Number(sl) : undefined,
-          tp: tp != null && tp !== '' ? Number(tp) : undefined,
-          hasSL: sl != null && sl !== '',
-          hasTP: tp != null && tp !== '',
-          hasSl: sl != null && sl !== '',
-          hasTp: tp != null && tp !== '',
+          sl: hasSL ? effectiveSl : undefined,
+          tp: hasTP ? effectiveTp : undefined,
+          hasSL,
+          hasTP,
+          hasSl: hasSL,
+          hasTp: hasTP,
+          slippageMaxPips: child.lotSettings.slippageMaxPips,
           magicNumber: magicNumStr,
           comment: `${comment} (M#${parentTicketStr})`,
         },
@@ -2893,7 +3080,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade closures.' });
     }
 
-    const { ticket, closeType, closedLots, remainingLots, dealTicket } = req.body;
+    const { ticket, closeType, closedLots, remainingLots, dealTicket, closePrice, realizedProfit, commission, swap } = req.body;
     if (ticket == null) {
       return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
     }
@@ -2932,6 +3119,19 @@ export function createApiApp(deps?: ApiAppDependencies) {
     }
 
     try {
+      // Persist authoritative parent close deal fields (never fabricates realized P&L when omitted)
+      await bridgeStore.recordParentTradeClose(
+        {
+          accountId: terminal.accountId,
+          ticket: parentTicketStr,
+          closePrice: closePrice != null && closePrice !== '' ? Number(closePrice) : undefined,
+          realizedProfit: realizedProfit != null && realizedProfit !== '' ? Number(realizedProfit) : undefined,
+          commission: commission != null && commission !== '' ? Number(commission) : undefined,
+          swap: swap != null && swap !== '' ? Number(swap) : undefined,
+        },
+        dbClient
+      );
+
       // 1. Primary lookup: targeted query on trade_mappings for this parent account + ticket
       const { data: mapRows, error: mapErr } = await dbClient
         .from('trade_mappings')
@@ -3122,7 +3322,33 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
       }
 
+      const { data: activeAssigns } = await dbClient
+        .from('mentor_assignments')
+        .select('*')
+        .eq('parent_account_id', terminal.accountId)
+        .eq('status', 'active');
+
+      const syncSlTpByChild = new Map<string, boolean>();
+      for (const a of activeAssigns || []) {
+        if (a?.child_account_id) {
+          syncSlTpByChild.set(a.child_account_id, a.sync_sl_tp !== false);
+        }
+      }
+
+      let modifiedCount = 0;
       for (const map of mappings) {
+        if (syncSlTpByChild.get(map.childAccountId) === false) {
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'SL_TP_MODIFY_SKIPPED',
+              level: 'info',
+              details: `Skipped SL/TP modification on child account ${map.childAccountId} for parent ticket #${parentTicketStr}: sync_sl_tp is disabled.`,
+              ticket: parentTicketStr,
+            },
+            dbClient
+          );
+          continue;
+        }
         const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_MODIFY_${sl}_${tp}`;
         const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
         await bridgeStore.queueInstruction(
@@ -3147,9 +3373,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
           },
           dbClient
         );
+        modifiedCount += 1;
       }
 
-      return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount: mappings.length });
+      return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount });
     } catch (err: any) {
       console.error('[TradeModify] Execution error:', err.message);
       return res.status(500).json({ success: false, error: err.message || 'Failed to queue modify instructions' });
@@ -3223,6 +3450,11 @@ export function createApiApp(deps?: ApiAppDependencies) {
       status,
       childTicket,
       fillPrice,
+      executedLots,
+      realizedProfit,
+      commission,
+      swap,
+      closePrice,
       brokerErrorCode,
       brokerErrorMessage,
       executionLatencyMs,
@@ -3247,6 +3479,11 @@ export function createApiApp(deps?: ApiAppDependencies) {
         status,
         childTicket: childTicketStr,
         fillPrice: fillPrice != null && fillPrice !== '' ? Number(fillPrice) : undefined,
+        executedLots: executedLots != null && executedLots !== '' ? Number(executedLots) : undefined,
+        realizedProfit: realizedProfit != null && realizedProfit !== '' ? Number(realizedProfit) : undefined,
+        commission: commission != null && commission !== '' ? Number(commission) : undefined,
+        swap: swap != null && swap !== '' ? Number(swap) : undefined,
+        closePrice: closePrice != null && closePrice !== '' ? Number(closePrice) : undefined,
         brokerErrorCode: brokerErrorCode != null && brokerErrorCode !== '' ? Number(brokerErrorCode) : undefined,
         brokerErrorMessage: brokerErrorMessage != null ? String(brokerErrorMessage) : undefined,
         executionLatencyMs: executionLatencyMs != null && executionLatencyMs !== '' ? Number(executionLatencyMs) : undefined,
@@ -3263,6 +3500,72 @@ export function createApiApp(deps?: ApiAppDependencies) {
       acknowledged: true,
       duplicate: Boolean(ackResult.duplicate),
     });
+  });
+
+  /**
+   * 7b. Authoritative Closed Deal Telemetry Hook (Broadcaster or Receiver EA)
+   * POST /api/v1/bridge/events/trade-deal
+   */
+  registerRoute('post', '/api/v1/bridge/events/trade-deal', async (req: Request, res: Response) => {
+    const auth = await authenticateTerminal(req);
+    if (!auth.terminal) {
+      return res.status(auth.status || 401).json({
+        success: false,
+        ...(auth.code ? { code: auth.code } : {}),
+        error: auth.error,
+      });
+    }
+
+    const dbClient = auth.dbClient || requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    const { ticket, closePrice, realizedProfit, commission, swap } = req.body || {};
+    if (ticket == null || !String(ticket).trim()) {
+      return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
+    }
+
+    const ticketStr = String(ticket).trim();
+    const profitNum = realizedProfit != null && realizedProfit !== '' ? Number(realizedProfit) : undefined;
+    if (profitNum === undefined || !Number.isFinite(profitNum)) {
+      return res.status(400).json({ success: false, error: 'A finite numeric realizedProfit from MT5 deal history is required.' });
+    }
+
+    await bridgeStore.recordParentTradeClose(
+      {
+        accountId: auth.terminal.accountId,
+        ticket: ticketStr,
+        closePrice: closePrice != null && closePrice !== '' ? Number(closePrice) : undefined,
+        realizedProfit: profitNum,
+        commission: commission != null && commission !== '' ? Number(commission) : undefined,
+        swap: swap != null && swap !== '' ? Number(swap) : undefined,
+      },
+      dbClient
+    );
+
+    if (auth.terminal.accountRole === 'child') {
+      const patch: Record<string, any> = {
+        status: 'CLOSED',
+        profit: profitNum,
+        is_realized: true,
+        close_time: new Date().toISOString(),
+      };
+      if (closePrice != null && closePrice !== '' && Number.isFinite(Number(closePrice))) {
+        patch.close_price = Number(closePrice);
+      }
+      if (commission != null && commission !== '' && Number.isFinite(Number(commission))) {
+        patch.commission = Number(commission);
+      }
+      if (swap != null && swap !== '' && Number.isFinite(Number(swap))) {
+        patch.swap = Number(swap);
+      }
+      await dbClient
+        .from('trades')
+        .update(patch)
+        .eq('account_id', auth.terminal.accountId)
+        .eq('ticket', ticketStr);
+    }
+
+    return res.status(200).json({ success: true, ticket: ticketStr, realizedProfit: profitNum });
   });
 
   /**
@@ -3392,6 +3695,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
   registerRoute('get', '/api/v1/bridge/trades', async (req: Request, res: Response) => {
     const caller = await authenticateSupabaseCaller(req, res, { requireServiceRole: true });
     if (!caller) return;
+
+    if (!caller.isVerifiedAdmin && caller.profile?.status !== 'active') {
+      return res.status(403).json({ success: false, error: 'Forbidden: Active profile required.' });
+    }
 
     const dbClient = requireServiceRoleClient(res);
     if (!dbClient) return;
@@ -3612,45 +3919,25 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const rawCopyMode = String(lotSettings?.copyMode || 'parent_lot').trim().toLowerCase();
-      const lotMode =
-        rawCopyMode === 'fixed' || rawCopyMode === 'fixed_lot'
-          ? 'fixed'
-          : rawCopyMode === 'multiplier' || rawCopyMode === 'equity_ratio' || rawCopyMode === 'risk_percent'
-          ? rawCopyMode
-          : 'parent_lot';
-      const lotMultiplier =
-        lotSettings?.multiplier != null && Number.isFinite(Number(lotSettings.multiplier)) && Number(lotSettings.multiplier) > 0
-          ? Number(lotSettings.multiplier)
-          : 1.0;
-      const fixedLot =
-        lotSettings?.fixedLot != null && Number.isFinite(Number(lotSettings.fixedLot)) && Number(lotSettings.fixedLot) >= 0.01
-          ? Number(lotSettings.fixedLot)
-          : 0.1;
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(lotSettings, null, 'parent_lot');
+      if (parsedLotConfig.error) {
+        return res.status(400).json({
+          success: false,
+          code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
+          error: parsedLotConfig.error,
+        });
+      }
 
-      const { data: upserted, error: upsertErr } = await dbClient
-        .from('mentor_assignments')
-        .upsert(
-          [
-            {
-              mentor_id: matchedMentor.id,
-              trader_id: targetTraderId,
-              parent_account_id: parentAcc.id,
-              child_account_id: resolvedChildId,
-              status: 'active',
-              lot_mode: lotMode,
-              lot_multiplier: lotMultiplier,
-              fixed_lot: fixedLot,
-              assigned_at: new Date().toISOString(),
-            },
-          ],
-          { onConflict: 'mentor_id,trader_id' }
-        )
-        .select('*')
-        .single();
+      const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
+        mentorId: matchedMentor.id,
+        traderId: targetTraderId,
+        parentAccountId: parentAcc.id,
+        childAccountId: resolvedChildId,
+        dbFields: parsedLotConfig.dbFields,
+      });
 
-      if (upsertErr) {
-        return res.status(422).json({ success: false, error: upsertErr.message });
+      if (upsertRes.error || !upsertRes.assignment) {
+        return res.status(422).json({ success: false, error: upsertRes.error || 'Failed to persist mentor link.' });
       }
 
       await bridgeStore.addSyncLog(
@@ -3664,7 +3951,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       return res.status(200).json({
         success: true,
-        assignment: upserted,
+        assignment: upsertRes.assignment,
+        persistedFields: upsertRes.persistedFields,
         mentorName: matchedMentor.full_name || 'Verified Mentor',
       });
     } catch (err: any) {
@@ -3826,50 +4114,63 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const rawMode = String(req.body?.copyMode || req.body?.lotMode || 'parent_lot').trim().toLowerCase();
-      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'parent_lot';
-      if (rawMode === 'fixed' || rawMode === 'fixed_lot') {
-        normalizedLotMode = 'fixed';
-      } else if (rawMode === 'multiplier') {
-        normalizedLotMode = 'multiplier';
-      } else if (rawMode === 'equity_ratio') {
-        normalizedLotMode = 'equity_ratio';
-      } else if (rawMode === 'risk_percent') {
-        normalizedLotMode = 'risk_percent';
-      } else if (rawMode === 'parent_lot') {
-        normalizedLotMode = 'parent_lot';
-      } else {
-        return res.status(400).json({ success: false, error: `Invalid lot mode "${rawMode}".` });
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(req.body, existing, 'parent_lot');
+      if (parsedLotConfig.error) {
+        return res.status(400).json({
+          success: false,
+          code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
+          error: parsedLotConfig.error,
+        });
       }
 
-      const mult = Number(req.body?.multiplier ?? existing.lot_multiplier ?? 1.0);
-      if (!Number.isFinite(mult) || mult <= 0 || mult > 100) {
-        return res.status(400).json({ success: false, error: 'Lot multiplier must be > 0 and <= 100.' });
-      }
+      let updated: any = null;
+      let persistedFields = Object.keys(parsedLotConfig.dbFields);
+      let unpersistedSchemaFields: string[] = [];
 
-      const fixed = Number(req.body?.fixedLot ?? existing.fixed_lot ?? 0.1);
-      if (!Number.isFinite(fixed) || fixed < 0.01 || fixed > 100) {
-        return res.status(400).json({ success: false, error: 'Fixed lot must be between 0.01 and 100.' });
-      }
-
-      const { data: updated, error: updErr } = await dbClient
+      const { data: fullUpdated, error: fullUpdErr } = await dbClient
         .from('mentor_assignments')
-        .update({
-          lot_mode: normalizedLotMode,
-          lot_multiplier: mult,
-          fixed_lot: fixed,
-        })
+        .update(parsedLotConfig.dbFields)
         .eq('id', assignmentId)
         .select('*')
         .single();
 
-      if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+      if (!fullUpdErr) {
+        updated = fullUpdated;
+      } else if (isMissingRiskColumnError(fullUpdErr)) {
+        const coreUpdate = {
+          lot_mode: parsedLotConfig.dbFields.lot_mode,
+          lot_multiplier: parsedLotConfig.dbFields.lot_multiplier,
+          fixed_lot: parsedLotConfig.dbFields.fixed_lot,
+        };
+        const { data: coreUpdated, error: coreErr } = await dbClient
+          .from('mentor_assignments')
+          .update(coreUpdate)
+          .eq('id', assignmentId)
+          .select('*')
+          .single();
+        if (coreErr) return res.status(500).json({ success: false, error: coreErr.message });
+        updated = coreUpdated;
+        persistedFields = ['lot_mode', 'lot_multiplier', 'fixed_lot'];
+        unpersistedSchemaFields = [
+          'risk_percent',
+          'max_lot_cap',
+          'min_lot_clamp',
+          'slippage_max_pips',
+          'max_drawdown_percent',
+          'sync_sl_tp',
+          'copy_pending_orders',
+          'symbol_prefix',
+          'symbol_suffix',
+        ];
+      } else {
+        return res.status(500).json({ success: false, error: fullUpdErr.message });
+      }
 
       return res.status(200).json({
         success: true,
         assignment: updated,
-        persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'],
-        unpersistedSchemaFields: ['risk_percent', 'max_lot_cap', 'min_lot_clamp', 'slippage_max_pips'],
+        persistedFields,
+        unpersistedSchemaFields,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to update lot settings' });
@@ -4129,45 +4430,21 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      // 2. Validate and normalize lot configuration
-      const rawMode = String(lotSettings?.copyMode || lotSettings?.lotMode || 'multiplier').trim().toLowerCase();
-      let normalizedLotMode: 'parent_lot' | 'multiplier' | 'fixed' | 'equity_ratio' | 'risk_percent' = 'multiplier';
-      if (rawMode === 'fixed' || rawMode === 'fixed_lot') normalizedLotMode = 'fixed';
-      else if (rawMode === 'multiplier') normalizedLotMode = 'multiplier';
-      else if (rawMode === 'equity_ratio') normalizedLotMode = 'equity_ratio';
-      else if (rawMode === 'risk_percent') normalizedLotMode = 'risk_percent';
-      else if (rawMode === 'parent_lot') normalizedLotMode = 'parent_lot';
-      else {
+      // 2. Validate and normalize full lot & risk configuration
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(lotSettings, null, 'multiplier');
+      if (parsedLotConfig.error) {
         return res.status(400).json({
           success: false,
-          code: 'INVALID_LOT_MODE',
-          error: `Invalid lot mode "${rawMode}".`,
+          code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
+          error: parsedLotConfig.error,
         });
       }
 
-      const lotMultiplier = Number(lotSettings?.multiplier ?? 1.0);
-      if (!Number.isFinite(lotMultiplier) || lotMultiplier <= 0 || lotMultiplier > 100) {
-        return res.status(400).json({
-          success: false,
-          code: 'INVALID_LOT_MULTIPLIER',
-          error: 'Lot multiplier must be > 0 and <= 100.',
-        });
-      }
-
-      const fixedLot = Number(lotSettings?.fixedLot ?? 0.1);
-      if (!Number.isFinite(fixedLot) || fixedLot < 0.01 || fixedLot > 100) {
-        return res.status(400).json({
-          success: false,
-          code: 'INVALID_FIXED_LOT',
-          error: 'Fixed lot must be between 0.01 and 100.',
-        });
-      }
-
-      // 3. Check duplicate / existing assignments for this child or trader
+      // 3. Check duplicate / existing assignments specifically keyed by child_account_id
       const { data: existingRows, error: existingErr } = await dbClient
         .from('mentor_assignments')
         .select('*')
-        .or(`child_account_id.eq.${cleanChildAccId},trader_id.eq.${cleanTraderId}`);
+        .eq('child_account_id', cleanChildAccId);
 
       if (existingErr) {
         return res.status(500).json({ success: false, error: existingErr.message });
@@ -4188,65 +4465,32 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const nowIso = new Date().toISOString();
-      const targetExisting =
-        (existingRows || []).find((r: any) => r.child_account_id === cleanChildAccId) ||
-        (existingRows || []).find((r: any) => r.trader_id === cleanTraderId);
-
-      let persistedAssignment: any = null;
-      if (targetExisting) {
-        const { data: updated, error: updErr } = await dbClient
-          .from('mentor_assignments')
-          .update({
-            mentor_id: cleanMentorId,
-            trader_id: cleanTraderId,
-            parent_account_id: cleanParentAccId,
-            child_account_id: cleanChildAccId,
-            status: 'active',
-            lot_mode: normalizedLotMode,
-            lot_multiplier: lotMultiplier,
-            fixed_lot: fixedLot,
-            assigned_at: nowIso,
-          })
-          .eq('id', targetExisting.id)
-          .select('*')
-          .single();
-
-        if (updErr) {
-          return res.status(422).json({ success: false, error: updErr.message });
-        }
-        persistedAssignment = updated;
-      } else {
-        const { data: inserted, error: insErr } = await dbClient
-          .from('mentor_assignments')
-          .insert([
-            {
-              id: crypto.randomUUID(),
-              mentor_id: cleanMentorId,
-              trader_id: cleanTraderId,
-              parent_account_id: cleanParentAccId,
-              child_account_id: cleanChildAccId,
-              status: 'active',
-              lot_mode: normalizedLotMode,
-              lot_multiplier: lotMultiplier,
-              fixed_lot: fixedLot,
-              assigned_at: nowIso,
-            },
-          ])
-          .select('*')
-          .single();
-
-        if (insErr) {
-          return res.status(422).json({ success: false, error: insErr.message });
-        }
-        persistedAssignment = inserted;
+      if (activeExisting && !replaceExisting && activeExisting.mentor_id !== cleanMentorId) {
+        return res.status(409).json({
+          success: false,
+          code: 'CHILD_ALREADY_ASSIGNED',
+          error: `Child MT5 account #${childAcc.account_number} is already assigned to another mentor. Enable replaceExisting to reassign.`,
+        });
       }
+
+      const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
+        mentorId: cleanMentorId,
+        traderId: cleanTraderId,
+        parentAccountId: cleanParentAccId,
+        childAccountId: cleanChildAccId,
+        dbFields: parsedLotConfig.dbFields,
+      });
+
+      if (upsertRes.error || !upsertRes.assignment) {
+        return res.status(422).json({ success: false, error: upsertRes.error || 'Failed to save mentor assignment.' });
+      }
+      const persistedAssignment = upsertRes.assignment;
 
       await bridgeStore.addSyncLog(
         {
           eventType: 'ADMIN_ASSIGNMENT_CREATED',
           level: 'info',
-          details: `Admin ${caller.profile?.email || caller.user.id} assigned Child #${childAcc.account_number} (${traderProf.email || cleanTraderId}) to Parent #${parentAcc.account_number} (${mentorProf.email || cleanMentorId}) [mode=${normalizedLotMode}].`,
+          details: `Admin ${caller.profile?.email || caller.user.id} assigned Child #${childAcc.account_number} (${traderProf.email || cleanTraderId}) to Parent #${parentAcc.account_number} (${mentorProf.email || cleanMentorId}) [mode=${parsedLotConfig.normalizedLotMode}].`,
         },
         dbClient
       );
@@ -4255,6 +4499,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         success: true,
         assignmentId: persistedAssignment?.id,
         assignment: persistedAssignment,
+        persistedFields: upsertRes.persistedFields,
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to assign MT5 accounts' });

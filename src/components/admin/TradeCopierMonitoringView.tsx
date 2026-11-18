@@ -17,6 +17,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { ParentChildLink } from '../../types';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { formatHeartbeatAge, formatLotRuleLabel } from '../common/dashboardHelpers';
+import { computeReportingSummary } from '../../context/cloudStateUtils';
 import {
   AdminPageHeader,
   AdminStatCard,
@@ -31,12 +32,20 @@ export const TradeCopierMonitoringView: React.FC = () => {
     users,
     mt5Accounts,
     parentChildLinks,
+    trades,
     tradeMappings,
     syncLogs,
     cloudBridgeTelemetry,
     toggleLinkStatus,
     unlinkTrader,
   } = useApp();
+
+  const reporting = computeReportingSummary({
+    trades,
+    mappings: tradeMappings,
+    accounts: mt5Accounts,
+    isCloudMode,
+  });
 
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -175,6 +184,64 @@ export const TradeCopierMonitoringView: React.FC = () => {
           icon={Zap}
           tone={failedInstructions > 0 ? 'rose' : 'neutral'}
         />
+      </div>
+
+      {/* Platform Deal Reporting Bar */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 grid grid-cols-2 sm:grid-cols-5 gap-4 text-xs">
+        <div>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Realized Net P&amp;L
+          </span>
+          <p
+            className={`font-mono font-bold text-sm mt-0.5 ${
+              !reporting.realizedPnlAvailable
+                ? 'text-slate-500 font-normal text-xs'
+                : reporting.realizedPnlUSD >= 0
+                ? 'text-emerald-700'
+                : 'text-rose-700'
+            }`}
+          >
+            {reporting.realizedPnlAvailable
+              ? `${reporting.realizedPnlUSD >= 0 ? '+' : '-'}$${Math.abs(reporting.realizedPnlUSD).toFixed(2)}`
+              : 'Awaiting closed deal data'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Win Rate / Profit Factor
+          </span>
+          <p className="font-mono font-bold text-slate-900 text-sm mt-0.5">
+            {reporting.winRatePercent !== null
+              ? `${reporting.winRatePercent}% / ${(reporting.profitFactor ?? 0).toFixed(2)}`
+              : '--'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            24h / 7d Realized
+          </span>
+          <p className="font-mono font-semibold text-slate-800 text-sm mt-0.5">
+            {reporting.dailyRealizedUSD !== null
+              ? `$${reporting.dailyRealizedUSD.toFixed(2)} / $${(reporting.weeklyRealizedUSD ?? 0).toFixed(2)}`
+              : '-- / --'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            30d Realized
+          </span>
+          <p className="font-mono font-semibold text-slate-800 text-sm mt-0.5">
+            {reporting.monthlyRealizedUSD !== null ? `$${reporting.monthlyRealizedUSD.toFixed(2)}` : '--'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Measured Avg Copy Delay
+          </span>
+          <p className="font-mono font-bold text-sky-700 text-sm mt-0.5">
+            {reporting.avgCopyLatencyMs !== null ? `${reporting.avgCopyLatencyMs}ms` : '--'}
+          </p>
+        </div>
       </div>
 
       {/* Filters & Sub-Navigation */}

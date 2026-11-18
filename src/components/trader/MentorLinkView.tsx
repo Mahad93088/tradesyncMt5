@@ -31,12 +31,18 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
   const [submitting, setSubmitting] = useState(false);
   const [unlinkConfirmOpen, setUnlinkConfirmOpen] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
+  const [selectedChildId, setSelectedChildId] = useState<string>('');
 
-  const childAccount = mt5Accounts.find(
+  const childAccounts = mt5Accounts.filter(
     (a) => a.userId === currentUser.id && a.accountRole === 'child'
   );
+  const childAccount =
+    childAccounts.find((a) => a.id === selectedChildId) || childAccounts[0] || undefined;
 
-  const activeLink = parentChildLinks.find((l) => l.traderId === currentUser.id);
+  const activeLink = childAccount
+    ? parentChildLinks.find((l) => l.childAccountId === childAccount.id) ||
+      parentChildLinks.find((l) => l.traderId === currentUser.id && !l.childAccountId)
+    : parentChildLinks.find((l) => l.traderId === currentUser.id);
   const activeLinkProfit = activeLink
     ? formatLinkProfitDisplay(activeLink, isCloudMode)
     : { text: '$0.00', available: true, isPositive: true };
@@ -104,13 +110,28 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-white flex items-center gap-2">
-          Mentor Link & Copy Network
-        </h2>
-        <p className="text-xs text-slate-400 mt-1">
-          Connect your Child MT5 Demo terminal to a verified active mentor using their referral invite code.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            Mentor Link & Copy Network
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">
+            Connect your Child MT5 Demo terminal to a verified active mentor using their referral invite code.
+          </p>
+        </div>
+        {childAccounts.length > 1 && childAccount && (
+          <select
+            value={childAccount.id}
+            onChange={(e) => setSelectedChildId(e.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-mono text-slate-200 focus:border-sky-500 focus:outline-none"
+          >
+            {childAccounts.map((acc) => (
+              <option key={acc.id} value={acc.id}>
+                Child #{acc.accountNumber} ({acc.broker})
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {feedback && (

@@ -355,6 +355,7 @@ async function runTests() {
         connection_status: 'disconnected',
         ping_ms: 0,
         auto_trading_enabled: true,
+        terminal_token_hash: crypto.createHash('sha256').update('ts_test_child_token').digest('hex'),
         last_sync: nowIso,
         created_at: nowIso,
       },
@@ -746,9 +747,33 @@ async function runTests() {
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
       body: JSON.stringify({ connectionStatus: 'connected' }),
     });
-    assert.strictEqual(validConnActivate.status, 200);
+    assert.strictEqual(validConnActivate.status, 403);
+    const validConnActivateJson: any = await validConnActivate.json();
+    assert.strictEqual(validConnActivateJson.code, 'EA_HEARTBEAT_REQUIRED');
+    assert.strictEqual(state.mt5_accounts.find((a) => a.id === childAccId)?.connection_status, 'disconnected');
+
+    const eaHeartbeatActivate = await fetch(`${baseUrl}/api/v1/bridge/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Terminal-Token': 'ts_test_child_token',
+      },
+      body: JSON.stringify({
+        accountId: childAccId,
+        accountNumber: '6100001',
+        brokerName: 'XM',
+        brokerServer: 'xmglobal_mt5 2',
+        accountType: 'demo',
+        balance: 10000,
+        equity: 10000,
+        margin: 0,
+        freeMargin: 10000,
+        pingMs: 14,
+        autoTradingEnabled: true,
+      }),
+    });
+    assert.strictEqual(eaHeartbeatActivate.status, 200);
     assert.strictEqual(state.mt5_accounts.find((a) => a.id === childAccId)?.connection_status, 'connected');
-    assert.ok(state.bridge_sync_logs.some((l) => l.event_type === 'TERMINAL_ACTIVATED'));
 
     const validConnSuspend = await fetch(`${baseUrl}/api/v1/bridge/accounts/${childAccId}/connection`, {
       method: 'POST',
@@ -759,7 +784,7 @@ async function runTests() {
     assert.strictEqual(state.mt5_accounts.find((a) => a.id === childAccId)?.connection_status, 'disconnected');
     assert.strictEqual(state.mt5_accounts.find((a) => a.id === childAccId)?.ping_ms, 0);
     assert.ok(state.bridge_sync_logs.some((l) => l.event_type === 'TERMINAL_SUSPENDED'));
-    console.log('[PASS] 4. Demo-Only & active-owner checks enforced across register and connection endpoints.');
+    console.log('[PASS] 4. Demo-Only, EA heartbeat activation, & active-owner checks enforced across register and connection endpoints.');
 
     // -----------------------------------------------------------------------
     // Static Security Regression & Migration 06 Checks

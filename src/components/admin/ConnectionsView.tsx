@@ -514,9 +514,9 @@ export const ConnectionsView: React.FC = () => {
                               action: 'reconnect'
                             });
                           }}
-                          className="rounded px-2.5 py-1 text-[11px] font-medium border border-emerald-900/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50 transition-colors"
+                          className="rounded px-2.5 py-1 text-[11px] font-medium border border-cyan-900/60 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-900/50 transition-colors"
                         >
-                          Reconnect
+                          {isCloudMode ? 'Await EA Heartbeat' : 'Reconnect'}
                         </button>
                       )}
                     </td>
@@ -549,19 +549,33 @@ export const ConnectionsView: React.FC = () => {
               });
             } else {
               setConnectionFeedback({
-                type: 'error',
+                type: isCloudMode && confirmData.action === 'reconnect' ? 'success' : 'error',
                 message: res.message || `Failed to ${confirmData.action} terminal #${acc.accountNumber}.`,
               });
             }
           }
         }}
-        title={confirmData.action === 'disconnect' ? 'Disconnect Terminal' : 'Reconnect Terminal'}
+        title={
+          confirmData.action === 'disconnect'
+            ? 'Disconnect Terminal'
+            : isCloudMode
+            ? 'Refresh EA Connection Status'
+            : 'Reconnect Terminal'
+        }
         description={
           confirmData.action === 'disconnect'
             ? `Are you sure you want to disconnect terminal #${confirmData.account?.accountNumber}? Trade copying will be paused until reconnected.`
+            : isCloudMode
+            ? `Cloud terminals transition to Connected automatically once the MT5 EA sends an authenticated heartbeat for #${confirmData.account?.accountNumber}. Refresh live bridge status now?`
             : `Are you sure you want to re-establish connection for terminal #${confirmData.account?.accountNumber}?`
         }
-        confirmLabel={confirmData.action === 'disconnect' ? 'Disconnect Terminal' : 'Reconnect Terminal'}
+        confirmLabel={
+          confirmData.action === 'disconnect'
+            ? 'Disconnect Terminal'
+            : isCloudMode
+            ? 'Refresh Bridge Status'
+            : 'Reconnect Terminal'
+        }
         variant={confirmData.action === 'disconnect' ? 'danger' : 'primary'}
       />
 

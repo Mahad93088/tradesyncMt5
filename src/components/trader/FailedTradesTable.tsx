@@ -13,14 +13,16 @@ function formatTimestamp(ts?: string | null): string {
 export const FailedTradesTable: React.FC = () => {
   const { currentUser, tradeMappings, mt5Accounts } = useApp();
 
-  const childAccount = mt5Accounts.find(
-    (a) => a.userId === currentUser.id && a.accountRole === 'child'
+  const childAccountIds = new Set(
+    mt5Accounts
+      .filter((a) => a.userId === currentUser.id && a.accountRole === 'child')
+      .map((a) => a.id)
   );
 
-  // Filter failed or rejected trade mappings for this trader
+  // Filter failed or rejected trade mappings across all child accounts for this trader
   const failedMappings = tradeMappings.filter(
     (m) =>
-      (m.traderId === currentUser.id || (childAccount && m.childAccountId === childAccount.id)) &&
+      (m.traderId === currentUser.id || childAccountIds.has(m.childAccountId)) &&
       m.status !== 'EXECUTED' &&
       m.status !== 'CLOSED' &&
       m.status !== 'PENDING'

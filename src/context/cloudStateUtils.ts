@@ -36,6 +36,7 @@ export function mapServerAccountToMT5Account(acc: any): MT5Account {
 }
 
 export function mapDbTradeToTrade(t: any): Trade {
+  const isRealized = t.is_realized !== undefined ? Boolean(t.is_realized) : t.profit != null;
   return {
     id: t.id,
     ticket: String(t.ticket),
@@ -43,16 +44,24 @@ export function mapDbTradeToTrade(t: any): Trade {
     symbol: t.symbol,
     type: t.type,
     lots: Number(t.volume) || 0,
+    requestedVolume: t.requested_volume != null ? Number(t.requested_volume) : undefined,
     openPrice: Number(t.open_price) || 0,
     closePrice: t.close_price != null ? Number(t.close_price) : undefined,
     sl: t.sl != null ? Number(t.sl) : undefined,
     tp: t.tp != null ? Number(t.tp) : undefined,
     currentPrice: Number(t.close_price ?? t.open_price) || 0,
-    profit: Number(t.profit) || 0,
+    profit: t.profit != null ? Number(t.profit) : 0,
     openTime: t.open_time || t.created_at || new Date().toISOString(),
     closeTime: t.close_time || undefined,
     status: t.status || 'OPEN',
     comment: t.notes || undefined,
+    parentTicket: t.parent_ticket != null ? String(t.parent_ticket) : undefined,
+    executionStatus: t.execution_status || undefined,
+    rejectionReason: t.rejection_reason || undefined,
+    isRealized,
+    commission: t.commission != null ? Number(t.commission) : undefined,
+    swap: t.swap != null ? Number(t.swap) : undefined,
+    pips: t.pips != null ? Number(t.pips) : undefined,
     isMappingFallback: false,
   };
 }
@@ -117,7 +126,9 @@ export function mapAssignmentsToLinks(
       return accMatch && (m.status === 'EXECUTED' || m.status === 'CLOSED');
     }).length;
 
-    const childRealTrades = childAccId ? realTrades.filter((t) => t.accountId === childAccId) : [];
+    const childRealTrades = childAccId
+      ? realTrades.filter((t) => t.accountId === childAccId && t.isRealized !== false)
+      : [];
     const totalProfitAvailable = childRealTrades.length > 0;
     const totalProfitUSD = totalProfitAvailable
       ? Number(childRealTrades.reduce((sum, t) => sum + (Number(t.profit) || 0), 0).toFixed(2))
@@ -144,15 +155,17 @@ export function mapAssignmentsToLinks(
           : lotMode === 'risk_percent'
           ? 'risk_percent'
           : 'multiplier',
-        fixedLot: Number(a.fixed_lot || 0.1),
-        multiplier: Number(a.lot_multiplier || 1.0),
-        riskPercent: 1.0,
-        maxLotCap: 50,
-        minLotClamp: 0.01,
-        maxDrawdownProtectionPercent: 20,
-        copyPendingOrders: true,
-        syncSlTp: true,
-        slippageMaxPips: 30,
+        fixedLot: Number(a.fixed_lot ?? 0.1),
+        multiplier: Number(a.lot_multiplier ?? 1.0),
+        riskPercent: Number(a.risk_percent ?? 1.0),
+        maxLotCap: Number(a.max_lot_cap ?? 50),
+        minLotClamp: Number(a.min_lot_clamp ?? 0.01),
+        maxDrawdownProtectionPercent: Number(a.max_drawdown_percent ?? 20),
+        copyPendingOrders: a.copy_pending_orders !== undefined ? Boolean(a.copy_pending_orders) : true,
+        syncSlTp: a.sync_sl_tp !== undefined ? Boolean(a.sync_sl_tp) : true,
+        slippageMaxPips: Number(a.slippage_max_pips ?? 30),
+        symbolPrefix: a.symbol_prefix ? String(a.symbol_prefix) : '',
+        symbolSuffix: a.symbol_suffix ? String(a.symbol_suffix) : '',
       },
       linkedAt: a.assigned_at || new Date().toISOString(),
       totalTradesCopied: copiedCount,
@@ -161,6 +174,132 @@ export function mapAssignmentsToLinks(
       lastSyncAt: a.assigned_at || new Date().toISOString(),
     };
   });
+}
+
+export interface ReportingSummary {
+  totalBalance: number;
+  totalEquity: number;
+  totalFreeMargin: number;
+  openTradesCount: number;
+  closedTradesCount: number;
+  realizedClosedCount: number;
+  realizedPnlAvailable: boolean;
+  realizedPnlUSD: number;
+  floatingPnlAvailable: boolean;
+  floatingPnlUSD: number;
+  winRatePercent: number | null;
+  profitFactor: number | null;
+  dailyRealizedUSD: number | null;
+  weeklyRealizedUSD: number | null;
+  monthlyRealizedUSD: number | null;
+  avgCopyLatencyMs: number | null;
+  executedCopiesCount: number;
+  failedCopiesCount: number;
+}
+
+export function computeReportingSummary(params: {
+  trades: Trade[];
+  mappings: TradeMapping[];
+  accounts: MT5Account[];
+  isCloudMode: boolean;
+  nowMs?: number;
+}): ReportingSummary {
+  const { trades, mappings, accounts, isCloudMode } = params;
+  const now = params.nowMs ?? Date.now();
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  const sevenDaysMs = 7 * oneDayMs;
+  const thirtyDaysMs = 30 * oneDayMs;
+
+  const totalBalance = Number(accounts.reduce((s, a) => s + (Number(a.balance) || 0), 0).toFixed(2));
+  const totalEquity = Number(accounts.reduce((s, a) => s + (Number(a.equity) || 0), 0).toFixed(2));
+  const totalFreeMargin = Number(accounts.reduce((s, a) => s + (Number(a.freeMargin) || 0), 0).toFixed(2));
+
+  const realTrades = trades.filter((t) => !t.isMappingFallback);
+  const openTrades = realTrades.filter((t) => t.status === 'OPEN' || t.status === 'PENDING');
+  const closedTrades = realTrades.filter((t) => t.status === 'CLOSED');
+  const realizedClosedTrades = closedTrades.filter((t) => !isCloudMode || t.isRealized !== false);
+
+  const realizedPnlAvailable = realizedClosedTrades.length > 0;
+  const realizedPnlUSD = realizedPnlAvailable
+    ? Number(realizedClosedTrades.reduce((s, t) => s + (Number(t.profit) || 0), 0).toFixed(2))
+    : 0;
+
+  const realizedOpenTrades = openTrades.filter((t) => !isCloudMode || t.isRealized === true);
+  const floatingPnlAvailable = realizedOpenTrades.length > 0;
+  const floatingPnlUSD = floatingPnlAvailable
+    ? Number(realizedOpenTrades.reduce((s, t) => s + (Number(t.profit) || 0), 0).toFixed(2))
+    : 0;
+
+  let winRatePercent: number | null = null;
+  let profitFactor: number | null = null;
+  let dailyRealizedUSD: number | null = null;
+  let weeklyRealizedUSD: number | null = null;
+  let monthlyRealizedUSD: number | null = null;
+
+  if (realizedClosedTrades.length > 0) {
+    const wins = realizedClosedTrades.filter((t) => Number(t.profit) > 0);
+    const losses = realizedClosedTrades.filter((t) => Number(t.profit) < 0);
+    winRatePercent = Number(((wins.length / realizedClosedTrades.length) * 100).toFixed(1));
+
+    const grossProfit = wins.reduce((s, t) => s + Number(t.profit), 0);
+    const grossLoss = Math.abs(losses.reduce((s, t) => s + Number(t.profit), 0));
+    if (grossLoss > 0) {
+      profitFactor = Number((grossProfit / grossLoss).toFixed(2));
+    } else if (grossProfit > 0) {
+      profitFactor = Number(grossProfit.toFixed(2));
+    } else {
+      profitFactor = 0;
+    }
+
+    let daily = 0;
+    let weekly = 0;
+    let monthly = 0;
+    for (const t of realizedClosedTrades) {
+      const ts = Date.parse(t.closeTime || t.openTime || '');
+      if (!Number.isFinite(ts)) continue;
+      const age = now - ts;
+      const val = Number(t.profit) || 0;
+      if (age <= oneDayMs) daily += val;
+      if (age <= sevenDaysMs) weekly += val;
+      if (age <= thirtyDaysMs) monthly += val;
+    }
+    dailyRealizedUSD = Number(daily.toFixed(2));
+    weeklyRealizedUSD = Number(weekly.toFixed(2));
+    monthlyRealizedUSD = Number(monthly.toFixed(2));
+  }
+
+  const executedMappings = mappings.filter((m) => m.status === 'EXECUTED' || m.status === 'CLOSED');
+  const failedMappings = mappings.filter((m) =>
+    ['FAILED', 'REJECTED_MARGIN', 'REJECTED_OFF_QUOTES', 'SLIPPAGE_EXCEEDED', 'SKIPPED_LOT_LIMIT'].includes(m.status)
+  );
+  const measuredLatencies = executedMappings
+    .map((m) => Number(m.latencyMs))
+    .filter((ms) => Number.isFinite(ms) && ms > 0);
+  const avgCopyLatencyMs =
+    measuredLatencies.length > 0
+      ? Math.round(measuredLatencies.reduce((s, v) => s + v, 0) / measuredLatencies.length)
+      : null;
+
+  return {
+    totalBalance,
+    totalEquity,
+    totalFreeMargin,
+    openTradesCount: openTrades.length,
+    closedTradesCount: closedTrades.length,
+    realizedClosedCount: realizedClosedTrades.length,
+    realizedPnlAvailable,
+    realizedPnlUSD,
+    floatingPnlAvailable,
+    floatingPnlUSD,
+    winRatePercent,
+    profitFactor,
+    dailyRealizedUSD,
+    weeklyRealizedUSD,
+    monthlyRealizedUSD,
+    avgCopyLatencyMs,
+    executedCopiesCount: executedMappings.length,
+    failedCopiesCount: failedMappings.length,
+  };
 }
 
 export function buildCloudAuditLogs(logs: SyncLog[]): AuditLog[] {

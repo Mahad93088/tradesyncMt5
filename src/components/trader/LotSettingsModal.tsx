@@ -21,12 +21,14 @@ const DEFAULT_SETTINGS: LotSettings = {
   fixedLot: 0.1,
   multiplier: 0.5,
   riskPercent: 1.5,
-  maxLotCap: 0.5,
+  maxLotCap: 50,
   minLotClamp: 0.01,
-  maxDrawdownProtectionPercent: 10.0,
+  maxDrawdownProtectionPercent: 20.0,
   copyPendingOrders: true,
   syncSlTp: true,
-  slippageMaxPips: 3.0
+  slippageMaxPips: 30.0,
+  symbolPrefix: '',
+  symbolSuffix: '',
 };
 
 export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
@@ -53,6 +55,8 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
   const [syncSlTp, setSyncSlTp] = useState<boolean>(initialSettings.syncSlTp);
   const [copyPending, setCopyPending] = useState<boolean>(initialSettings.copyPendingOrders);
   const [slippagePips, setSlippagePips] = useState<number>(initialSettings.slippageMaxPips);
+  const [symbolPrefix, setSymbolPrefix] = useState<string>(initialSettings.symbolPrefix || '');
+  const [symbolSuffix, setSymbolSuffix] = useState<string>(initialSettings.symbolSuffix || '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -70,6 +74,8 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
     setSyncSlTp(s.syncSlTp);
     setCopyPending(s.copyPendingOrders);
     setSlippagePips(s.slippageMaxPips);
+    setSymbolPrefix(s.symbolPrefix || '');
+    setSymbolSuffix(s.symbolSuffix || '');
     setSaveError(null);
   }, [isOpen, linkId, link]);
 
@@ -108,7 +114,9 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
       maxDrawdownProtectionPercent: maxDrawdown,
       copyPendingOrders: copyPending,
       syncSlTp,
-      slippageMaxPips: slippagePips
+      slippageMaxPips: slippagePips,
+      symbolPrefix: symbolPrefix.trim(),
+      symbolSuffix: symbolSuffix.trim(),
     });
     setSaving(false);
     if (res && !res.success) {
@@ -152,7 +160,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
             <div className="rounded-lg border border-sky-900/50 bg-sky-950/30 p-3 text-[11px] text-sky-200 flex items-start gap-2">
               <Info className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
               <span>
-                <strong>Supabase Persistence:</strong> Copy Mode (<code>parent_lot</code>, <code>multiplier</code>, <code>fixed</code>, <code>equity_ratio</code>, <code>risk_percent</code>), Multiplier Ratio, and Fixed Lot persist in <code>mentor_assignments</code>. Safety clamps below apply locally in-session pending schema extension.
+                <strong>Supabase Persistence:</strong> All 12 sizing, lot-clamp, drawdown protection, pending-order, SL/TP sync, slippage guard, and symbol prefix/suffix rules persist in <code>mentor_assignments</code> and are enforced server-side.
               </span>
             </div>
           )}
@@ -340,13 +348,14 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
               Safety Clamps & Execution Thresholds
             </span>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">Max Lot Cap</label>
                 <input
                   type="number"
                   step="0.1"
                   min="0.01"
+                  max="1000"
                   value={maxLotCap}
                   onChange={(e) => setMaxLotCap(parseFloat(e.target.value) || 0.5)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
@@ -360,11 +369,12 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                   type="number"
                   step="0.01"
                   min="0.01"
+                  max="100"
                   value={minLotClamp}
                   onChange={(e) => setMinLotClamp(parseFloat(e.target.value) || 0.01)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
                 />
-                <span className="text-[10px] text-slate-500">Broker minimum</span>
+                <span className="text-[10px] text-slate-500">Reject if below min</span>
               </div>
 
               <div>
@@ -373,12 +383,51 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                   type="number"
                   step="0.5"
                   min="0.5"
-                  max="10.0"
+                  max="500"
                   value={slippagePips}
-                  onChange={(e) => setSlippagePips(parseFloat(e.target.value) || 3.0)}
+                  onChange={(e) => setSlippagePips(parseFloat(e.target.value) || 30)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
                 />
                 <span className="text-[10px] text-slate-500">Auto-reject threshold</span>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Max Drawdown (%)</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="100"
+                  value={maxDrawdown}
+                  onChange={(e) => setMaxDrawdown(parseFloat(e.target.value) || 20)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
+                />
+                <span className="text-[10px] text-slate-500">Halt new trades guard</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Symbol Prefix (Optional)</label>
+                <input
+                  type="text"
+                  maxLength={12}
+                  placeholder="e.g. FX."
+                  value={symbolPrefix}
+                  onChange={(e) => setSymbolPrefix(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Symbol Suffix (Optional)</label>
+                <input
+                  type="text"
+                  maxLength={12}
+                  placeholder="e.g. .m or _raw"
+                  value={symbolSuffix}
+                  onChange={(e) => setSymbolSuffix(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
+                />
               </div>
             </div>
           </div>
@@ -413,7 +462,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
           </div>
 
           {/* Checkbox Toggles */}
-          <div className="flex items-center gap-6 pt-1">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6 pt-1">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -422,6 +471,15 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                 className="rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0"
               />
               <span className="text-slate-300">Synchronize Stop Loss & Take Profit modifications</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={copyPending}
+                onChange={(e) => setCopyPending(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0"
+              />
+              <span className="text-slate-300">Copy Pending Orders</span>
             </label>
           </div>
 

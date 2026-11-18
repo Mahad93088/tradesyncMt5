@@ -44,10 +44,10 @@ export function formatLinkProfitDisplay(
 }
 
 export function formatTradeProfitDisplay(
-  trade: Pick<Trade, 'profit' | 'isMappingFallback'>,
+  trade: Pick<Trade, 'profit' | 'isMappingFallback' | 'isRealized'>,
   isCloudMode: boolean
 ): { text: string; available: boolean; isPositive: boolean } {
-  if (isCloudMode && trade.isMappingFallback) {
+  if (isCloudMode && (trade.isMappingFallback || trade.isRealized === false)) {
     return {
       text: 'Awaiting EA sync',
       available: false,

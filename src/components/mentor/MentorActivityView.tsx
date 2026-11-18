@@ -181,9 +181,12 @@ export const MentorActivityView: React.FC = () => {
           </div>
           <div className="flex items-baseline gap-2">
             <span className="font-mono text-2xl font-bold text-slate-100">
-              {myMappings.length > 0
+              {executedOrClosed.filter((m) => m.latencyMs > 0).length > 0
                 ? `${Math.round(
-                    myMappings.reduce((acc, m) => acc + m.latencyMs, 0) / myMappings.length
+                    executedOrClosed
+                      .filter((m) => m.latencyMs > 0)
+                      .reduce((acc, m) => acc + m.latencyMs, 0) /
+                      executedOrClosed.filter((m) => m.latencyMs > 0).length
                   )}ms`
                 : '--'}
             </span>

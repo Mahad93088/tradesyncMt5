@@ -18,19 +18,29 @@ export const CopiedTradesTable: React.FC = () => {
 
   const [filterType, setFilterType] = useState<'all' | 'open' | 'closed'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedChildId, setSelectedChildId] = useState<string>('all');
 
-  // Find child account
-  const childAccount = mt5Accounts.find(
+  const childAccounts = mt5Accounts.filter(
     (a) => a.userId === currentUser.id && a.accountRole === 'child'
   );
+  const childAccountIds = new Set(childAccounts.map((a) => a.id));
 
-  const childTrades = trades.filter((t) => childAccount && t.accountId === childAccount.id);
+  const childTrades = trades.filter((t) => {
+    const matchesOwner = childAccountIds.has(t.accountId);
+    if (!matchesOwner) return false;
+    return selectedChildId === 'all' ? true : t.accountId === selectedChildId;
+  });
 
-  const traderMappings = tradeMappings.filter(
-    (m) => m.traderId === currentUser.id || (childAccount && m.childAccountId === childAccount.id)
-  );
+  const traderMappings = tradeMappings.filter((m) => {
+    const matchesOwner = m.traderId === currentUser.id || childAccountIds.has(m.childAccountId);
+    if (!matchesOwner) return false;
+    return selectedChildId === 'all' ? true : m.childAccountId === selectedChildId;
+  });
 
-  const useCloudMappingsView = isCloudMode || (childTrades.length === 0 && traderMappings.length > 0);
+  const realDbTrades = childTrades.filter((t) => !t.isMappingFallback);
+  const useCloudMappingsView =
+    (isCloudMode && realDbTrades.length === 0 && traderMappings.length > 0) ||
+    (!isCloudMode && childTrades.length === 0 && traderMappings.length > 0);
 
   const filteredTrades = childTrades.filter((t) => {
     const matchesSearch =
