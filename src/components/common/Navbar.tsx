@@ -88,6 +88,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     'copier-monitoring': 'Trade Copier Monitoring',
     relationships: 'Trade Copier Monitoring',
     'audit-logs': 'System Audit Logs',
+    'global-logs': 'Global Logs',
     'trade-stream': 'System Audit Logs',
     notifications: 'Notifications & Alerts',
     'platform-settings': 'Platform Settings',

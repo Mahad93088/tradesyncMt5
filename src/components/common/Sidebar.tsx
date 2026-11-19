@@ -221,6 +221,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <span className="truncate">System Audit Logs</span>
                   </button>
                   <button
+                    onClick={() => handleNavClick('global-logs')}
+                    className={adminNavClass(currentTab === 'global-logs')}
+                  >
+                    <ListOrdered className="h-4 w-4 shrink-0" />
+                    <span className="truncate">Global Logs</span>
+                  </button>
+                  <button
                     onClick={() => handleNavClick('notifications')}
                     className={adminNavClass(currentTab === 'notifications')}
                   >

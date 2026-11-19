@@ -8,10 +8,18 @@ import {
   AdminEmptyState,
 } from './adminUi';
 
-export const GlobalLogsView: React.FC = () => {
+interface GlobalLogsViewProps {
+  initialSubTab?: 'audit' | 'mappings' | 'engine';
+  title?: string;
+}
+
+export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
+  initialSubTab = 'audit',
+  title = 'System Audit Logs',
+}) => {
   const { tradeMappings, syncLogs, auditLogs, users } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<'audit' | 'mappings' | 'engine'>('audit');
+  const [activeSubTab, setActiveSubTab] = useState<'audit' | 'mappings' | 'engine'>(initialSubTab);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [dateFilter, setDateFilter] = useState<string>('all');
@@ -110,7 +118,7 @@ export const GlobalLogsView: React.FC = () => {
   return (
     <div className="space-y-6">
       <AdminPageHeader
-        title="System Audit Logs"
+        title={title}
         meta={`${auditLogs.length} Audit · ${syncLogs.length} Sync Events`}
         subtitle="Structured record of admin actions, account registrations & suspensions, bridge errors, and trade ticket mappings."
         actions={

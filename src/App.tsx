@@ -62,6 +62,7 @@ const ADMIN_ONLY_TABS = new Set([
   'copier-monitoring',
   'relationships',
   'audit-logs',
+  'global-logs',
   'trade-stream',
   'platform-settings',
   'admin-profile'
@@ -184,7 +185,10 @@ const AppContent: React.FC = () => {
                   <TradeCopierMonitoringView />
                 )}
                 {(currentTab === 'audit-logs' || currentTab === 'trade-stream') && (
-                  <GlobalLogsView />
+                  <GlobalLogsView key="audit-logs" initialSubTab="audit" title="System Audit Logs" />
+                )}
+                {currentTab === 'global-logs' && (
+                  <GlobalLogsView key="global-logs" initialSubTab="engine" title="Global Logs" />
                 )}
                 {currentTab === 'notifications' && (
                   <AdminNotificationsView onNavigateTab={(tab) => setCurrentTab(tab)} />

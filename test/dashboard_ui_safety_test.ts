@@ -112,7 +112,7 @@ function runTests() {
   }
   console.log(`[PASS] 6. Scanned ${files.length} component files: zero hardcoded legacy secrets, FastAPI mock copy, mock invite codes, or window dialogs.`);
 
-  // 7. Static check: All 13 Super Admin navigation routes exist in Sidebar.tsx and App.tsx
+  // 7. Static check: All Super Admin navigation routes exist in Sidebar.tsx and App.tsx
   const requiredAdminTabs = [
     'overview',
     'mentors',
@@ -124,6 +124,7 @@ function runTests() {
     'system-health',
     'copier-monitoring',
     'audit-logs',
+    'global-logs',
     'notifications',
     'platform-settings',
     'admin-profile',
@@ -149,7 +150,7 @@ function runTests() {
     true,
     'Navbar.tsx must render "TradeSync MT5 — Super Admin" title for admin role'
   );
-  console.log('[PASS] 7. Verified all 13 Super Admin routes and title in Sidebar.tsx, Navbar.tsx, and App.tsx.');
+  console.log(`[PASS] 7. Verified all ${requiredAdminTabs.length} Super Admin routes and title in Sidebar.tsx, Navbar.tsx, and App.tsx.`);
 
   // 8. Static check: Admin components never list or embed plaintext terminal tokens outside rotation modal
   const mt5ViewContent = fs.readFileSync(path.resolve(process.cwd(), 'src/components/admin/MT5AccountsManagementView.tsx'), 'utf8');
