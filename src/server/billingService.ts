@@ -45,9 +45,55 @@ export function isMissingRelationError(err: any): boolean {
   );
 }
 
-export async function writeAuditLog(dbClient: SupabaseClient | null | undefined, entry: AuditLogInput): Promise<void> {
-  if (!dbClient) return;
+export interface AuditLogWriteResult {
+  persisted: boolean;
+  error?: string;
+  schemaMissing?: boolean;
+}
+
+const SENSITIVE_KEY_PATTERN = /pass(word)?|secret|token|api_?key|authorization|hash|private_?key|service_?role/i;
+
+export function sanitizeAuditText(input: string): string {
+  return String(input || '')
+    .replace(/\b(ts_parent|ts_child|ts_live)_[A-Za-z0-9_-]{6,}\b/g, '$1_[REDACTED]')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/-]{8,}/gi, '$1 [REDACTED]')
+    .replace(/\b(sk_live|sk_test|whsec|rk_live|rk_test)_[A-Za-z0-9]{6,}\b/g, '$1_[REDACTED]');
+}
+
+export function sanitizeAuditMetadata(value: unknown, depth = 0): any {
+  if (depth > 4) return '[TRUNCATED]';
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return sanitizeAuditText(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, 25).map((item) => sanitizeAuditMetadata(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_KEY_PATTERN.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = sanitizeAuditMetadata(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  return String(value);
+}
+
+export async function writeAuditLog(
+  dbClient: SupabaseClient | null | undefined,
+  entry: AuditLogInput
+): Promise<AuditLogWriteResult> {
+  if (!dbClient || typeof (dbClient as any).from !== 'function') {
+    const msg = 'Audit log persistence skipped: service-role Supabase client unavailable.';
+    console.error(`[AuditLog] ${msg}`, { action: entry.action, targetType: entry.targetType });
+    return { persisted: false, error: msg };
+  }
   try {
+    const cleanDetails = sanitizeAuditText(entry.details);
+    const cleanMetadata = entry.metadata ? sanitizeAuditMetadata(entry.metadata) : {};
     const { error } = await dbClient.from('audit_logs').insert([
       {
         actor_id: entry.actorId || null,
@@ -56,17 +102,34 @@ export async function writeAuditLog(dbClient: SupabaseClient | null | undefined,
         target_type: entry.targetType,
         target_id: entry.targetId ? String(entry.targetId) : null,
         result: entry.result,
-        details: entry.details,
-        metadata: entry.metadata || {},
+        details: cleanDetails,
+        metadata: cleanMetadata,
       },
     ]);
-    if (error && !isMissingRelationError(error)) {
-      console.warn('[AuditLog] Failed to record audit entry:', error.message);
+    if (error) {
+      const schemaMissing = isMissingRelationError(error);
+      if (schemaMissing) {
+        console.warn('[AuditLog] public.audit_logs schema not provisioned:', error.message);
+      } else {
+        console.error('[AuditLog] Failed to record audit entry:', error.message, {
+          action: entry.action,
+          targetType: entry.targetType,
+          result: entry.result,
+        });
+      }
+      return { persisted: false, error: error.message, schemaMissing };
     }
+    return { persisted: true };
   } catch (err: any) {
-    if (!isMissingRelationError(err)) {
-      console.warn('[AuditLog] Unexpected audit log error:', err?.message || err);
+    const schemaMissing = isMissingRelationError(err);
+    const errMsg = err?.message || String(err);
+    if (!schemaMissing) {
+      console.error('[AuditLog] Unexpected audit log error:', errMsg, {
+        action: entry.action,
+        targetType: entry.targetType,
+      });
     }
+    return { persisted: false, error: errMsg, schemaMissing };
   }
 }
 

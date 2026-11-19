@@ -73,6 +73,21 @@ export interface CloudBridgeTelemetry {
   lastCheckedAt: string | null;
 }
 
+export interface CloudEndpointStatus {
+  ok: boolean;
+  statusCode: number | null;
+  error: string | null;
+  schemaMissing: boolean;
+}
+
+export interface CloudLogsStatus {
+  isLoading: boolean;
+  lastRefreshedAt: string | null;
+  audit: CloudEndpointStatus;
+  syncLogs: CloudEndpointStatus;
+  mappings: CloudEndpointStatus;
+}
+
 interface AppContextType {
   currentUser: User;
   setCurrentUser: (user: User) => void;
@@ -100,6 +115,8 @@ interface AppContextType {
   auditLogs: AuditLog[];
   systemHealth: SystemHealth;
   cloudBridgeTelemetry: CloudBridgeTelemetry;
+  cloudLogsStatus: CloudLogsStatus;
+  isCloudSyncLoading: boolean;
   notifications: PlatformNotification[];
   isCloudMode: boolean;
   refreshCloudData: () => Promise<void>;
@@ -154,7 +171,7 @@ interface AppContextType {
   ) => Promise<{ success: boolean; message?: string }>;
   disconnectMT5Account: (accountId: string) => Promise<{ success: boolean; message?: string }>;
   reconnectMT5Account: (accountId: string) => Promise<{ success: boolean; message?: string }>;
-  toggleAutoTrading: (accountId: string) => void;
+  toggleAutoTrading: (accountId: string) => Promise<{ success: boolean; message?: string }>;
 
   // Trader Link & Lot Actions
   updateLotSettings: (
@@ -172,12 +189,12 @@ interface AppContextType {
   emergencyCloseParentTicket: (parentTicket: number | string) => Promise<{ success: boolean; message: string }>;
 
   // Subscriptions
-  createSubscriptionPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void;
-  updateSubscriptionPlan: (planId: string, planData: Partial<SubscriptionPlan>) => void;
-  togglePlanStatus: (planId: string) => void;
-  renewOrChangeSubscription: (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => void;
-  cancelSubscription: (subscriptionId: string) => void;
-  toggleSubscriptionStatus: (subscriptionId: string) => void;
+  createSubscriptionPlan: (plan: Omit<SubscriptionPlan, 'id'>) => Promise<{ success: boolean; message?: string }>;
+  updateSubscriptionPlan: (planId: string, planData: Partial<SubscriptionPlan>) => Promise<{ success: boolean; message?: string }>;
+  togglePlanStatus: (planId: string) => Promise<{ success: boolean; message?: string }>;
+  renewOrChangeSubscription: (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => Promise<{ success: boolean; message?: string }>;
+  cancelSubscription: (subscriptionId: string) => Promise<{ success: boolean; message?: string }>;
+  toggleSubscriptionStatus: (subscriptionId: string) => Promise<{ success: boolean; message?: string }>;
 
   // Trade Copy Engine Simulation
   simulateParentOrder: (
@@ -201,7 +218,7 @@ interface AppContextType {
   // Audit and Notifications
   addAuditLog: (log: Omit<AuditLog, 'id' | 'timestamp'>) => void;
   markNotificationRead: (id: string) => void;
-  broadcastAnnouncement: (title: string, message: string, targetRole: 'all' | 'admin' | 'mentor' | 'trader') => void;
+  broadcastAnnouncement: (title: string, message: string, targetRole: 'all' | 'admin' | 'mentor' | 'trader') => Promise<{ success: boolean; message?: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -332,6 +349,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     averageCopyLatencyMs: 0,
     lastCheckedAt: null,
   });
+  const [cloudLogsStatus, setCloudLogsStatus] = useState<CloudLogsStatus>({
+    isLoading: false,
+    lastRefreshedAt: null,
+    audit: { ok: true, statusCode: null, error: null, schemaMissing: false },
+    syncLogs: { ok: true, statusCode: null, error: null, schemaMissing: false },
+    mappings: { ok: true, statusCode: null, error: null, schemaMissing: false },
+  });
 
   // Synchronize currentUser with authenticated Supabase user in Cloud Mode
   useEffect(() => {
@@ -397,11 +421,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let isMounted = true;
     let realtimeDebounce: ReturnType<typeof setTimeout> | null = null;
 
+    const parseResponseWithDiagnostics = async (
+      res: Response | null,
+      endpointLabel: string
+    ): Promise<{ json: any; status: CloudEndpointStatus }> => {
+      if (!res) {
+        return {
+          json: null,
+          status: {
+            ok: false,
+            statusCode: null,
+            error: `Network failure reaching ${endpointLabel}.`,
+            schemaMissing: false,
+          },
+        };
+      }
+      const json = await res.json().catch(() => null);
+      if (!res.ok || json?.success === false) {
+        return {
+          json,
+          status: {
+            ok: false,
+            statusCode: res.status,
+            error: json?.error || `HTTP ${res.status} loading ${endpointLabel}.`,
+            schemaMissing: Boolean(json?.schemaMissing),
+          },
+        };
+      }
+      return {
+        json,
+        status: {
+          ok: true,
+          statusCode: res.status,
+          error: null,
+          schemaMissing: Boolean(json?.schemaMissing),
+        },
+      };
+    };
+
     const syncCloudDashboard = async () => {
       try {
+        setCloudLogsStatus((prev) => ({ ...prev, isLoading: true }));
         const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
+        if (!sessionCheck.valid || !token) {
+          if (isMounted) {
+            setCloudLogsStatus((prev) => ({
+              ...prev,
+              isLoading: false,
+              audit: { ok: false, statusCode: 401, error: sessionCheck.error || 'Authentication session expired.', schemaMissing: false },
+              syncLogs: { ok: false, statusCode: 401, error: sessionCheck.error || 'Authentication session expired.', schemaMissing: false },
+              mappings: { ok: false, statusCode: 401, error: sessionCheck.error || 'Authentication session expired.', schemaMissing: false },
+            }));
+          }
+          return;
+        }
 
         const headers = { Authorization: `Bearer ${token}` };
 
@@ -416,28 +490,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           fetch(authUser.role === 'admin' ? '/api/admin/notifications' : '/api/v1/notifications', { headers }).catch(() => null),
         ]);
 
-        const healthJson = healthRes && healthRes.ok ? await healthRes.json().catch(() => null) : null;
-        const verifyJson = verifyRes && verifyRes.ok ? await verifyRes.json().catch(() => null) : null;
-        const mappingsJson = mappingsRes && mappingsRes.ok ? await mappingsRes.json().catch(() => null) : null;
-        const logsJson = logsRes && logsRes.ok ? await logsRes.json().catch(() => null) : null;
-        const tradesJson = tradesRes && tradesRes.ok ? await tradesRes.json().catch(() => null) : null;
-        const dirJson = dirRes && dirRes.ok ? await dirRes.json().catch(() => null) : null;
-        const plansJson = plansRes && plansRes.ok ? await plansRes.json().catch(() => null) : null;
-        const notifJson = notifRes && notifRes.ok ? await notifRes.json().catch(() => null) : null;
+        const [healthJson, verifyJson, mappingsParsed, logsParsed, tradesJson, dirJson, plansJson, notifJson] = await Promise.all([
+          healthRes && healthRes.ok ? healthRes.json().catch(() => null) : Promise.resolve(null),
+          verifyRes && verifyRes.ok ? verifyRes.json().catch(() => null) : Promise.resolve(null),
+          parseResponseWithDiagnostics(mappingsRes, '/api/v1/bridge/mappings'),
+          parseResponseWithDiagnostics(logsRes, authUser.role === 'admin' ? '/api/v1/bridge/logs' : '/api/v1/bridge/my-logs'),
+          tradesRes && tradesRes.ok ? tradesRes.json().catch(() => null) : Promise.resolve(null),
+          dirRes && dirRes.ok ? dirRes.json().catch(() => null) : Promise.resolve(null),
+          plansRes && plansRes.ok ? plansRes.json().catch(() => null) : Promise.resolve(null),
+          notifRes && notifRes.ok ? notifRes.json().catch(() => null) : Promise.resolve(null),
+        ]);
 
         if (!isMounted) return;
 
+        const mappingsJson = mappingsParsed.json;
+        const logsJson = logsParsed.json;
+
         const loadedMappings: TradeMapping[] =
-          mappingsJson?.success && Array.isArray(mappingsJson.mappings) ? mappingsJson.mappings : [];
+          mappingsParsed.status.ok && mappingsJson?.success && Array.isArray(mappingsJson.mappings)
+            ? mappingsJson.mappings
+            : [];
         const loadedLogs: SyncLog[] =
-          logsJson?.success && Array.isArray(logsJson.logs) ? logsJson.logs : [];
+          logsParsed.status.ok && logsJson?.success && Array.isArray(logsJson.logs)
+            ? logsJson.logs
+            : [];
         const dbTradesRaw: any[] =
           tradesJson?.success && Array.isArray(tradesJson.trades) ? tradesJson.trades : [];
 
         const combinedTrades = buildCloudTrades(dbTradesRaw, loadedMappings);
-        setTradeMappings(loadedMappings);
+        if (mappingsParsed.status.ok) {
+          setTradeMappings(loadedMappings);
+        }
         setTrades(combinedTrades);
-        setSyncLogs(loadedLogs);
+        if (logsParsed.status.ok) {
+          setSyncLogs(loadedLogs);
+        }
 
         if (plansJson?.success && Array.isArray(plansJson.plans)) {
           setSubscriptionPlans(plansJson.plans);
@@ -456,11 +543,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } else {
           setNotifications((prev) => {
             const readIds = new Set(prev.filter((n) => n.read).map((n) => n.id));
-            return buildCloudAuditLogs(loadedLogs).length >= 0
-              ? buildCloudNotifications(loadedLogs, authUser.role).map((n) =>
-                  readIds.has(n.id) ? { ...n, read: true } : n
-                )
-              : [];
+            return buildCloudNotifications(loadedLogs, authUser.role).map((n) =>
+              readIds.has(n.id) ? { ...n, read: true } : n
+            );
           });
         }
 
@@ -479,21 +564,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             fetch('/api/admin/platform-settings', { headers }).catch(() => null),
           ]);
 
-          const accJson = accRes && accRes.ok ? await accRes.json().catch(() => null) : null;
-          const statusJson = statusRes && statusRes.ok ? await statusRes.json().catch(() => null) : null;
-          const auditJson = auditRes && auditRes.ok ? await auditRes.json().catch(() => null) : null;
-          const subsJson = subsRes && subsRes.ok ? await subsRes.json().catch(() => null) : null;
-          const payJson = payRes && payRes.ok ? await payRes.json().catch(() => null) : null;
-          const invJson = invRes && invRes.ok ? await invRes.json().catch(() => null) : null;
-          const settingsJson = settingsRes && settingsRes.ok ? await settingsRes.json().catch(() => null) : null;
+          const [accJson, statusJson, auditParsed, subsJson, payJson, invJson, settingsJson] = await Promise.all([
+            accRes && accRes.ok ? accRes.json().catch(() => null) : Promise.resolve(null),
+            statusRes && statusRes.ok ? statusRes.json().catch(() => null) : Promise.resolve(null),
+            parseResponseWithDiagnostics(auditRes, '/api/admin/audit-logs'),
+            subsRes && subsRes.ok ? subsRes.json().catch(() => null) : Promise.resolve(null),
+            payRes && payRes.ok ? payRes.json().catch(() => null) : Promise.resolve(null),
+            invRes && invRes.ok ? invRes.json().catch(() => null) : Promise.resolve(null),
+            settingsRes && settingsRes.ok ? settingsRes.json().catch(() => null) : Promise.resolve(null),
+          ]);
 
           if (!isMounted) return;
 
-          if (auditJson?.success && Array.isArray(auditJson.logs) && auditJson.logs.length > 0) {
+          const auditJson = auditParsed.json;
+          if (auditParsed.status.ok && auditJson?.success && Array.isArray(auditJson.logs)) {
+            // Authoritative public.audit_logs rows only — never synthesize fake logs when empty
             setAuditLogs(auditJson.logs);
           } else {
-            setAuditLogs(buildCloudAuditLogs(loadedLogs));
+            setAuditLogs([]);
           }
+
+          setCloudLogsStatus({
+            isLoading: false,
+            lastRefreshedAt: new Date().toISOString(),
+            audit: auditParsed.status,
+            syncLogs: logsParsed.status,
+            mappings: mappingsParsed.status,
+          });
 
           if (subsJson?.success && Array.isArray(subsJson.subscriptions)) {
             setSubscriptions(subsJson.subscriptions);
@@ -575,7 +672,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }));
         } else {
           // Non-admin Cloud Mode user (mentor / trader): tenant-scoped endpoints only
-          setAuditLogs(buildCloudAuditLogs(loadedLogs));
+          setAuditLogs([]);
+          setCloudLogsStatus({
+            isLoading: false,
+            lastRefreshedAt: new Date().toISOString(),
+            audit: { ok: false, statusCode: 403, error: 'Super Admin role required for audit_logs.', schemaMissing: false },
+            syncLogs: logsParsed.status,
+            mappings: mappingsParsed.status,
+          });
           const [myRes, billRes, mpRes, grpRes] = await Promise.all([
             fetch('/api/v1/bridge/my-accounts', { headers }).catch(() => null),
             fetch('/api/v1/billing/me', { headers }).catch(() => null),
@@ -686,8 +790,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }));
           }
         }
-      } catch {
-        // Keep Cloud Mode free of mock fallbacks during transient polling errors
+      } catch (err: any) {
+        if (isMounted) {
+          setCloudLogsStatus((prev) => ({
+            ...prev,
+            isLoading: false,
+            audit: prev.audit.ok ? { ok: false, statusCode: null, error: err?.message || 'Cloud sync failure.', schemaMissing: false } : prev.audit,
+            syncLogs: prev.syncLogs.ok ? { ok: false, statusCode: null, error: err?.message || 'Cloud sync failure.', schemaMissing: false } : prev.syncLogs,
+            mappings: prev.mappings.ok ? { ok: false, statusCode: null, error: err?.message || 'Cloud sync failure.', schemaMissing: false } : prev.mappings,
+          }));
+        }
       }
     };
 
@@ -708,6 +820,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .on('postgres_changes', { event: '*', schema: 'public', table: 'trade_mappings' }, scheduleRealtimeRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'mentor_assignments' }, scheduleRealtimeRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bridge_sync_logs' }, scheduleRealtimeRefresh)
       .subscribe();
 
     return () => {
@@ -1733,32 +1847,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true };
   };
 
-  const toggleAutoTrading = (accountId: string) => {
-    let nextEnabled = true;
-    setMt5Accounts((prev) =>
-      prev.map((acc) => {
-        if (acc.id === accountId) {
-          nextEnabled = !acc.autoTradingEnabled;
-          return { ...acc, autoTradingEnabled: nextEnabled };
-        }
-        return acc;
-      })
-    );
+  const toggleAutoTrading = async (accountId: string): Promise<{ success: boolean; message?: string }> => {
+    const existing = mt5Accounts.find((acc) => acc.id === accountId);
+    const nextEnabled = existing ? !existing.autoTradingEnabled : true;
 
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then((sessionCheck) => {
-        if (sessionCheck.valid && sessionCheck.session?.access_token) {
-          fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/auto-trading`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${sessionCheck.session.access_token}`,
-            },
-            body: JSON.stringify({ enabled: nextEnabled }),
-          }).catch(() => {});
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          return { success: false, message: 'Session expired. Please sign in again.' };
         }
-      });
+        const res = await fetch(`/api/v1/bridge/accounts/${encodeURIComponent(accountId)}/auto-trading`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ enabled: nextEnabled }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update AutoTrading.` };
+        }
+        setMt5Accounts((prev) =>
+          prev.map((acc) => (acc.id === accountId ? { ...acc, autoTradingEnabled: nextEnabled } : acc))
+        );
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error updating AutoTrading.' };
+      }
     }
+
+    setMt5Accounts((prev) =>
+      prev.map((acc) => (acc.id === accountId ? { ...acc, autoTradingEnabled: nextEnabled } : acc))
+    );
+    return { success: true };
   };
 
   // Trader Link actions
@@ -2096,19 +2222,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Subscriptions
-  const createSubscriptionPlan = (plan: Omit<SubscriptionPlan, 'id'>) => {
+  const createSubscriptionPlan = async (plan: Omit<SubscriptionPlan, 'id'>): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch('/api/admin/subscription-plans', {
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/admin/subscription-plans', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify(plan),
-        }).catch(() => null);
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to create plan.` };
+        }
         await refreshCloudData();
-      });
-      return;
+        return { success: true, message: `Created subscription plan "${plan.name}" in Supabase.` };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error creating subscription plan.' };
+      }
     }
 
     const newPlan: SubscriptionPlan = {
@@ -2127,51 +2260,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: 'success',
       details: `Created plan "${newPlan.name}" ($${newPlan.price}/${newPlan.billingCycle}, cap ${newPlan.maxChildAccounts} child accounts).`
     });
+    return { success: true, message: `Created subscription plan "${newPlan.name}" in Demo Sandbox.` };
   };
 
-  const updateSubscriptionPlan = (planId: string, planData: Partial<SubscriptionPlan>) => {
-    setSubscriptionPlans((prev) =>
-      prev.map((p) => {
-        if (p.id === planId) {
-          return { ...p, ...planData };
-        }
-        return p;
-      })
-    );
+  const updateSubscriptionPlan = async (planId: string, planData: Partial<SubscriptionPlan>): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify(planData),
-        }).catch(() => null);
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update plan.` };
+        }
         await refreshCloudData();
-      });
+        return { success: true, message: `Updated subscription plan in Supabase.` };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error updating subscription plan.' };
+      }
     }
+
+    setSubscriptionPlans((prev) =>
+      prev.map((p) => (p.id === planId ? { ...p, ...planData } : p))
+    );
+    return { success: true };
   };
 
-  const togglePlanStatus = (planId: string) => {
+  const togglePlanStatus = async (planId: string): Promise<{ success: boolean; message?: string }> => {
     const target = subscriptionPlans.find((p) => p.id === planId);
-    if (!target) return;
+    if (!target) return { success: false, message: 'Subscription plan not found.' };
     const nextActive = target.isActive === false ? true : false;
-    setSubscriptionPlans((prev) =>
-      prev.map((p) => (p.id === planId ? { ...p, isActive: nextActive } : p))
-    );
+
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ isActive: nextActive }),
-        }).catch(() => null);
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update plan status.` };
+        }
         await refreshCloudData();
-      });
-      return;
+        return { success: true, message: `Plan "${target.name}" marked ${nextActive ? 'active' : 'inactive'} in Supabase.` };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error updating plan status.' };
+      }
     }
+
+    setSubscriptionPlans((prev) =>
+      prev.map((p) => (p.id === planId ? { ...p, isActive: nextActive } : p))
+    );
     addAuditLog({
       actorId: currentUser.id,
       actorName: currentUser.fullName,
@@ -2182,34 +2332,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: nextActive ? 'success' : 'warning',
       details: `${nextActive ? 'Activated' : 'Deactivated'} subscription plan "${target.name}".`
     });
+    return { success: true, message: `Plan "${target.name}" marked ${nextActive ? 'active' : 'inactive'} in Demo Sandbox.` };
   };
 
-  const renewOrChangeSubscription = (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => {
+  const renewOrChangeSubscription = async (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly'): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      const existingSub = subscriptions.find((s) => s.mentorId === mentorId || s.userId === mentorId);
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const existingSub = subscriptions.find((s) => s.mentorId === mentorId || s.userId === mentorId);
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        if (existingSub) {
-          await fetch(`/api/admin/subscriptions/${encodeURIComponent(existingSub.id)}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ planId, billingCycle, status: 'active', autoRenew: true }),
-          }).catch(() => null);
-        } else {
-          await fetch('/api/admin/subscriptions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ userId: mentorId, planId, billingCycle, status: 'active', autoRenew: true }),
-          }).catch(() => null);
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = existingSub
+          ? await fetch(`/api/admin/subscriptions/${encodeURIComponent(existingSub.id)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ planId, billingCycle, status: 'active', autoRenew: true }),
+            })
+          : await fetch('/api/admin/subscriptions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ userId: mentorId, planId, billingCycle, status: 'active', autoRenew: true }),
+            });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update subscription.` };
         }
         await refreshCloudData();
-      });
-      return;
+        return { success: true, message: 'Subscription updated in Supabase.' };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error updating subscription.' };
+      }
     }
 
     const plan = subscriptionPlans.find((p) => p.id === planId);
-    if (!plan) return;
+    if (!plan) return { success: false, message: 'Plan not found.' };
 
     const mentorUser = users.find((u) => u.id === mentorId);
     const daysToAdd = billingCycle === 'yearly' ? 365 : 30;
@@ -2279,40 +2436,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: 'success',
       details: `Renewed subscription for mentor ${mentorUser?.fullName || 'Mentor'} to plan ${plan.name} (${billingCycle}).`
     });
+    return { success: true };
   };
 
-  const cancelSubscription = (subscriptionId: string) => {
-    setSubscriptions((prev) =>
-      prev.map((s) => {
-        if (s.id === subscriptionId) {
-          return { ...s, status: 'cancelled', autoRenew: false };
-        }
-        return s;
-      })
-    );
-
+  const cancelSubscription = async (subscriptionId: string): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ status: 'cancelled', autoRenew: false }),
-        }).catch(() => null);
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to cancel subscription.` };
+        }
         await refreshCloudData();
-      });
-      return;
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error cancelling subscription.' };
+      }
     }
+
+    setSubscriptions((prev) =>
+      prev.map((s) => (s.id === subscriptionId ? { ...s, status: 'cancelled', autoRenew: false } : s))
+    );
 
     const targetSub = subscriptions.find((s) => s.id === subscriptionId);
     if (targetSub) {
       setMentorProfiles((prev) =>
-        prev.map((m) =>
-          m.userId === targetSub.mentorId
-            ? { ...m, subscriptionStatus: 'cancelled' }
-            : m
-        )
+        prev.map((m) => (m.userId === targetSub.mentorId ? { ...m, subscriptionStatus: 'cancelled' } : m))
       );
 
       addAuditLog({
@@ -2326,13 +2483,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         details: `Cancelled subscription for ${targetSub.mentorName}. Auto-renew halted.`
       });
     }
+    return { success: true };
   };
 
-  const toggleSubscriptionStatus = (subscriptionId: string) => {
+  const toggleSubscriptionStatus = async (subscriptionId: string): Promise<{ success: boolean; message?: string }> => {
     const targetSub = subscriptions.find((s) => s.id === subscriptionId);
-    if (!targetSub) return;
+    if (!targetSub) return { success: false, message: 'Subscription not found.' };
 
     const nextStatus = targetSub.status === 'suspended' ? 'active' : 'suspended';
+
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update subscription.` };
+        }
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error updating subscription.' };
+      }
+    }
+
     setSubscriptions((prev) =>
       prev.map((s) =>
         s.id === subscriptionId
@@ -2345,24 +2526,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
-    if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
-        const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ status: nextStatus }),
-        }).catch(() => null);
-        await refreshCloudData();
-      });
-      return;
-    }
-
     setMentorProfiles((prev) =>
-      prev.map((m) =>
-        m.userId === targetSub.mentorId ? { ...m, subscriptionStatus: nextStatus } : m
-      )
+      prev.map((m) => (m.userId === targetSub.mentorId ? { ...m, subscriptionStatus: nextStatus } : m))
     );
 
     addAuditLog({
@@ -2375,6 +2540,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: nextStatus === 'suspended' ? 'warning' : 'success',
       details: `${nextStatus === 'suspended' ? 'Suspended' : 'Reactivated'} subscription for ${targetSub.mentorName}.`
     });
+    return { success: true };
   };
 
   // Trade Copy Engine Simulation
@@ -2869,6 +3035,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addAuditLog = (logData: Omit<AuditLog, 'id' | 'timestamp'>) => {
+    if (isCloudMode) {
+      // Authoritative audit logs in Cloud Mode are persisted strictly via backend writeAuditLog()
+      return;
+    }
     const newEntry: AuditLog = {
       ...logData,
       id: `audit_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -2877,26 +3047,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuditLogs((prev) => [newEntry, ...prev]);
   };
 
-  const broadcastAnnouncement = (
+  const broadcastAnnouncement = async (
     title: string,
     message: string,
     targetRole: 'all' | 'admin' | 'mentor' | 'trader'
-  ) => {
+  ): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
-      ensureValidSession().then(async (sessionCheck) => {
+      try {
+        const sessionCheck = await ensureValidSession();
         const token = sessionCheck.session?.access_token;
-        if (!sessionCheck.valid || !token) return;
-        await fetch('/api/admin/notifications', {
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/admin/notifications', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({ title, message, targetRole, type: 'info' }),
-        }).catch(() => null);
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to publish broadcast.` };
+        }
         await refreshCloudData();
-      });
-      return;
+        return { success: true, message: `Broadcast "${title}" persisted and published to ${targetRole}.` };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error publishing broadcast.' };
+      }
     }
 
     const newNotif: PlatformNotification = {
@@ -2909,6 +3086,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       read: false
     };
     setNotifications((prev) => [newNotif, ...prev]);
+    return { success: true };
   };
 
   const seedDemoAccounts = () => {
@@ -2962,6 +3140,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         auditLogs,
         systemHealth,
         cloudBridgeTelemetry,
+        cloudLogsStatus,
+        isCloudSyncLoading: cloudLogsStatus.isLoading,
         notifications,
         isCloudMode,
         refreshCloudData,

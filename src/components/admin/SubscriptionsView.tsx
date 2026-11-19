@@ -86,22 +86,33 @@ export const SubscriptionsView: React.FC = () => {
     setShowAssignModal(false);
   };
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!confirmAction.sub) return;
     const sub = confirmAction.sub;
     if (confirmAction.action === 'cancel') {
-      cancelSubscription(sub.id);
-      setFeedback({ type: 'info', message: `Cancelled subscription for ${sub.mentorName}.` });
+      const res = await cancelSubscription(sub.id);
+      setFeedback(
+        res.success
+          ? { type: 'info', message: res.message || `Cancelled subscription for ${sub.mentorName}.` }
+          : { type: 'error', message: res.message || `Failed to cancel subscription for ${sub.mentorName}.` }
+      );
     } else if (confirmAction.action === 'suspend') {
-      toggleSubscriptionStatus(sub.id);
-      setFeedback({ type: 'info', message: `Suspended subscription for ${sub.mentorName}.` });
+      const res = await toggleSubscriptionStatus(sub.id);
+      setFeedback(
+        res.success
+          ? { type: 'info', message: res.message || `Suspended subscription for ${sub.mentorName}.` }
+          : { type: 'error', message: res.message || `Failed to suspend subscription for ${sub.mentorName}.` }
+      );
     } else {
-      if (sub.status === 'suspended') {
-        toggleSubscriptionStatus(sub.id);
-      } else {
-        renewOrChangeSubscription(sub.mentorId || sub.userId || '', sub.planId, sub.billingCycle);
-      }
-      setFeedback({ type: 'success', message: `Reactivated subscription for ${sub.mentorName}.` });
+      const res =
+        sub.status === 'suspended'
+          ? await toggleSubscriptionStatus(sub.id)
+          : await renewOrChangeSubscription(sub.mentorId || sub.userId || '', sub.planId, sub.billingCycle);
+      setFeedback(
+        res.success
+          ? { type: 'success', message: res.message || `Reactivated subscription for ${sub.mentorName}.` }
+          : { type: 'error', message: res.message || `Failed to reactivate subscription for ${sub.mentorName}.` }
+      );
     }
   };
 

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { OrderType, MappingExecutionStatus, TradeMapping, SyncLog } from '../types';
+import { isMissingRelationError, sanitizeAuditText } from './billingService.ts';
 
 export interface RegisteredTerminal {
   tokenHash: string;
@@ -14,6 +15,7 @@ export interface RegisteredTerminal {
   lastSeenAt: string;
   pingMs: number;
   status: 'connected' | 'disconnected';
+  previousConnectionStatus?: string;
   isDurableDb?: boolean;
 }
 
@@ -295,6 +297,7 @@ export class BridgeStore {
             lastSeenAt: nowIso,
             pingMs: typeof telemetryFields.ping_ms === 'number' ? telemetryFields.ping_ms : (Number(acc.ping_ms) || 12),
             status: 'connected',
+            previousConnectionStatus: acc.connection_status || 'disconnected',
             isDurableDb: true,
           };
 
@@ -315,8 +318,10 @@ export class BridgeStore {
     // 2. Ephemeral cache check (strictly when no Supabase client is passed in unit tests)
     const cached = this.terminalsByHash.get(hash);
     if (cached) {
+      const prevStatus = cached.status;
       cached.lastSeenAt = new Date().toISOString();
       cached.status = 'connected';
+      cached.previousConnectionStatus = prevStatus;
       return cached;
     }
 
@@ -377,6 +382,35 @@ export class BridgeStore {
             status: dbExisting.status,
             retryCount: Number(dbExisting.retry_count) || 0,
           };
+
+          if (params.action === 'OPEN') {
+            const { data: existingMap, error: mapFindErr } = await supabaseClient
+              .from('trade_mappings')
+              .select('id')
+              .eq('parent_trade_ticket', String(params.parentTicket))
+              .eq('child_account_id', params.childAccountId)
+              .maybeSingle();
+
+            if (!mapFindErr && !existingMap) {
+              const { error: repairErr } = await supabaseClient.from('trade_mappings').insert({
+                id: `map_${dbExisting.id}`,
+                parent_trade_ticket: String(params.parentTicket),
+                child_trade_ticket: dbExisting.child_ticket != null ? String(dbExisting.child_ticket) : null,
+                parent_account_id: params.parentAccountId,
+                child_account_id: params.childAccountId,
+                symbol: params.symbol,
+                order_type: params.orderType,
+                parent_lots: params.lots,
+                child_lots: params.lots,
+                status: 'PENDING',
+                retry_count: 0,
+              });
+              if (repairErr && repairErr.code !== '23505') {
+                throw new Error(`Failed to recover missing trade_mappings row: ${repairErr.message}`);
+              }
+            }
+          }
+
           this.instructions.set(mapped.instructionId, mapped);
           this.idempotencyIndex.set(params.idempotencyKey, mapped.instructionId);
           return { instruction: mapped, isDuplicate: true };
@@ -483,22 +517,84 @@ export class BridgeStore {
         }
 
         if (params.action === 'OPEN') {
-          const { error: mapErr } = await supabaseClient.from('trade_mappings').upsert({
-            id: `map_${instructionId}`,
-            parent_trade_ticket: String(params.parentTicket),
-            child_trade_ticket: null,
-            parent_account_id: params.parentAccountId,
-            child_account_id: params.childAccountId,
-            symbol: params.symbol,
-            order_type: params.orderType,
-            parent_lots: params.lots,
-            child_lots: params.lots,
-            status: 'PENDING',
-            retry_count: 0,
-          }, { onConflict: 'parent_trade_ticket,child_account_id' });
+          const parentTicketStr = String(params.parentTicket);
+          const { data: existingMap, error: mapLookupErr } = await supabaseClient
+            .from('trade_mappings')
+            .select('id')
+            .eq('parent_trade_ticket', parentTicketStr)
+            .eq('child_account_id', params.childAccountId)
+            .maybeSingle();
+
+          if (mapLookupErr) {
+            try {
+              const instTbl: any = supabaseClient.from('bridge_instructions');
+              if (typeof instTbl?.delete === 'function') {
+                await instTbl.delete().eq('id', instructionId);
+              }
+            } catch (_) {}
+            throw new Error(`Failed to verify existing trade mapping: ${mapLookupErr.message}`);
+          }
+
+          let mapErr: any = null;
+          if (existingMap?.id) {
+            const updRes = await supabaseClient
+              .from('trade_mappings')
+              .update({
+                parent_account_id: params.parentAccountId,
+                symbol: params.symbol,
+                order_type: params.orderType,
+                parent_lots: params.lots,
+                child_lots: params.lots,
+                status: 'PENDING',
+                retry_count: 0,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', existingMap.id);
+            mapErr = updRes.error;
+          } else {
+            const insMapRes = await supabaseClient.from('trade_mappings').insert({
+              id: `map_${instructionId}`,
+              parent_trade_ticket: parentTicketStr,
+              child_trade_ticket: null,
+              parent_account_id: params.parentAccountId,
+              child_account_id: params.childAccountId,
+              symbol: params.symbol,
+              order_type: params.orderType,
+              parent_lots: params.lots,
+              child_lots: params.lots,
+              status: 'PENDING',
+              retry_count: 0,
+            });
+            if (insMapRes.error?.code === '23505') {
+              const conflictUpd = await supabaseClient
+                .from('trade_mappings')
+                .update({
+                  parent_account_id: params.parentAccountId,
+                  symbol: params.symbol,
+                  order_type: params.orderType,
+                  parent_lots: params.lots,
+                  child_lots: params.lots,
+                  status: 'PENDING',
+                  retry_count: 0,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('parent_trade_ticket', parentTicketStr)
+                .eq('child_account_id', params.childAccountId);
+              mapErr = conflictUpd.error;
+            } else {
+              mapErr = insMapRes.error;
+            }
+          }
 
           if (mapErr) {
-            console.error('[BridgeStore] trade_mappings upsert error:', mapErr.message);
+            console.error('[BridgeStore] trade_mappings persistence error:', mapErr.message);
+            try {
+              const instTbl: any = supabaseClient.from('bridge_instructions');
+              if (typeof instTbl?.delete === 'function') {
+                await instTbl.delete().eq('id', instructionId);
+              }
+            } catch (_) {}
+            throw new Error(`Failed to persist trade mapping: ${mapErr.message}`);
           }
         }
       } catch (dbErr: any) {
@@ -902,7 +998,7 @@ export class BridgeStore {
           return { success: false, statusCode: 500, error: `Failed to persist instruction ACK: ${instUpdateErr.message}` };
         }
 
-        // Update trade_mappings
+        // Update trade_mappings (fail loudly if persistence fails)
         if (inst.action === 'OPEN') {
           const { error: mapUpdateErr } = await supabaseClient
             .from('trade_mappings')
@@ -918,6 +1014,11 @@ export class BridgeStore {
 
           if (mapUpdateErr) {
             console.error('[BridgeStore] Supabase OPEN trade_mappings update error:', mapUpdateErr.message);
+            return {
+              success: false,
+              statusCode: 500,
+              error: `Failed to persist OPEN trade_mapping execution outcome: ${mapUpdateErr.message}`,
+            };
           }
         } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
           const { error: closeMapErr } = await supabaseClient
@@ -931,6 +1032,11 @@ export class BridgeStore {
 
           if (closeMapErr) {
             console.error('[BridgeStore] Supabase CLOSE trade_mappings update error:', closeMapErr.message);
+            return {
+              success: false,
+              statusCode: 500,
+              error: `Failed to persist CLOSE trade_mapping state: ${closeMapErr.message}`,
+            };
           }
         } else if (inst.action === 'MODIFY') {
           const { error: modMapErr } = await supabaseClient
@@ -945,6 +1051,11 @@ export class BridgeStore {
 
           if (modMapErr) {
             console.error('[BridgeStore] Supabase MODIFY trade_mappings update error:', modMapErr.message);
+            return {
+              success: false,
+              statusCode: 500,
+              error: `Failed to persist MODIFY trade_mapping outcome: ${modMapErr.message}`,
+            };
           }
         }
 
@@ -1136,6 +1247,19 @@ export class BridgeStore {
 
       const nowIso = new Date().toISOString();
       if (inst.action === 'OPEN') {
+        let resolvedMappingId = `map_${inst.instructionId}`;
+        try {
+          const { data: matchedMap } = await supabaseClient
+            .from('trade_mappings')
+            .select('id')
+            .eq('parent_trade_ticket', String(inst.parentTicket))
+            .eq('child_account_id', inst.childAccountId)
+            .maybeSingle();
+          if (matchedMap?.id) {
+            resolvedMappingId = matchedMap.id;
+          }
+        } catch (_) {}
+
         const effectiveTicket = childTicketStr || `failed_${inst.instructionId}`;
         const isExecuted = ack.status === 'EXECUTED';
         await this.upsertTradeLifecycle(
@@ -1152,7 +1276,7 @@ export class BridgeStore {
             tp: inst.tp,
             status: isExecuted ? 'OPEN' : 'CANCELLED',
             openTime: nowIso,
-            mappingId: `map_${inst.instructionId}`,
+            mappingId: resolvedMappingId,
             parentTicket: String(inst.parentTicket),
             executionStatus: ack.status,
             rejectionReason: ack.brokerErrorMessage || undefined,
@@ -1350,24 +1474,40 @@ export class BridgeStore {
       : undefined;
   }
 
-  public async getTradeMappings(supabaseClient?: SupabaseClient): Promise<TradeMapping[]> {
+  public static sanitizeBigintTicket(ticket?: number | string | null): string | null {
+    if (ticket === null || ticket === undefined) return null;
+    const raw = String(ticket).trim();
+    if (!/^[1-9]\d{0,18}$/.test(raw)) return null;
+    try {
+      const n = BigInt(raw);
+      if (n <= 0n || n > 9223372036854775807n) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+
+  public async getTradeMappingsStrict(
+    supabaseClient?: SupabaseClient
+  ): Promise<{ rows: TradeMapping[]; error?: string; schemaMissing?: boolean }> {
     if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
         const { data: rows, error } = await supabaseClient
           .from('trade_mappings')
           .select('*')
           .order('open_time', { ascending: false })
-          .limit(100);
+          .limit(200);
 
         if (error) {
-          if (!error.message?.toLowerCase().includes('permission denied')) {
-            console.warn('[BridgeStore] Supabase getTradeMappings notice:', error.message);
+          const schemaMissing = isMissingRelationError(error);
+          if (!schemaMissing) {
+            console.error('[BridgeStore] Supabase getTradeMappingsStrict error:', error.message);
           }
-          return [];
+          return { rows: [], error: error.message, schemaMissing };
         }
 
         if (Array.isArray(rows)) {
-          if (rows.length === 0) return [];
+          if (rows.length === 0) return { rows: [] };
 
           // Hydrate mentorId (parent user_id) & traderId (child user_id) from mt5_accounts
           const accountOwnerMap = new Map<string, string>();
@@ -1386,72 +1526,91 @@ export class BridgeStore {
             // Non-fatal hydration fallback
           }
 
-          return rows.map((r) => ({
-            id: r.id,
-            parentTradeTicket: String(r.parent_trade_ticket),
-            childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
-            mentorId: accountOwnerMap.get(r.parent_account_id) || '',
-            traderId: accountOwnerMap.get(r.child_account_id) || '',
-            parentAccountId: r.parent_account_id,
-            childAccountId: r.child_account_id,
-            symbol: r.symbol,
-            orderType: r.order_type as OrderType,
-            parentLots: Number(r.parent_lots),
-            childLots: Number(r.child_lots),
-            openTime: r.open_time,
-            closeTime: r.close_time || undefined,
-            closePrice: r.close_price != null ? Number(r.close_price) : undefined,
-            latencyMs: Number(r.latency_ms) || 0,
-            status: r.status as MappingExecutionStatus,
-            errorMessage: r.error_message || undefined,
-            retryCount: Number(r.retry_count) || 0,
-            parentProfitUSD: r.parent_profit_usd != null ? Number(r.parent_profit_usd) : undefined,
-            childProfitUSD: r.child_profit_usd != null ? Number(r.child_profit_usd) : undefined,
-          }));
+          return {
+            rows: rows.map((r) => ({
+              id: r.id,
+              parentTradeTicket: String(r.parent_trade_ticket),
+              childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
+              mentorId: accountOwnerMap.get(r.parent_account_id) || '',
+              traderId: accountOwnerMap.get(r.child_account_id) || '',
+              parentAccountId: r.parent_account_id,
+              childAccountId: r.child_account_id,
+              symbol: r.symbol,
+              orderType: r.order_type as OrderType,
+              parentLots: Number(r.parent_lots),
+              childLots: Number(r.child_lots),
+              openTime: r.open_time,
+              closeTime: r.close_time || undefined,
+              closePrice: r.close_price != null ? Number(r.close_price) : undefined,
+              latencyMs: Number(r.latency_ms) || 0,
+              status: r.status as MappingExecutionStatus,
+              errorMessage: r.error_message || undefined,
+              retryCount: Number(r.retry_count) || 0,
+              parentProfitUSD: r.parent_profit_usd != null ? Number(r.parent_profit_usd) : undefined,
+              childProfitUSD: r.child_profit_usd != null ? Number(r.child_profit_usd) : undefined,
+            })),
+          };
         }
       } catch (err: any) {
-        if (!err.message?.toLowerCase().includes('permission denied')) {
-          console.warn('[BridgeStore] Supabase getTradeMappings exception:', err.message);
+        const schemaMissing = isMissingRelationError(err);
+        if (!schemaMissing) {
+          console.error('[BridgeStore] Supabase getTradeMappingsStrict exception:', err?.message || err);
         }
-        return [];
+        return { rows: [], error: err?.message || 'Unknown error', schemaMissing };
       }
     }
-    return Array.from(this.tradeMappings.values());
+    return { rows: Array.from(this.tradeMappings.values()) };
   }
 
-  public async getSyncLogs(supabaseClient?: SupabaseClient): Promise<SyncLog[]> {
+  public async getTradeMappings(supabaseClient?: SupabaseClient): Promise<TradeMapping[]> {
+    const res = await this.getTradeMappingsStrict(supabaseClient);
+    return res.rows;
+  }
+
+  public async getSyncLogsStrict(
+    supabaseClient?: SupabaseClient
+  ): Promise<{ rows: SyncLog[]; error?: string; schemaMissing?: boolean }> {
     if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
         const { data: rows, error } = await supabaseClient
           .from('bridge_sync_logs')
           .select('*')
           .order('created_at', { ascending: false })
-          .limit(50);
+          .limit(200);
 
         if (error) {
-          if (!error.message?.toLowerCase().includes('permission denied')) {
-            console.warn('[BridgeStore] Supabase getSyncLogs notice:', error.message);
+          const schemaMissing = isMissingRelationError(error);
+          if (!schemaMissing) {
+            console.error('[BridgeStore] Supabase getSyncLogsStrict error:', error.message);
           }
-          return [];
+          return { rows: [], error: error.message, schemaMissing };
         } else if (Array.isArray(rows)) {
-          return rows.map((r) => ({
-            id: r.id,
-            timestamp: r.created_at,
-            eventType: r.event_type,
-            level: r.level as any,
-            details: r.details,
-            latencyMs: r.latency_ms ? Number(r.latency_ms) : undefined,
-            ticket: r.ticket != null ? String(r.ticket) : undefined,
-          }));
+          return {
+            rows: rows.map((r) => ({
+              id: r.id,
+              timestamp: r.created_at,
+              eventType: r.event_type,
+              level: r.level as any,
+              details: r.details,
+              latencyMs: r.latency_ms ? Number(r.latency_ms) : undefined,
+              ticket: r.ticket != null ? String(r.ticket) : undefined,
+            })),
+          };
         }
       } catch (err: any) {
-        if (!err.message?.toLowerCase().includes('permission denied')) {
-          console.warn('[BridgeStore] Supabase getSyncLogs exception:', err.message);
+        const schemaMissing = isMissingRelationError(err);
+        if (!schemaMissing) {
+          console.error('[BridgeStore] Supabase getSyncLogsStrict exception:', err?.message || err);
         }
-        return [];
+        return { rows: [], error: err?.message || 'Unknown error', schemaMissing };
       }
     }
-    return [];
+    return { rows: [] };
+  }
+
+  public async getSyncLogs(supabaseClient?: SupabaseClient): Promise<SyncLog[]> {
+    const res = await this.getSyncLogsStrict(supabaseClient);
+    return res.rows;
   }
 
   public async addSyncLog(
@@ -1460,23 +1619,25 @@ export class BridgeStore {
   ): Promise<boolean> {
     if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
+        const cleanDetails = sanitizeAuditText(log.details);
+        const safeTicket = BridgeStore.sanitizeBigintTicket(log.ticket);
         const res: any = await supabaseClient
           .from('bridge_sync_logs')
           .insert({
             event_type: log.eventType,
             level: log.level,
-            details: log.details,
-            ticket: log.ticket != null ? String(log.ticket) : null,
+            details: cleanDetails,
+            ticket: safeTicket,
             latency_ms: log.latencyMs ?? null,
             created_at: new Date().toISOString(),
           });
         if (res?.error) {
-          console.error('[BridgeStore] Sync log write error:', res.error.message);
+          console.error('[BridgeStore] Sync log write error:', res.error.message, { eventType: log.eventType });
           return false;
         }
         return true;
       } catch (err: any) {
-        console.error('[BridgeStore] Sync log write exception:', err.message);
+        console.error('[BridgeStore] Sync log write exception:', err?.message || err, { eventType: log.eventType });
         return false;
       }
     }

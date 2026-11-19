@@ -118,12 +118,39 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const maintenanceMode = Boolean(body.maintenanceMode);
 
       if (!Number.isFinite(slippage) || slippage < 0 || slippage > 100) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'PLATFORM_SETTINGS_UPDATED',
+          targetType: 'platform_settings',
+          targetId: 'default',
+          result: 'failed',
+          details: `Validation failed: invalid defaultSlippageMaxPips (${body.defaultSlippageMaxPips}).`,
+        });
         return res.status(400).json({ success: false, error: 'defaultSlippageMaxPips must be between 0 and 100.' });
       }
       if (!Number.isFinite(maxLotCap) || maxLotCap < 0.01 || maxLotCap > 100) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'PLATFORM_SETTINGS_UPDATED',
+          targetType: 'platform_settings',
+          targetId: 'default',
+          result: 'failed',
+          details: `Validation failed: invalid defaultMaxLotCap (${body.defaultMaxLotCap}).`,
+        });
         return res.status(400).json({ success: false, error: 'defaultMaxLotCap must be between 0.01 and 100.' });
       }
       if (!Number.isFinite(staleSec) || staleSec < 10 || staleSec > 3600) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'PLATFORM_SETTINGS_UPDATED',
+          targetType: 'platform_settings',
+          targetId: 'default',
+          result: 'failed',
+          details: `Validation failed: invalid heartbeatStaleSeconds (${body.heartbeatStaleSeconds}).`,
+        });
         return res.status(400).json({ success: false, error: 'heartbeatStaleSeconds must be between 10 and 3600.' });
       }
 
@@ -145,6 +172,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .single();
 
       if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'PLATFORM_SETTINGS_UPDATED',
+          targetType: 'platform_settings',
+          targetId: 'default',
+          result: 'failed',
+          details: `Platform settings save error: ${error.message}`,
+        });
         return res.status(500).json({ success: false, error: error.message });
       }
 
@@ -275,12 +311,36 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const normalizedType = String(type || 'info').trim().toLowerCase();
 
       if (!cleanTitle || !cleanMessage) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'NOTIFICATION_BROADCAST',
+          targetType: 'notifications',
+          result: 'failed',
+          details: 'Notification broadcast failed: title and message are required.',
+        });
         return res.status(400).json({ success: false, error: 'Title and message are required.' });
       }
       if (!['all', 'admin', 'mentor', 'trader'].includes(normalizedRole)) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'NOTIFICATION_BROADCAST',
+          targetType: 'notifications',
+          result: 'failed',
+          details: `Notification broadcast failed: invalid targetRole "${normalizedRole}".`,
+        });
         return res.status(400).json({ success: false, error: 'targetRole must be all, admin, mentor, or trader.' });
       }
       if (!['info', 'success', 'warning', 'error'].includes(normalizedType)) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'NOTIFICATION_BROADCAST',
+          targetType: 'notifications',
+          result: 'failed',
+          details: `Notification broadcast failed: invalid type "${normalizedType}".`,
+        });
         return res.status(400).json({ success: false, error: 'type must be info, success, warning, or error.' });
       }
       if (targetUserId && !isValidUUID(targetUserId)) {
@@ -303,6 +363,14 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .single();
 
       if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'NOTIFICATION_BROADCAST',
+          targetType: 'notifications',
+          result: 'failed',
+          details: `Notification insert failed: ${error.message}`,
+        });
         return res.status(500).json({ success: false, error: error.message });
       }
 
@@ -407,6 +475,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           // Do not let non-admin mutate global broadcast flag for all tenants
           return res.status(200).json({ success: true, persisted: false, scope: 'client_broadcast_ack' });
         }
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'NOTIFICATION_READ_DENIED',
+          targetType: 'notifications',
+          targetId: notificationId,
+          result: 'denied',
+          details: `Blocked attempt to mark another user's notification (${notificationId}) as read.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Cannot modify another user notification.' });
       }
 
@@ -437,6 +514,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         return res.status(400).json({ success: false, error: 'Invalid userId UUID.' });
       }
       if (userId === caller.user.id) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'USER_ARCHIVED_HISTORY_PRESERVED',
+          targetType: 'profiles',
+          targetId: userId,
+          result: 'denied',
+          details: 'Blocked self-archival attempt by Super Admin.',
+        });
         return res.status(400).json({ success: false, error: 'Administrators cannot archive their own account.' });
       }
 
@@ -447,8 +533,28 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .maybeSingle();
 
       if (profErr) return res.status(500).json({ success: false, error: profErr.message });
-      if (!targetProfile) return res.status(404).json({ success: false, error: 'Target user profile not found.' });
+      if (!targetProfile) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'USER_ARCHIVED_HISTORY_PRESERVED',
+          targetType: 'profiles',
+          targetId: userId,
+          result: 'failed',
+          details: `User archival failed: target profile ${userId} not found.`,
+        });
+        return res.status(404).json({ success: false, error: 'Target user profile not found.' });
+      }
       if (targetProfile.role === 'admin') {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'USER_ARCHIVED_HISTORY_PRESERVED',
+          targetType: 'profiles',
+          targetId: userId,
+          result: 'denied',
+          details: `Blocked archival attempt targeting Super Admin ${targetProfile.email}.`,
+        });
         return res.status(403).json({ success: false, error: 'Super Administrator profiles cannot be archived via API.' });
       }
 
@@ -658,8 +764,26 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const isActive = b.isActive !== false;
       const features = Array.isArray(b.features) ? b.features.map(String) : [];
 
-      if (!name || !code) return res.status(400).json({ success: false, error: 'Plan name and code are required.' });
+      if (!name || !code) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'SUBSCRIPTION_PLAN_CREATED',
+          targetType: 'subscription_plans',
+          result: 'failed',
+          details: 'Plan creation failed: plan name and code are required.',
+        });
+        return res.status(400).json({ success: false, error: 'Plan name and code are required.' });
+      }
       if (!Number.isFinite(monthlyPrice) || monthlyPrice < 0 || !Number.isFinite(yearlyPrice) || yearlyPrice < 0) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'SUBSCRIPTION_PLAN_CREATED',
+          targetType: 'subscription_plans',
+          result: 'failed',
+          details: `Plan creation failed for ${name}: negative or invalid pricing.`,
+        });
         return res.status(400).json({ success: false, error: 'Prices must be non-negative finite numbers.' });
       }
 
@@ -681,7 +805,17 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'SUBSCRIPTION_PLAN_CREATED',
+          targetType: 'subscription_plans',
+          result: 'failed',
+          details: `Plan creation failed for ${name} (${code}): ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -741,7 +875,18 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'SUBSCRIPTION_PLAN_UPDATED',
+          targetType: 'subscription_plans',
+          targetId: planId,
+          result: 'failed',
+          details: `Failed updating subscription plan ${planId}: ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -836,8 +981,30 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         dbClient.from('subscription_plans').select('*').eq('id', planId).maybeSingle(),
       ]);
 
-      if (!profRes.data) return res.status(404).json({ success: false, error: 'Target user profile not found.' });
-      if (!planRes.data) return res.status(404).json({ success: false, error: 'Target subscription plan not found.' });
+      if (!profRes.data) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_SUBSCRIPTION_ASSIGNED',
+          targetType: 'subscriptions',
+          targetId: cleanUserId,
+          result: 'failed',
+          details: `Subscription assignment failed: target user profile ${cleanUserId} not found.`,
+        });
+        return res.status(404).json({ success: false, error: 'Target user profile not found.' });
+      }
+      if (!planRes.data) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_SUBSCRIPTION_ASSIGNED',
+          targetType: 'subscriptions',
+          targetId: planId,
+          result: 'failed',
+          details: `Subscription assignment failed: plan ${planId} not found.`,
+        });
+        return res.status(404).json({ success: false, error: 'Target subscription plan not found.' });
+      }
 
       const cycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
       const amount = Number(cycle === 'yearly' ? planRes.data.yearly_price_usd : planRes.data.monthly_price_usd);
@@ -864,7 +1031,18 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_SUBSCRIPTION_ASSIGNED',
+          targetType: 'subscriptions',
+          targetId: cleanUserId,
+          result: 'failed',
+          details: `Subscription assignment DB error for ${profRes.data.email}: ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -915,7 +1093,18 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_SUBSCRIPTION_UPDATED',
+          targetType: 'subscriptions',
+          targetId: subscriptionId,
+          result: 'failed',
+          details: `Subscription update failed for ${subscriptionId}: ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -1122,6 +1311,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
 
       const status = getBillingProviderStatus();
       if (cleanProvider === 'stripe' && !status.stripeConfigured) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'BILLING_CHECKOUT_INITIATED',
+          targetType: 'subscription_plans',
+          targetId: plan.id,
+          result: 'failed',
+          details: `Stripe checkout unavailable for plan ${plan.name}: provider unconfigured.`,
+        });
         return res.status(501).json({
           success: false,
           code: 'PAYMENT_PROVIDER_UNCONFIGURED',
@@ -1131,6 +1329,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         });
       }
       if (cleanProvider === 'paypal' && !status.paypalConfigured) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'BILLING_CHECKOUT_INITIATED',
+          targetType: 'subscription_plans',
+          targetId: plan.id,
+          result: 'failed',
+          details: `PayPal checkout unavailable for plan ${plan.name}: provider unconfigured.`,
+        });
         return res.status(501).json({
           success: false,
           code: 'PAYMENT_PROVIDER_UNCONFIGURED',
@@ -1170,6 +1377,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         });
         const stripeJson = await stripeRes.json().catch(() => null);
         if (!stripeRes.ok || !stripeJson?.url) {
+          await audit(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'BILLING_CHECKOUT_INITIATED',
+            targetType: 'subscription_plans',
+            targetId: plan.id,
+            result: 'failed',
+            details: `Stripe Checkout session creation failed for ${plan.name}: ${stripeJson?.error?.message || stripeRes.status}`,
+          });
           return res.status(502).json({
             success: false,
             code: 'STRIPE_SESSION_FAILED',
@@ -1211,6 +1427,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       });
       const tokenJson = await tokenRes.json().catch(() => null);
       if (!tokenRes.ok || !tokenJson?.access_token) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'BILLING_CHECKOUT_INITIATED',
+          targetType: 'subscription_plans',
+          targetId: plan.id,
+          result: 'failed',
+          details: `PayPal OAuth failed during checkout for plan ${plan.name}.`,
+        });
         return res.status(502).json({
           success: false,
           code: 'PAYPAL_AUTH_FAILED',
@@ -1241,12 +1466,31 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         : null;
 
       if (!orderRes.ok || !approveUrl) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'BILLING_CHECKOUT_INITIATED',
+          targetType: 'subscription_plans',
+          targetId: plan.id,
+          result: 'failed',
+          details: `PayPal order creation failed for ${plan.name}: ${orderJson?.message || orderRes.status}`,
+        });
         return res.status(502).json({
           success: false,
           code: 'PAYPAL_ORDER_FAILED',
           error: orderJson?.message || 'PayPal order creation failed.',
         });
       }
+
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'BILLING_CHECKOUT_INITIATED',
+        targetType: 'subscription_plans',
+        targetId: plan.id,
+        result: 'success',
+        details: `Created PayPal checkout order ${orderJson.id} for plan ${plan.name} (${cycle}).`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -1576,6 +1820,14 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     if (!dbClient) return;
 
     if (!caller.isVerifiedAdmin && caller.profile?.role !== 'mentor') {
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'MENTOR_PROFILE_UPDATED',
+        targetType: 'mentor_profiles',
+        result: 'denied',
+        details: 'Blocked unauthorized mentor profile update attempt.',
+      });
       return res.status(403).json({ success: false, error: 'Forbidden: Only mentors or admins can update mentor strategy profile.' });
     }
 
@@ -1615,7 +1867,18 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_PROFILE_UPDATED',
+          targetType: 'mentor_profiles',
+          targetId: targetMentorId,
+          result: 'failed',
+          details: `Mentor profile update DB error: ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -1691,6 +1954,14 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     if (!dbClient) return;
 
     if (!caller.isVerifiedAdmin && caller.profile?.role !== 'mentor') {
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'MENTOR_GROUP_CREATED',
+        targetType: 'mentor_groups',
+        result: 'denied',
+        details: 'Blocked unauthorized mentor group creation attempt.',
+      });
       return res.status(403).json({ success: false, error: 'Forbidden: Only mentors or admins can create follower groups.' });
     }
 
@@ -1715,7 +1986,17 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (error) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_GROUP_CREATED',
+          targetType: 'mentor_groups',
+          result: 'failed',
+          details: `Mentor group creation failed for "${name}": ${error.message}`,
+        });
+        return res.status(500).json({ success: false, error: error.message });
+      }
 
       await audit(dbClient, {
         actorId: caller.user.id,
@@ -1757,12 +2038,42 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const { data: existing } = await dbClient.from('mentor_groups').select('*').eq('id', groupId).maybeSingle();
       if (!existing) return res.status(404).json({ success: false, error: 'Mentor group not found.' });
       if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_GROUP_DELETED',
+          targetType: 'mentor_groups',
+          targetId: groupId,
+          result: 'denied',
+          details: `Blocked unauthorized deletion of mentor group ${groupId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only owning mentor or admin can delete this group.' });
       }
 
       await dbClient.from('mentor_assignments').update({ group_id: null }).eq('group_id', groupId);
       const { error: delErr } = await dbClient.from('mentor_groups').delete().eq('id', groupId);
-      if (delErr) return res.status(500).json({ success: false, error: delErr.message });
+      if (delErr) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_GROUP_DELETED',
+          targetType: 'mentor_groups',
+          targetId: groupId,
+          result: 'failed',
+          details: `Failed deleting mentor group ${existing.name || groupId}: ${delErr.message}`,
+        });
+        return res.status(500).json({ success: false, error: delErr.message });
+      }
+
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'mentor',
+        action: 'MENTOR_GROUP_DELETED',
+        targetType: 'mentor_groups',
+        targetId: groupId,
+        result: 'success',
+        details: `Deleted mentor strategy group "${existing.name || groupId}".`,
+      });
 
       return res.status(200).json({ success: true, groupId });
     } catch (err: any) {
@@ -1790,6 +2101,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
 
       if (!assignRow) return res.status(404).json({ success: false, error: 'Mentor assignment not found.' });
       if (!caller.isVerifiedAdmin && assignRow.mentor_id !== caller.user.id) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_GROUP_ASSIGNED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Blocked unauthorized group organization attempt on assignment ${assignmentId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only owning mentor or admin can organize follower group.' });
       }
 
@@ -1798,6 +2118,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         const { data: grp } = await dbClient.from('mentor_groups').select('*').eq('id', groupId).maybeSingle();
         if (!grp) return res.status(404).json({ success: false, error: 'Target mentor group not found.' });
         if (grp.mentor_id !== assignRow.mentor_id) {
+          await audit(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'mentor',
+            action: 'MENTOR_GROUP_ASSIGNED',
+            targetType: 'mentor_assignments',
+            targetId: assignmentId,
+            result: 'denied',
+            details: `Blocked cross-mentor group assignment (${groupId} -> ${assignmentId}).`,
+          });
           return res.status(403).json({ success: false, error: 'Security error: Group belongs to a different mentor.' });
         }
         nextGroupId = grp.id;
@@ -1810,7 +2139,31 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         .select('*')
         .single();
 
-      if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+      if (updErr) {
+        await audit(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'MENTOR_GROUP_ASSIGNED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'failed',
+          details: `Failed assigning follower ${assignmentId} to group ${nextGroupId || 'none'}: ${updErr.message}`,
+        });
+        return res.status(500).json({ success: false, error: updErr.message });
+      }
+
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'mentor',
+        action: 'MENTOR_GROUP_ASSIGNED',
+        targetType: 'mentor_assignments',
+        targetId: assignmentId,
+        result: 'success',
+        details: unassign
+          ? `Removed assignment ${assignmentId} from mentor group.`
+          : `Assigned follower ${assignmentId} to mentor group ${nextGroupId}.`,
+      });
+
       return res.status(200).json({ success: true, assignment: updated });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to update assignment group' });

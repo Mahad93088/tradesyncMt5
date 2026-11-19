@@ -739,17 +739,19 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
         localStorage.setItem('tradesync_links', JSON.stringify(nextLinks));
       }
 
-      // 3. Log audit event
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: 'admin',
-        action: 'ASSIGN_MT5_ACCOUNT',
-        targetResource: 'mt5_accounts / mentor_assignments',
-        targetId: chosenChild.id,
-        result: 'success',
-        details: `Assigned Child #${chosenChild.accountNumber} (${chosenChild.traderName}) to Parent #${chosenParent.accountNumber} (${chosenParent.mentorName}). Sizing: ${copyMode} (${copyMode === 'multiplier' ? lotMultiplier + 'x' : fixedLot + ' lots'}). Persistence: Supabase mentor_assignments [${res.assignmentId || 'synced'}].`,
-      });
+      // 3. Log local sandbox audit event only when not in Cloud Mode
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: 'admin',
+          action: 'ASSIGN_MT5_ACCOUNT',
+          targetResource: 'mt5_accounts / mentor_assignments',
+          targetId: chosenChild.id,
+          result: 'success',
+          details: `Assigned Child #${chosenChild.accountNumber} (${chosenChild.traderName}) to Parent #${chosenParent.accountNumber} (${chosenParent.mentorName}). Sizing: ${copyMode} (${copyMode === 'multiplier' ? lotMultiplier + 'x' : fixedLot + ' lots'}). Persistence: Supabase mentor_assignments [${res.assignmentId || 'synced'}].`,
+        });
+      }
 
       const successMsg = `Successfully assigned Parent MT5 #${chosenParent.accountNumber} (${chosenParent.mentorName}) to Child #${chosenChild.accountNumber} (${chosenChild.traderName}) with ${copyMode === 'multiplier' ? lotMultiplier.toFixed(2) + 'x multiplier' : fixedLot.toFixed(2) + ' lots fixed'} sizing.`;
 

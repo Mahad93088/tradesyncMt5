@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { FileSpreadsheet, Search, Download, Printer } from 'lucide-react';
+import { FileSpreadsheet, Search, Download, Printer, RefreshCw } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { downloadCsvFile, printCurrentReport } from '../common/exportHelpers';
 import {
   AdminPageHeader,
   AdminStatusText,
   AdminEmptyState,
+  AdminFeedbackBanner,
 } from './adminUi';
 
 interface GlobalLogsViewProps {
@@ -17,7 +18,16 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
   initialSubTab = 'audit',
   title = 'System Audit Logs',
 }) => {
-  const { tradeMappings, syncLogs, auditLogs, users } = useApp();
+  const {
+    tradeMappings,
+    syncLogs,
+    auditLogs,
+    users,
+    isCloudMode,
+    cloudLogsStatus,
+    isCloudSyncLoading,
+    refreshCloudData,
+  } = useApp();
 
   const [activeSubTab, setActiveSubTab] = useState<'audit' | 'mappings' | 'engine'>(initialSubTab);
   const [searchQuery, setSearchQuery] = useState('');
@@ -35,6 +45,14 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
     if (dateFilter === 'week') return diffHours <= 24 * 7;
     if (dateFilter === 'month') return diffHours <= 24 * 30;
     return true;
+  };
+
+  const hasActiveFilters = searchQuery.trim() !== '' || statusFilter !== 'all' || dateFilter !== 'all';
+
+  const clearFilters = () => {
+    setSearchQuery('');
+    setStatusFilter('all');
+    setDateFilter('all');
   };
 
   const filteredAuditLogs = auditLogs.filter((log) => {
@@ -62,6 +80,27 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
     const matchesDate = isWithinDateRange(log.timestamp);
     return matchesSearch && matchesStatus && matchesDate;
   });
+
+  const activeEndpointStatus =
+    activeSubTab === 'audit'
+      ? cloudLogsStatus.audit
+      : activeSubTab === 'mappings'
+      ? cloudLogsStatus.mappings
+      : cloudLogsStatus.syncLogs;
+
+  const activeTableName =
+    activeSubTab === 'audit'
+      ? 'public.audit_logs'
+      : activeSubTab === 'mappings'
+      ? 'public.trade_mappings'
+      : 'public.bridge_sync_logs';
+
+  const activeTabLabel =
+    activeSubTab === 'audit'
+      ? 'Audit Trail'
+      : activeSubTab === 'mappings'
+      ? 'Ticket Mappings'
+      : 'Bridge Logs';
 
   const handleExportCsv = () => {
     const dateStamp = new Date().toISOString().slice(0, 10);
@@ -115,14 +154,31 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
     }
   };
 
+  const headerMeta = `${auditLogs.length} Audit · ${syncLogs.length} Sync Events${
+    isCloudMode && cloudLogsStatus.lastRefreshedAt
+      ? ` · Updated ${new Date(cloudLogsStatus.lastRefreshedAt).toLocaleTimeString()}`
+      : ''
+  }`;
+
   return (
     <div className="space-y-6">
       <AdminPageHeader
         title={title}
-        meta={`${auditLogs.length} Audit · ${syncLogs.length} Sync Events`}
+        meta={headerMeta}
         subtitle="Structured record of admin actions, account registrations & suspensions, bridge errors, and trade ticket mappings."
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {isCloudMode && (
+              <button
+                type="button"
+                onClick={() => void refreshCloudData()}
+                disabled={isCloudSyncLoading}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 text-slate-500 ${isCloudSyncLoading ? 'animate-spin' : ''}`} />
+                <span>{isCloudSyncLoading ? 'Refreshing...' : 'Refresh'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleExportCsv}
@@ -171,6 +227,20 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
           </div>
         }
       />
+
+      {isCloudMode && activeEndpointStatus.schemaMissing && (
+        <AdminFeedbackBanner
+          type="warning"
+          message={`Backing table ${activeTableName} is missing or not yet migrated in Supabase (${activeEndpointStatus.error || 'schema missing'}). Apply pending SQL migrations before viewing ${activeTabLabel}.`}
+        />
+      )}
+
+      {isCloudMode && !activeEndpointStatus.schemaMissing && !activeEndpointStatus.ok && activeEndpointStatus.error && (
+        <AdminFeedbackBanner
+          type="error"
+          message={`Failed to load ${activeTabLabel} from backend${activeEndpointStatus.statusCode ? ` (HTTP ${activeEndpointStatus.statusCode})` : ''}: ${activeEndpointStatus.error}`}
+        />
+      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-xs">
@@ -247,17 +317,65 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
               </select>
             )}
           </div>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-700"
+            >
+              Clear Filters
+            </button>
+          )}
         </div>
       </div>
 
       {/* TAB 1: Audit Trail */}
       {activeSubTab === 'audit' && (
         filteredAuditLogs.length === 0 ? (
-          <AdminEmptyState
-            icon={FileSpreadsheet}
-            title="No audit log entries match your filter"
-            description="No fabricated historical logs are displayed. Real admin actions, registrations, and bridge events appear here as they occur."
-          />
+          auditLogs.length === 0 ? (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title={
+                isCloudMode && !cloudLogsStatus.audit.ok
+                  ? 'Unable to retrieve Audit Trail from Supabase'
+                  : 'No persisted audit log entries in database yet'
+              }
+              description={
+                isCloudMode && !cloudLogsStatus.audit.ok
+                  ? `The backend returned${cloudLogsStatus.audit.statusCode ? ` HTTP ${cloudLogsStatus.audit.statusCode}` : ''}: ${cloudLogsStatus.audit.error || 'Unknown error'}.`
+                  : '0 rows exist in public.audit_logs. Authoritative admin actions, user approvals, account registrations, assignments, and billing updates are persisted here as they occur.'
+              }
+              action={
+                isCloudMode ? (
+                  <button
+                    type="button"
+                    onClick={() => void refreshCloudData()}
+                    disabled={isCloudSyncLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isCloudSyncLoading ? 'animate-spin' : ''}`} />
+                    <span>Refresh from Supabase</span>
+                  </button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title="No audit log entries match your active filters"
+              description={`${auditLogs.length} audit log record(s) exist in memory, but none match your current search query, date range, or severity filter.`}
+              action={
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Clear Filters
+                </button>
+              }
+            />
+          )
         ) : (
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
             <div className="overflow-x-auto">
@@ -306,11 +424,49 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
       {/* TAB 2: Ticket Mappings */}
       {activeSubTab === 'mappings' && (
         filteredMappings.length === 0 ? (
-          <AdminEmptyState
-            icon={FileSpreadsheet}
-            title="No ticket mappings recorded"
-            description="Parent-to-child order ticket mappings appear here once bridge orders are processed."
-          />
+          tradeMappings.length === 0 ? (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title={
+                isCloudMode && !cloudLogsStatus.mappings.ok
+                  ? 'Unable to retrieve Ticket Mappings from Supabase'
+                  : 'No ticket mappings recorded in database yet'
+              }
+              description={
+                isCloudMode && !cloudLogsStatus.mappings.ok
+                  ? `The backend returned${cloudLogsStatus.mappings.statusCode ? ` HTTP ${cloudLogsStatus.mappings.statusCode}` : ''}: ${cloudLogsStatus.mappings.error || 'Unknown error'}.`
+                  : '0 rows exist in public.trade_mappings. Parent-to-child order ticket mappings appear here once connected MT5 Demo terminals copy real orders through the bridge.'
+              }
+              action={
+                isCloudMode ? (
+                  <button
+                    type="button"
+                    onClick={() => void refreshCloudData()}
+                    disabled={isCloudSyncLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isCloudSyncLoading ? 'animate-spin' : ''}`} />
+                    <span>Refresh from Supabase</span>
+                  </button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title="No ticket mappings match your active filters"
+              description={`${tradeMappings.length} ticket mapping(s) exist, but none match your current search, date range, or status filter.`}
+              action={
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Clear Filters
+                </button>
+              }
+            />
+          )
         ) : (
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
             <div className="overflow-x-auto">
@@ -387,11 +543,49 @@ export const GlobalLogsView: React.FC<GlobalLogsViewProps> = ({
       {/* TAB 3: Bridge Sync Logs */}
       {activeSubTab === 'engine' && (
         filteredSyncLogs.length === 0 ? (
-          <AdminEmptyState
-            icon={FileSpreadsheet}
-            title="No bridge synchronization logs recorded"
-            description="No synchronization events match your current search or severity filter."
-          />
+          syncLogs.length === 0 ? (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title={
+                isCloudMode && !cloudLogsStatus.syncLogs.ok
+                  ? 'Unable to retrieve Bridge Logs from Supabase'
+                  : 'No bridge synchronization logs recorded in database yet'
+              }
+              description={
+                isCloudMode && !cloudLogsStatus.syncLogs.ok
+                  ? `The backend returned${cloudLogsStatus.syncLogs.statusCode ? ` HTTP ${cloudLogsStatus.syncLogs.statusCode}` : ''}: ${cloudLogsStatus.syncLogs.error || 'Unknown error'}.`
+                  : '0 rows exist in public.bridge_sync_logs. Real terminal connection transitions, copier instruction acknowledgements, auto-trading toggles, and Demo-only blocks appear here as they happen.'
+              }
+              action={
+                isCloudMode ? (
+                  <button
+                    type="button"
+                    onClick={() => void refreshCloudData()}
+                    disabled={isCloudSyncLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isCloudSyncLoading ? 'animate-spin' : ''}`} />
+                    <span>Refresh from Supabase</span>
+                  </button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <AdminEmptyState
+              icon={FileSpreadsheet}
+              title="No bridge synchronization logs match your active filters"
+              description={`${syncLogs.length} bridge sync event(s) exist, but none match your current search, date range, or severity level.`}
+              action={
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Clear Filters
+                </button>
+              }
+            />
+          )
         ) : (
           <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
             {filteredSyncLogs.map((log) => (

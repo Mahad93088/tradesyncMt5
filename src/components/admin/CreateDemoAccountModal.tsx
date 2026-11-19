@@ -99,17 +99,19 @@ export const CreateDemoAccountModal: React.FC<CreateDemoAccountModalProps> = ({
         setUsers((prev) => [res.owner!, ...prev.filter((u) => u.id !== res.owner!.id)]);
       }
 
-      // Log audit entry
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: 'admin',
-        action: 'CREATE_DEMO_ACCOUNT',
-        targetResource: 'mt5_accounts',
-        targetId: accountNumber,
-        result: 'success',
-        details: `Created demo ${accountRole} MT5 account #${accountNumber} for testing (${ownerName || 'Demo Sandbox'}).`,
-      });
+      // Log local sandbox audit entry only when not in Cloud Mode
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: 'admin',
+          action: 'CREATE_DEMO_ACCOUNT',
+          targetResource: 'mt5_accounts',
+          targetId: accountNumber,
+          result: 'success',
+          details: `Created demo ${accountRole} MT5 account #${accountNumber} for testing (${ownerName || 'Demo Sandbox'}).`,
+        });
+      }
 
       onSuccess();
       onClose();

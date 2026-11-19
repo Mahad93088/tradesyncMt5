@@ -138,17 +138,22 @@ export const ParentAccountsView: React.FC = () => {
         }
       }
 
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: 'admin',
-        action: 'UNLINK_CHILD_ACCOUNT',
-        targetResource: 'mt5_accounts / mentor_assignments',
-        targetId: childAccountId,
-        result: 'success',
-        details: `Unlinked child account #${childAccountId} from parent stream.`,
-      });
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: 'admin',
+          action: 'UNLINK_CHILD_ACCOUNT',
+          targetResource: 'mt5_accounts / mentor_assignments',
+          targetId: childAccountId,
+          result: 'success',
+          details: `Unlinked child account #${childAccountId} from parent stream.`,
+        });
+      }
 
+      if (isCloudMode) {
+        await refreshCloudData();
+      }
       await fetchAccounts();
 
       setSuccessToast(`Successfully unlinked child account #${childAccountId} from parent stream.`);

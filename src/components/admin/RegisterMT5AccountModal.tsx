@@ -195,17 +195,19 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         setMt5Accounts((prev) => [res.account!, ...prev.filter((a) => a.id !== res.account!.id)]);
       }
 
-      // Log audit entry
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: currentUser.role,
-        action: 'CREATE_DEMO_ACCOUNT',
-        targetResource: 'mt5_accounts',
-        targetId: accountNumber.trim(),
-        result: 'success',
-        details: `Registered MT5 ${accountRole} account #${accountNumber.trim()} on ${brokerName} (${brokerServer}). Token provisioned.`,
-      });
+      // Log local sandbox audit entry only when not in Cloud Mode (backend handles Cloud audit_logs)
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: currentUser.role,
+          action: 'CREATE_DEMO_ACCOUNT',
+          targetResource: 'mt5_accounts',
+          targetId: accountNumber.trim(),
+          result: 'success',
+          details: `Registered MT5 ${accountRole} account #${accountNumber.trim()} on ${brokerName} (${brokerServer}). Token provisioned.`,
+        });
+      }
 
       // Transition modal into Token Presentation Screen
       setRegisteredResult({

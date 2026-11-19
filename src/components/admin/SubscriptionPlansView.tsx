@@ -30,7 +30,7 @@ export const SubscriptionPlansView: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<SubscriptionPlan | null>(null);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'info'; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
 
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
@@ -85,18 +85,27 @@ export const SubscriptionPlansView: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const handleTogglePlanStatus = (plan: SubscriptionPlan) => {
+  const handleTogglePlanStatus = async (plan: SubscriptionPlan) => {
     const nextActive = plan.isActive === false;
-    togglePlanStatus(plan.id);
+    const res = await togglePlanStatus(plan.id);
+    if (!res.success) {
+      setFeedback({
+        type: 'error',
+        message: res.message || `Failed to update status for plan "${plan.name}".`,
+      });
+      return;
+    }
     setFeedback({
       type: 'info',
-      message: `Plan "${plan.name}" marked ${nextActive ? 'active' : 'inactive'}${
-        isCloudMode ? ' in Supabase' : ' in Demo Sandbox'
-      }.`,
+      message:
+        res.message ||
+        `Plan "${plan.name}" marked ${nextActive ? 'active' : 'inactive'}${
+          isCloudMode ? ' in Supabase' : ' in Demo Sandbox'
+        }.`,
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const features = featureList
       .split(',')
@@ -106,7 +115,7 @@ export const SubscriptionPlansView: React.FC = () => {
     const effectivePrice = billingCycle === 'yearly' ? annualPrice : monthlyPrice;
 
     if (editingPlan) {
-      updateSubscriptionPlan(editingPlan.id, {
+      const res = await updateSubscriptionPlan(editingPlan.id, {
         name: name.trim(),
         tier,
         billingCycle,
@@ -121,13 +130,20 @@ export const SubscriptionPlansView: React.FC = () => {
         slTpSync,
         features,
       });
+      if (!res.success) {
+        setFeedback({
+          type: 'error',
+          message: res.message || `Failed to update subscription plan "${name.trim()}".`,
+        });
+        return;
+      }
       setFeedback({
         type: 'success',
-        message: `Updated subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ''}.`,
+        message: res.message || `Updated subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ''}.`,
       });
     } else {
       const slugCode = (code.trim() || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/^_+|_+$/g, '');
-      createSubscriptionPlan({
+      const res = await createSubscriptionPlan({
         code: slugCode,
         tier,
         name: name.trim(),
@@ -143,9 +159,18 @@ export const SubscriptionPlansView: React.FC = () => {
         slTpSync,
         features,
       });
+      if (!res.success) {
+        setFeedback({
+          type: 'error',
+          message: res.message || `Failed to create subscription plan "${name.trim()}".`,
+        });
+        return;
+      }
       setFeedback({
         type: 'success',
-        message: `Created subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ' in Demo Sandbox'}.`,
+        message:
+          res.message ||
+          `Created subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ' in Demo Sandbox'}.`,
       });
     }
     setIsModalOpen(false);
@@ -326,6 +351,14 @@ export const SubscriptionPlansView: React.FC = () => {
                 <X className="h-5 w-5" />
               </button>
             </div>
+
+            {feedback?.type === 'error' && (
+              <AdminFeedbackBanner
+                type="error"
+                message={feedback.message}
+                onDismiss={() => setFeedback(null)}
+              />
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-3.5 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

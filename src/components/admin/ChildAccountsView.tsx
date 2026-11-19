@@ -114,17 +114,22 @@ export const ChildAccountsView: React.FC = () => {
       }
 
       const nextStatus = child.traderStatus === 'active' ? 'suspended' : 'active';
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: 'admin',
-        action: 'TOGGLE_TRADER_STATUS',
-        targetResource: 'profiles / mt5_accounts',
-        targetId: child.userId,
-        result: 'success',
-        details: `Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${nextStatus}.`,
-      });
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: 'admin',
+          action: 'TOGGLE_TRADER_STATUS',
+          targetResource: 'profiles / mt5_accounts',
+          targetId: child.userId,
+          result: 'success',
+          details: `Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${nextStatus}.`,
+        });
+      }
 
+      if (isCloudMode) {
+        await refreshCloudData();
+      }
       await fetchAccounts();
 
       setSuccessToast(`Trader ${child.traderName} (Child #${child.accountNumber}) status changed to ${nextStatus}.`);

@@ -604,6 +604,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { targetUserId } = req.body;
       if (!targetUserId || !isValidUUID(targetUserId)) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_APPROVED',
+          targetType: 'profiles',
+          targetId: targetUserId ? String(targetUserId) : null,
+          result: 'failed',
+          details: 'Rejected approve-user request: invalid or missing targetUserId UUID.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122).',
@@ -612,6 +621,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       // Anti-self-approval protection
       if (targetUserId === caller.user.id) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_APPROVED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: 'Blocked self-approval attempt by admin.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Administrators cannot approve their own account.',
@@ -626,10 +644,28 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .maybeSingle();
 
       if (targetError) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_APPROVED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: `Failed to query target profile: ${targetError.message}`,
+        });
         return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
       }
 
       if (!targetProfile) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_APPROVED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: 'Target user profile not found during approval.',
+        });
         return res.status(404).json({
           success: false,
           error: 'Target user profile not found in public.profiles. Ensure the user has registered in Supabase first.',
@@ -648,6 +684,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .single();
 
       if (updateError) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_APPROVED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: `Database update denied during approval: ${updateError.message}`,
+        });
         return res.status(403).json({
           success: false,
           error: updateError.message.includes('Security error')
@@ -687,6 +732,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { targetUserId, newRole } = req.body;
       if (!targetUserId || !isValidUUID(targetUserId)) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId ? String(targetUserId) : null,
+          result: 'failed',
+          details: 'Rejected promote-user request: invalid or missing targetUserId UUID.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122). Sandbox demo IDs are not allowed in Cloud Mode.',
@@ -695,6 +749,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       // Anti-self-promotion protection
       if (targetUserId === caller.user.id) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: 'Blocked admin self-promotion attempt.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Super Administrators cannot alter or promote their own role.',
@@ -702,6 +765,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (newRole === 'admin') {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: 'Blocked attempt to grant admin privileges via promotion API.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Admin privileges cannot be granted through the promotion API.',
@@ -709,6 +781,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (!['mentor', 'trader'].includes(newRole)) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: `Rejected promote-user: invalid role '${String(newRole)}'.`,
+        });
         return res.status(400).json({
           success: false,
           error: 'Invalid request: newRole must be mentor or trader',
@@ -723,10 +804,28 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .maybeSingle();
 
       if (targetError) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: `Profile lookup error during promotion: ${targetError.message}`,
+        });
         return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
       }
 
       if (!targetProfile) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: 'Target user profile not found during promotion.',
+        });
         return res.status(404).json({
           success: false,
           error: 'Target user profile not found in public.profiles. Ensure the user has registered in Supabase first.',
@@ -752,6 +851,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .single();
 
       if (updateError) {
+        await writeAuditLog(getServiceRoleClient(), {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: `Database promotion update denied: ${updateError.message}`,
+        });
         return res.status(403).json({
           success: false,
           error: updateError.message.includes('Security error')
@@ -837,6 +945,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { targetUserId, status } = req.body || {};
       if (!targetUserId || !isValidUUID(targetUserId)) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId ? String(targetUserId) : null,
+          result: 'failed',
+          details: 'Rejected user-status request: invalid targetUserId UUID.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Invalid request: targetUserId must be a valid profile UUID (RFC 4122).',
@@ -844,6 +961,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (targetUserId === caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: 'Blocked attempt by admin to alter own account status.',
+        });
         return res.status(400).json({
           success: false,
           error: 'Security constraint violation: Administrators cannot suspend or alter their own account status.',
@@ -852,6 +978,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const normalizedStatus = String(status || '').trim().toLowerCase();
       if (!['active', 'suspended', 'pending'].includes(normalizedStatus)) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: `Rejected invalid user status '${normalizedStatus}'.`,
+        });
         return res.status(400).json({
           success: false,
           error: 'Invalid status: must be active, suspended, or pending.',
@@ -865,14 +1000,41 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .maybeSingle();
 
       if (targetError) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: `Profile lookup failed: ${targetError.message}`,
+        });
         return res.status(500).json({ success: false, error: `Failed to query target profile: ${targetError.message}` });
       }
 
       if (!targetProfile) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'failed',
+          details: 'Target user profile not found for status change.',
+        });
         return res.status(404).json({ success: false, error: 'Target user profile not found in public.profiles.' });
       }
 
       if (targetProfile.role === 'admin' && normalizedStatus !== 'active') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: `Blocked attempt to change Super Admin (${targetProfile.email || targetUserId}) status to ${normalizedStatus}.`,
+        });
         return res.status(403).json({
           success: false,
           error: 'Security constraint violation: Super Administrator accounts cannot be suspended via the dashboard API.',
@@ -890,6 +1052,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .single();
 
       if (updateError) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_STATUS_CHANGED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'denied',
+          details: `User status update failed: ${updateError.message}`,
+        });
         return res.status(403).json({
           success: false,
           error: updateError.message || 'Database update denied.',
@@ -989,6 +1160,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (requestedRole === 'admin') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          result: 'denied',
+          details: `Blocked attempt to provision admin account (${cleanEmail}) via user creation API.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'ADMIN_ROLE_FORBIDDEN',
@@ -997,6 +1176,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (requestedRole !== 'mentor' && requestedRole !== 'trader') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          result: 'failed',
+          details: `Rejected user creation for ${cleanEmail}: invalid role '${requestedRole}'.`,
+        });
         return res.status(400).json({
           success: false,
           code: 'INVALID_ROLE',
@@ -1005,6 +1192,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (!['active', 'pending', 'suspended'].includes(requestedStatus)) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          result: 'failed',
+          details: `Rejected user creation for ${cleanEmail}: invalid status '${requestedStatus}'.`,
+        });
         return res.status(400).json({
           success: false,
           code: 'INVALID_STATUS',
@@ -1025,6 +1220,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .maybeSingle();
 
       if (existingErr) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          result: 'failed',
+          details: `Duplicate email lookup error for ${cleanEmail}: ${existingErr.message}`,
+        });
         return res.status(500).json({
           success: false,
           error: `Failed to check existing email registrations: ${existingErr.message}`,
@@ -1032,6 +1235,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (existingProf) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          targetId: existingProf.id,
+          result: 'failed',
+          details: `Rejected user creation: email ${cleanEmail} already exists.`,
+        });
         return res.status(409).json({
           success: false,
           code: 'DUPLICATE_EMAIL',
@@ -1062,6 +1274,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
           msg.toLowerCase().includes('already') ||
           msg.toLowerCase().includes('registered') ||
           msg.toLowerCase().includes('exists');
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          result: 'failed',
+          details: `Auth Admin createUser failed for ${cleanEmail}: ${msg}`,
+        });
         return res.status(isDuplicate ? 409 : 400).json({
           success: false,
           code: isDuplicate ? 'DUPLICATE_EMAIL' : 'AUTH_CREATE_FAILED',
@@ -1097,6 +1317,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .single();
 
       if (profileUpsertErr) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_CREATED',
+          targetType: 'profiles',
+          targetId: newUserId,
+          result: 'failed',
+          details: `Profile upsert failed after auth creation for ${cleanEmail}: ${profileUpsertErr.message}`,
+        });
         return res.status(500).json({
           success: false,
           error: `Auth user created (${newUserId}), but failed to set profile role/status in public.profiles: ${profileUpsertErr.message}`,
@@ -1671,6 +1900,27 @@ export function createApiApp(deps?: ApiAppDependencies) {
   registerRoute('post', '/api/v1/bridge/heartbeat', async (req: Request, res: Response) => {
     const rawTradeMode = req.body?.tradeMode ?? req.body?.trade_mode;
     if (rawTradeMode != null && String(rawTradeMode).trim() !== '' && String(rawTradeMode).trim().toLowerCase() !== 'demo') {
+      const dbClient = getServiceRoleClient();
+      const accNum = (req.body?.account_number || req.headers['x-account-number'] || '').toString().trim();
+      if (dbClient) {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked non-DEMO heartbeat (tradeMode=${String(rawTradeMode)})${accNum ? ` for account #${accNum}` : ''}.`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: null,
+          actorRole: 'system',
+          action: 'DEMO_ONLY_SAFETY_BLOCK',
+          targetType: 'mt5_accounts',
+          targetId: accNum || null,
+          result: 'denied',
+          details: `Blocked non-DEMO heartbeat (tradeMode=${String(rawTradeMode)})${accNum ? ` for account #${accNum}` : ''}.`,
+        });
+      }
       return res.status(403).json({
         success: false,
         code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -1706,6 +1956,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
         ...(auth.code ? { code: auth.code } : {}),
         error: auth.error || 'Unauthorized: Invalid or unverified terminal authentication token.',
       });
+    }
+
+    if (auth.terminal.previousConnectionStatus !== 'connected') {
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TERMINAL_CONNECTED',
+          level: 'success',
+          details: `${auth.terminal.accountRole.toUpperCase()} MT5 Demo terminal #${auth.terminal.accountNumber} (${auth.terminal.brokerServer}) connected via EA heartbeat.`,
+          latencyMs: auth.terminal.pingMs,
+        },
+        auth.dbClient || getServiceRoleClient() || undefined
+      );
     }
 
     return res.status(200).json({
@@ -1754,6 +2016,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       // Enforce Admin or Tenant Ownership
       if (!caller.isVerifiedAdmin && dbAcc.user_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'TERMINAL_TOKEN_ROTATED',
+          targetType: 'mt5_accounts',
+          targetId: dbAcc.id,
+          result: 'denied',
+          details: `Denied unauthorized terminal token rotation attempt on account #${dbAcc.account_number}.`,
+        });
         return res.status(403).json({
           success: false,
           error: 'Forbidden: Only an administrator or the owning account holder may provision or rotate terminal tokens.',
@@ -1777,12 +2048,29 @@ export function createApiApp(deps?: ApiAppDependencies) {
       );
 
       if (!terminal.isDurableDb) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'admin',
+          action: 'TERMINAL_TOKEN_ROTATED',
+          targetType: 'mt5_accounts',
+          targetId: dbAcc.id,
+          result: 'failed',
+          details: `Failed to persist rotated token hash for account #${dbAcc.account_number}.`,
+        });
         return res.status(500).json({
           success: false,
           error: 'Failed to persist terminal token hash to Supabase mt5_accounts.',
         });
       }
 
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'TERMINAL_TOKEN_ROTATED',
+          level: 'info',
+          details: `Rotated terminal authentication token (${terminal.rawTokenPrefix}) for ${targetRole.toUpperCase()} account #${dbAcc.account_number}.`,
+        },
+        dbClient
+      );
       await writeAuditLog(dbClient, {
         actorId: caller.user.id,
         actorRole: (caller.profile?.role as any) || 'admin',
@@ -1790,7 +2078,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         targetType: 'mt5_accounts',
         targetId: dbAcc.id,
         result: 'success',
-        details: `Issued/rotated terminal token for ${targetRole} MT5 account #${dbAcc.account_number}.`,
+        details: `Issued/rotated terminal token (${terminal.rawTokenPrefix}) for ${targetRole} MT5 account #${dbAcc.account_number}.`,
       });
 
       return res.status(200).json({
@@ -1847,6 +2135,22 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (String(accountType).trim().toLowerCase() !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked admin attempt to register non-DEMO MT5 account #${String(accountNumber).trim()} (accountType=${String(accountType)}).`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+          targetType: 'mt5_accounts',
+          result: 'denied',
+          details: `Blocked non-DEMO MT5 registration for #${String(accountNumber).trim()} (accountType=${String(accountType)}).`,
+        });
         return res.status(403).json({
           success: false,
           code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -1877,6 +2181,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
           return res.status(404).json({ success: false, error: 'Target userId profile not found in public.profiles.' });
         }
         if (explicitProf.status !== 'active') {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'admin',
+            action: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            targetId: explicitProf.id,
+            result: 'denied',
+            details: `Blocked admin MT5 registration: target user ${explicitProf.id} has status=${explicitProf.status}.`,
+          });
           return res.status(403).json({
             success: false,
             code: 'TARGET_USER_INACTIVE',
@@ -1981,6 +2294,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
 
         if (parentAcc.account_type && parentAcc.account_type !== 'demo') {
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+              level: 'error',
+              details: `Blocked admin registration linking child #${cleanAccNumber} to non-DEMO parent ${cleanParentId}.`,
+            },
+            dbClient
+          );
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'admin',
+            action: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            targetId: cleanParentId,
+            result: 'denied',
+            details: `Blocked child #${cleanAccNumber} registration: parent ${cleanParentId} is non-DEMO.`,
+          });
           return res.status(403).json({
             success: false,
             code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -2124,6 +2454,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
           if (!existingAcc) {
             await dbClient.from('mt5_accounts').delete().eq('id', accountId);
           }
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'ADMIN_MT5_ACCOUNT_REGISTER_ERROR',
+              level: 'error',
+              details: `Child #${cleanAccNumber} registered but mentor assignment failed: ${upsertRes.error}`,
+            },
+            dbClient
+          );
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'admin',
+            action: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            targetId: accountId,
+            result: 'failed',
+            details: `Mentor assignment failed during MT5 registration for #${cleanAccNumber}: ${upsertRes.error}`,
+          });
           return res.status(422).json({
             success: false,
             code: 'MENTOR_ASSIGNMENT_FAILED',
@@ -2142,6 +2489,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
           accountNumber: cleanAccNumber,
           brokerServer: cleanBrokerServer,
           brokerName: cleanBrokerName,
+        },
+        dbClient
+      );
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+          level: 'info',
+          details: `Admin ${caller.profile?.email || caller.user.id} registered ${role.toUpperCase()} MT5 Demo account #${cleanAccNumber} (${cleanBrokerServer}).`,
         },
         dbClient
       );
@@ -2227,6 +2582,22 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(400).json({ success: false, error: 'MT5 Broker Server name is required' });
       }
       if (String(accountType).trim().toLowerCase() !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked self-service registration of non-DEMO MT5 account #${String(accountNumber).trim()} by ${caller.profile?.email || caller.user.id}.`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'MT5_ACCOUNT_REGISTERED',
+          targetType: 'mt5_accounts',
+          result: 'denied',
+          details: `Blocked non-DEMO MT5 registration for #${String(accountNumber).trim()} (accountType=${String(accountType)}).`,
+        });
         return res.status(403).json({
           success: false,
           code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -2235,6 +2606,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (!caller.isVerifiedAdmin && userId && String(userId).trim() !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'MT5_ACCOUNT_REGISTERED',
+          targetType: 'mt5_accounts',
+          result: 'denied',
+          details: `Blocked cross-tenant MT5 registration attempt targeting user ${String(userId).trim()}.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'TENANT_OWNERSHIP_FORBIDDEN',
@@ -2247,6 +2626,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
         role = accountRole === 'parent' ? 'parent' : 'child';
       } else if (caller.profile?.role === 'mentor') {
         if (accountRole && accountRole !== 'parent') {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'mentor',
+            action: 'MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            result: 'denied',
+            details: `Blocked mentor attempt to register ${String(accountRole)} MT5 account.`,
+          });
           return res.status(403).json({
             success: false,
             code: 'ROLE_MISMATCH',
@@ -2256,6 +2643,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
         role = 'parent';
       } else if (caller.profile?.role === 'trader') {
         if (accountRole && accountRole !== 'child') {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'trader',
+            action: 'MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            result: 'denied',
+            details: `Blocked trader attempt to register ${String(accountRole)} MT5 account.`,
+          });
           return res.status(403).json({
             success: false,
             code: 'ROLE_MISMATCH',
@@ -2264,6 +2659,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
         role = 'child';
       } else {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'MT5_ACCOUNT_REGISTERED',
+          targetType: 'mt5_accounts',
+          result: 'denied',
+          details: `Blocked MT5 account registration for unsupported role "${caller.profile?.role || 'unknown'}".`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Unsupported account role.' });
       }
 
@@ -2302,6 +2705,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
           return res.status(400).json({ success: false, error: 'Target account is not a parent account.' });
         }
         if (parentAcc.account_type && parentAcc.account_type !== 'demo') {
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+              level: 'error',
+              details: `Blocked self-service registration linking child #${cleanAccNumber} to non-DEMO parent ${cleanParentId}.`,
+            },
+            dbClient
+          );
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            targetId: cleanParentId,
+            result: 'denied',
+            details: `Blocked self-service registration of #${cleanAccNumber}: parent ${cleanParentId} is non-DEMO.`,
+          });
           return res.status(403).json({
             success: false,
             code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -2336,6 +2756,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (existingAcc && !caller.isVerifiedAdmin && existingAcc.user_id !== targetUserId) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'MT5_ACCOUNT_REGISTERED',
+          targetType: 'mt5_accounts',
+          targetId: existingAcc.id,
+          result: 'denied',
+          details: `Blocked cross-tenant re-registration of existing MT5 account #${cleanAccNumber} (${cleanBrokerServer}).`,
+        });
         return res.status(403).json({
           success: false,
           code: 'ACCOUNT_OWNED_BY_OTHER_USER',
@@ -2417,6 +2846,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
           if (!existingAcc) {
             await dbClient.from('mt5_accounts').delete().eq('id', accountId);
           }
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'MT5_ACCOUNT_REGISTER_ERROR',
+              level: 'error',
+              details: `Self-service MT5 #${cleanAccNumber} mentor assignment failed: ${upsertRes.error}`,
+            },
+            dbClient
+          );
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'MT5_ACCOUNT_REGISTERED',
+            targetType: 'mt5_accounts',
+            targetId: accountId,
+            result: 'failed',
+            details: `Mentor assignment failed during self-service MT5 registration for #${cleanAccNumber}: ${upsertRes.error}`,
+          });
           return res.status(422).json({
             success: false,
             code: 'MENTOR_ASSIGNMENT_FAILED',
@@ -2753,10 +3199,36 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (accErr) return res.status(500).json({ success: false, error: accErr.message });
       if (!acc) return res.status(404).json({ success: false, error: 'MT5 account not found.' });
       if (!caller.isVerifiedAdmin && acc.user_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'TERMINAL_DISCONNECTED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Denied unauthorized connection state change on MT5 #${acc.account_number || accountId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin or account owner can change connection state.' });
       }
 
       if (status === 'connected') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'EA_HEARTBEAT_REQUIRED',
+            level: 'warn',
+            details: `Blocked dashboard connection spoof attempt for MT5 #${acc.account_number || accountId} by ${caller.profile?.email || caller.user.id}.`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'TERMINAL_CONNECTION_SPOOF_BLOCKED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Blocked manual 'connected' transition on MT5 #${acc.account_number || accountId}; authenticated EA heartbeat required.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'EA_HEARTBEAT_REQUIRED',
@@ -2782,6 +3254,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'TERMINAL_DISCONNECTED',
+        targetType: 'mt5_accounts',
+        targetId: accountId,
+        result: 'success',
+        details: `Marked MT5 terminal #${acc.account_number || accountId} as disconnected.`,
+      });
 
       return res.status(200).json({ success: true, accountId, connectionStatus: 'disconnected' });
     } catch (err: any) {
@@ -2808,13 +3289,22 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { data: acc, error: accErr } = await dbClient
         .from('mt5_accounts')
-        .select('id, user_id, auto_trading_enabled')
+        .select('id, user_id, account_number, auto_trading_enabled')
         .eq('id', accountId)
         .maybeSingle();
 
       if (accErr) return res.status(500).json({ success: false, error: accErr.message });
       if (!acc) return res.status(404).json({ success: false, error: 'MT5 account not found.' });
       if (!caller.isVerifiedAdmin && acc.user_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'AUTO_TRADING_TOGGLED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Denied unauthorized auto-trading toggle on MT5 #${acc.account_number || accountId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin or account owner can toggle auto-trading.' });
       }
 
@@ -2827,6 +3317,24 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .eq('id', accountId);
 
       if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+      await bridgeStore.addSyncLog(
+        {
+          eventType: nextEnabled ? 'AUTO_TRADING_ENABLED' : 'AUTO_TRADING_PAUSED',
+          level: nextEnabled ? 'info' : 'warn',
+          details: `User ${caller.profile?.email || caller.user.id} ${nextEnabled ? 'enabled' : 'paused'} auto-trading on MT5 account #${acc.account_number || accountId}.`,
+        },
+        dbClient
+      );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'AUTO_TRADING_TOGGLED',
+        targetType: 'mt5_accounts',
+        targetId: accountId,
+        result: 'success',
+        details: `${nextEnabled ? 'Enabled' : 'Paused'} auto-trading on MT5 #${acc.account_number || accountId}.`,
+      });
 
       return res.status(200).json({ success: true, accountId, autoTradingEnabled: nextEnabled });
     } catch (err: any) {
@@ -2887,6 +3395,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
     const dbClient = auth.dbClient || requireServiceRoleClient(res);
     if (!dbClient) return;
 
+    if (auth.terminal.previousConnectionStatus !== 'connected') {
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TERMINAL_CONNECTED',
+          level: 'success',
+          details: `PARENT MT5 Demo terminal #${auth.terminal.accountNumber} (${auth.terminal.brokerServer}) connected on trade-open broadcast.`,
+          ticket: parentTicketStr,
+        },
+        dbClient
+      );
+    }
+
     // Resolve assigned active child accounts from PostgreSQL
     interface ChildCandidate {
       childAccountId: string;
@@ -2903,7 +3423,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       // 1. Authoritative check on Parent MT5 account & profile
       const { data: parentAcc, error: parentAccErr } = await dbClient
         .from('mt5_accounts')
-        .select('id, user_id, account_role, connection_status, balance, equity')
+        .select('id, user_id, account_role, account_type, connection_status, balance, equity')
         .eq('id', auth.terminal.accountId)
         .maybeSingle();
 
@@ -2918,6 +3438,32 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(403).json({
           success: false,
           error: 'Forbidden: Authenticated terminal is not a registered Parent/Mentor account in database.',
+        });
+      }
+
+      if (parentAcc.account_type && String(parentAcc.account_type).toLowerCase() !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked trade-open from non-DEMO parent account ${parentAcc.id} (account_type=${parentAcc.account_type}).`,
+            ticket: parentTicketStr,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: parentAcc.user_id,
+          actorRole: 'system',
+          action: 'DEMO_ONLY_SAFETY_BLOCK',
+          targetType: 'mt5_accounts',
+          targetId: parentAcc.id,
+          result: 'denied',
+          details: `Blocked trade-open on non-DEMO parent account ${parentAcc.id}.`,
+        });
+        return res.status(403).json({
+          success: false,
+          code: 'DEMO_ONLY_SAFETY_BLOCK',
+          error: 'Safety block: TradeSync bridge strictly enforces Demo-Only MT5 accounts.',
         });
       }
 
@@ -2938,6 +3484,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (!mentorProfile || mentorProfile.role !== 'mentor' || mentorProfile.status !== 'active') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'MENTOR_BROADCAST_DENIED',
+            level: 'warn',
+            details: `Blocked trade-open #${parentTicketStr}: parent owner role=${mentorProfile?.role || 'none'}, status=${mentorProfile?.status || 'inactive'}.`,
+            ticket: parentTicketStr,
+          },
+          dbClient
+        );
         return res.status(403).json({
           success: false,
           error: `Forbidden: Parent account owner must be an active verified mentor (role: ${mentorProfile?.role || 'none'}, status: ${mentorProfile?.status || 'inactive'}). Broadcasting disabled.`,
@@ -2980,19 +3535,32 @@ export function createApiApp(deps?: ApiAppDependencies) {
         for (const a of assignments) {
           if (!a.child_account_id) continue;
 
-          // 3. Verify Child account exists and is assigned role 'child'
+          // 3. Verify Child account exists, is assigned role 'child', and is DEMO
           const { data: childAcc } = await dbClient
             .from('mt5_accounts')
-            .select('id, user_id, account_role, connection_status, balance, equity')
+            .select('id, user_id, account_role, account_type, connection_status, balance, equity')
             .eq('id', a.child_account_id)
             .maybeSingle();
 
           if (!childAcc || childAcc.account_role !== 'child') {
-            bridgeStore.addSyncLog(
+            await bridgeStore.addSyncLog(
               {
                 eventType: 'ASSIGNMENT_REJECTED',
                 level: 'warn',
                 details: `Skipped copy for child account ${a.child_account_id}: not found or role is not child`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          if (childAcc.account_type && String(childAcc.account_type).toLowerCase() !== 'demo') {
+            await bridgeStore.addSyncLog(
+              {
+                eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+                level: 'error',
+                details: `Skipped copy for child account ${a.child_account_id}: non-DEMO account_type=${childAcc.account_type}.`,
                 ticket: parentTicketStr,
               },
               dbClient
@@ -3008,7 +3576,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
             .maybeSingle();
 
           if (!traderProf || traderProf.status !== 'active') {
-            bridgeStore.addSyncLog(
+            await bridgeStore.addSyncLog(
               {
                 eventType: 'TRADER_INACTIVE_SKIPPED',
                 level: 'warn',
@@ -3030,6 +3598,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
     } catch (dbErr: any) {
       console.error('[Bridge] Supabase assignments query failure:', dbErr.message);
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TRADE_OPEN_ERROR',
+          level: 'error',
+          details: `Failed resolving child assignments for parent ticket #${parentTicketStr}: ${dbErr.message}`,
+          ticket: parentTicketStr,
+        },
+        dbClient
+      );
       return res.status(500).json({
         success: false,
         error: `Bridge persistence error while resolving child assignments: ${dbErr.message}`,
@@ -3058,69 +3635,98 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
     const queuedInstructions = [];
 
-    for (const child of assignedChildren) {
-      const sizing = RiskEngine.calculateChildLots({
-        parentSymbol: symbol,
-        parentLots: parentLotsNum,
-        orderType: type,
-        parentEquity,
-        parentBalance,
-        childEquity: child.childEquity,
-        childBalance: child.childBalance,
-        lotSettings: child.lotSettings,
-      });
+    try {
+      for (const child of assignedChildren) {
+        const sizing = RiskEngine.calculateChildLots({
+          parentSymbol: symbol,
+          parentLots: parentLotsNum,
+          orderType: type,
+          parentEquity,
+          parentBalance,
+          childEquity: child.childEquity,
+          childBalance: child.childBalance,
+          lotSettings: child.lotSettings,
+        });
 
-      if (!sizing.valid) {
+        if (!sizing.valid) {
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'RISK_ENGINE_REJECTED',
+              level: 'warn',
+              details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
+              ticket: parentTicketStr,
+            },
+            dbClient
+          );
+          continue;
+        }
+
+        const shouldSyncSlTp = child.lotSettings.syncSlTp !== false;
+        const effectiveSl = shouldSyncSlTp && sl != null && sl !== '' ? Number(sl) : undefined;
+        const effectiveTp = shouldSyncSlTp && tp != null && tp !== '' ? Number(tp) : undefined;
+        const hasSL = effectiveSl !== undefined && Number.isFinite(effectiveSl);
+        const hasTP = effectiveTp !== undefined && Number.isFinite(effectiveTp);
+
+        // Durable idempotent queueing
+        const idempotencyKey = `${parentTicketStr}_${child.childAccountId}_OPEN`;
+        const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
+          {
+            idempotencyKey,
+            action: 'OPEN',
+            childAccountId: child.childAccountId,
+            parentAccountId: auth.terminal.accountId,
+            parentTicket: parentTicketStr,
+            symbol: sizing.childSymbol,
+            orderType: type,
+            lots: sizing.childLots,
+            openPrice: openPrice != null && openPrice !== '' ? Number(openPrice) : undefined,
+            sl: hasSL ? effectiveSl : undefined,
+            tp: hasTP ? effectiveTp : undefined,
+            hasSL,
+            hasTP,
+            hasSl: hasSL,
+            hasTp: hasTP,
+            slippageMaxPips: child.lotSettings.slippageMaxPips,
+            magicNumber: magicNumStr,
+            comment: `${comment} (M#${parentTicketStr})`,
+          },
+          dbClient
+        );
+
+        queuedInstructions.push({
+          instructionId: instruction.instructionId,
+          childAccountId: instruction.childAccountId,
+          symbol: instruction.symbol,
+          lots: instruction.lots,
+          isDuplicate,
+        });
+      }
+
+      if (queuedInstructions.length > 0) {
         await bridgeStore.addSyncLog(
           {
-            eventType: 'RISK_ENGINE_REJECTED',
-            level: 'warn',
-            details: `Skipped copy for child ${child.childAccountId}: ${sizing.reason}`,
+            eventType: 'BRIDGE_PARENT_TRADE_OPEN',
+            level: 'info',
+            details: `Parent trade #${parentTicketStr} (${type} ${String(symbol).trim()} ${parentLotsNum} lots) queued across ${queuedInstructions.length} active child account(s).`,
             ticket: parentTicketStr,
           },
           dbClient
         );
-        continue;
       }
-
-      const shouldSyncSlTp = child.lotSettings.syncSlTp !== false;
-      const effectiveSl = shouldSyncSlTp && sl != null && sl !== '' ? Number(sl) : undefined;
-      const effectiveTp = shouldSyncSlTp && tp != null && tp !== '' ? Number(tp) : undefined;
-      const hasSL = effectiveSl !== undefined && Number.isFinite(effectiveSl);
-      const hasTP = effectiveTp !== undefined && Number.isFinite(effectiveTp);
-
-      // Durable idempotent queueing
-      const idempotencyKey = `${parentTicketStr}_${child.childAccountId}_OPEN`;
-      const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
+    } catch (queueErr: any) {
+      console.error('[TradeOpen] Instruction/mapping persistence error:', queueErr.message);
+      await bridgeStore.addSyncLog(
         {
-          idempotencyKey,
-          action: 'OPEN',
-          childAccountId: child.childAccountId,
-          parentAccountId: auth.terminal.accountId,
-          parentTicket: parentTicketStr,
-          symbol: sizing.childSymbol,
-          orderType: type,
-          lots: sizing.childLots,
-          openPrice: openPrice != null && openPrice !== '' ? Number(openPrice) : undefined,
-          sl: hasSL ? effectiveSl : undefined,
-          tp: hasTP ? effectiveTp : undefined,
-          hasSL,
-          hasTP,
-          hasSl: hasSL,
-          hasTp: hasTP,
-          slippageMaxPips: child.lotSettings.slippageMaxPips,
-          magicNumber: magicNumStr,
-          comment: `${comment} (M#${parentTicketStr})`,
+          eventType: 'BRIDGE_TRADE_OPEN_ERROR',
+          level: 'error',
+          details: `Failed queuing OPEN instructions/mappings for parent ticket #${parentTicketStr}: ${queueErr.message}`,
+          ticket: parentTicketStr,
         },
         dbClient
       );
-
-      queuedInstructions.push({
-        instructionId: instruction.instructionId,
-        childAccountId: instruction.childAccountId,
-        symbol: instruction.symbol,
-        lots: instruction.lots,
-        isDuplicate,
+      return res.status(500).json({
+        success: false,
+        error: queueErr.message || 'Failed to persist trade-open instruction and mapping.',
       });
     }
 
@@ -3293,6 +3899,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      if (queuedClose.length > 0) {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'BRIDGE_PARENT_TRADE_CLOSE',
+            level: 'info',
+            details: `Parent trade #${parentTicketStr} full close queued across ${queuedClose.length} follower terminal(s).`,
+            ticket: parentTicketStr,
+          },
+          dbClient
+        );
+      }
+
       return res.status(200).json({
         success: true,
         parentTicket: parentTicketStr,
@@ -3301,6 +3919,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
     } catch (err: any) {
       console.error('[TradeClose] Execution error:', err.message);
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TRADE_CLOSE_ERROR',
+          level: 'error',
+          details: `Failed queuing CLOSE instructions for parent ticket #${parentTicketStr}: ${err.message}`,
+          ticket: parentTicketStr,
+        },
+        dbClient
+      );
       return res.status(500).json({ success: false, error: err.message || 'Failed to queue close instructions' });
     }
   });
@@ -3447,9 +4074,30 @@ export function createApiApp(deps?: ApiAppDependencies) {
         modifiedCount += 1;
       }
 
+      if (modifiedCount > 0) {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'BRIDGE_PARENT_TRADE_MODIFY',
+            level: 'info',
+            details: `Parent ticket #${parentTicketStr} SL/TP modification queued across ${modifiedCount} follower terminal(s).`,
+            ticket: parentTicketStr,
+          },
+          dbClient
+        );
+      }
+
       return res.status(200).json({ success: true, parentTicket: parentTicketStr, modifiedCount });
     } catch (err: any) {
       console.error('[TradeModify] Execution error:', err.message);
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TRADE_MODIFY_ERROR',
+          level: 'error',
+          details: `Failed queuing MODIFY instructions for parent ticket #${parentTicketStr}: ${err.message}`,
+          ticket: parentTicketStr,
+        },
+        dbClient
+      );
       return res.status(500).json({ success: false, error: err.message || 'Failed to queue modify instructions' });
     }
   });
@@ -3475,6 +4123,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
     const dbClient = auth.dbClient || requireServiceRoleClient(res);
     if (!dbClient) return;
 
+    if (auth.terminal.previousConnectionStatus !== 'connected') {
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_TERMINAL_CONNECTED',
+          level: 'success',
+          details: `CHILD MT5 Demo terminal #${auth.terminal.accountNumber} (${auth.terminal.brokerServer}) connected on instruction poll.`,
+          latencyMs: auth.terminal.pingMs,
+        },
+        dbClient
+      );
+    }
+
     try {
       const pending = await bridgeStore.pollPendingInstructions(auth.terminal.accountId, 20, dbClient);
       return res.status(200).json({
@@ -3484,6 +4144,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
     } catch (err: any) {
       console.error('[BridgePoll] Failed to poll pending instructions:', err.message);
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_POLL_ERROR',
+          level: 'error',
+          details: `Failed polling instructions for child #${auth.terminal.accountNumber}: ${err.message}`,
+        },
+        dbClient
+      );
       return res.status(500).json({ success: false, error: err.message || 'Failed to poll pending instructions' });
     }
   });
@@ -3563,6 +4231,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
     );
 
     if (!ackResult.success) {
+      if ((ackResult.statusCode || 500) >= 500) {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'BRIDGE_ACK_PERSISTENCE_ERROR',
+            level: 'error',
+            details: `Failed persisting execution ACK for instruction ${String(instructionId).trim()}: ${ackResult.error}`,
+          },
+          dbClient
+        );
+      }
       return res.status(ackResult.statusCode || 404).json({ success: false, error: ackResult.error });
     }
 
@@ -3651,7 +4329,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
     if (!dbClient) return;
 
     try {
-      const mappings = await bridgeStore.getTradeMappings(dbClient);
+      const mappingResult = await bridgeStore.getTradeMappingsStrict(dbClient);
+      if (mappingResult.schemaMissing) {
+        return res.status(200).json({ success: true, mappings: [], schemaMissing: true });
+      }
+      if (mappingResult.error) {
+        return res.status(500).json({ success: false, error: `Failed to query trade_mappings: ${mappingResult.error}` });
+      }
+      const mappings = mappingResult.rows;
       if (caller.isVerifiedAdmin) {
         return res.status(200).json({ success: true, mappings });
       }
@@ -3685,8 +4370,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
     if (!dbClient) return;
 
     try {
-      const logs = await bridgeStore.getSyncLogs(dbClient);
-      return res.status(200).json({ success: true, logs });
+      const logResult = await bridgeStore.getSyncLogsStrict(dbClient);
+      if (logResult.schemaMissing) {
+        return res.status(200).json({ success: true, logs: [], schemaMissing: true });
+      }
+      if (logResult.error) {
+        return res.status(500).json({ success: false, error: `Failed to query bridge_sync_logs: ${logResult.error}` });
+      }
+      return res.status(200).json({ success: true, logs: logResult.rows });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to load bridge logs' });
     }
@@ -3708,7 +4399,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
     if (!dbClient) return;
 
     try {
-      const logs = await bridgeStore.getSyncLogs(dbClient);
+      const logResult = await bridgeStore.getSyncLogsStrict(dbClient);
+      if (logResult.schemaMissing) {
+        return res.status(200).json({ success: true, logs: [], schemaMissing: true });
+      }
+      if (logResult.error) {
+        return res.status(500).json({ success: false, error: `Failed to query bridge_sync_logs: ${logResult.error}` });
+      }
+      const logs = logResult.rows;
       if (caller.isVerifiedAdmin) {
         return res.status(200).json({ success: true, logs });
       }
@@ -4027,6 +4725,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
 
       if (upsertRes.error || !upsertRes.assignment) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'MENTOR_LINK_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: resolvedChildId,
+          result: 'failed',
+          details: `Failed to link child ${resolvedChildId} to mentor ${matchedMentor.id}: ${upsertRes.error || 'Unknown error'}.`,
+        });
         return res.status(422).json({ success: false, error: upsertRes.error || 'Failed to persist mentor link.' });
       }
 
@@ -4038,6 +4745,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'MENTOR_LINK_CREATED',
+        targetType: 'mentor_assignments',
+        targetId: upsertRes.assignment?.id || resolvedChildId,
+        result: 'success',
+        details: `Linked child ${resolvedChildId} to mentor ${matchedMentor.full_name || matchedMentor.id}.`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -4083,6 +4799,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
 
       if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id && existing.trader_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'ASSIGNMENT_STATUS_UPDATED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Denied unauthorized status update on assignment ${assignmentId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can change link status.' });
       }
 
@@ -4092,13 +4817,40 @@ export function createApiApp(deps?: ApiAppDependencies) {
           dbClient.from('profiles').select('id, status').eq('id', existing.trader_id).maybeSingle(),
         ]);
         if (!mentorProf || mentorProf.role !== 'mentor' || mentorProf.status !== 'active') {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'ASSIGNMENT_STATUS_UPDATED',
+            targetType: 'mentor_assignments',
+            targetId: assignmentId,
+            result: 'denied',
+            details: `Blocked activation of assignment ${assignmentId}: mentor profile is not active.`,
+          });
           return res.status(403).json({ success: false, error: 'Cannot activate link: mentor profile is not active.' });
         }
         if (!traderProf || traderProf.status !== 'active') {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'ASSIGNMENT_STATUS_UPDATED',
+            targetType: 'mentor_assignments',
+            targetId: assignmentId,
+            result: 'denied',
+            details: `Blocked activation of assignment ${assignmentId}: trader profile is not active.`,
+          });
           return res.status(403).json({ success: false, error: 'Cannot activate link: trader profile is not active.' });
         }
         const quotaCheck = await checkMentorFollowerQuota(dbClient, existing.mentor_id, existing.child_account_id);
         if (!quotaCheck.allowed) {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: (caller.profile?.role as any) || 'trader',
+            action: 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+            targetType: 'mentor_assignments',
+            targetId: assignmentId,
+            result: 'denied',
+            details: quotaCheck.error || `Follower quota exceeded activating assignment ${assignmentId}.`,
+          });
           return res.status(403).json({
             success: false,
             code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
@@ -4125,6 +4877,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'ASSIGNMENT_STATUS_UPDATED',
+        targetType: 'mentor_assignments',
+        targetId: assignmentId,
+        result: 'success',
+        details: `Assignment ${assignmentId} status changed to '${dbStatus}'.`,
+      });
 
       return res.status(200).json({ success: true, assignment: updated });
     } catch (err: any) {
@@ -4159,6 +4920,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
 
       if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id && existing.trader_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'ASSIGNMENT_UNLINKED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Denied unauthorized removal of assignment ${assignmentId}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can remove this link.' });
       }
 
@@ -4173,6 +4943,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'ASSIGNMENT_UNLINKED',
+        targetType: 'mentor_assignments',
+        targetId: assignmentId,
+        result: 'success',
+        details: `Removed mentor assignment ${assignmentId}.`,
+      });
 
       return res.status(200).json({ success: true, assignmentId });
     } catch (err: any) {
@@ -4207,6 +4986,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
 
       if (!caller.isVerifiedAdmin && existing.trader_id !== caller.user.id) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'LOT_SETTINGS_UPDATED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Denied unauthorized lot-settings modification on assignment ${assignmentId}.`,
+        });
         return res.status(403).json({
           success: false,
           error: 'Forbidden: Only the assigned trader or an administrator may modify lot sizing parameters.',
@@ -4215,6 +5003,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const parsedLotConfig = parseAndValidateAssignmentLotFields(req.body, existing, 'parent_lot');
       if (parsedLotConfig.error) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'LOT_SETTINGS_UPDATED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'failed',
+          details: `Invalid lot settings on assignment ${assignmentId}: ${parsedLotConfig.error}`,
+        });
         return res.status(400).json({
           success: false,
           code: parsedLotConfig.code || 'INVALID_LOT_SETTINGS',
@@ -4265,6 +5062,25 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(500).json({ success: false, error: fullUpdErr.message });
       }
 
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'LOT_SETTINGS_UPDATED',
+          level: 'info',
+          details: `Updated lot sizing for assignment ${assignmentId} (mode=${parsedLotConfig.normalizedLotMode}) by ${caller.profile?.email || caller.user.id}.`,
+        },
+        dbClient
+      );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'LOT_SETTINGS_UPDATED',
+        targetType: 'mentor_assignments',
+        targetId: assignmentId,
+        result: 'success',
+        details: `Updated lot settings (mode=${parsedLotConfig.normalizedLotMode}) on assignment ${assignmentId}.`,
+        metadata: { lotMode: parsedLotConfig.normalizedLotMode, persistedFields },
+      });
+
       return res.status(200).json({
         success: true,
         assignment: updated,
@@ -4302,6 +5118,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const ticketStr = String(parentTicket).trim();
       if (!caller.isVerifiedAdmin && caller.profile?.role !== 'mentor') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'EMERGENCY_CLOSE_QUEUED',
+          targetType: 'trade_mappings',
+          targetId: ticketStr,
+          result: 'denied',
+          details: `Blocked unauthorized emergency close request for parent ticket #${ticketStr}.`,
+        });
         return res.status(403).json({ success: false, error: 'Forbidden: Only active mentors or admins can dispatch emergency closes.' });
       }
 
@@ -4311,6 +5136,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const allowedParentIds = new Set((parentAccounts || []).map((a: any) => a.id));
       if (allowedParentIds.size === 0) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'EMERGENCY_CLOSE_QUEUED',
+          targetType: 'trade_mappings',
+          targetId: ticketStr,
+          result: 'failed',
+          details: `Emergency close failed for #${ticketStr}: caller has no parent MT5 account.`,
+        });
         return res.status(404).json({ success: false, error: 'No parent MT5 account found for caller.' });
       }
 
@@ -4326,6 +5160,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       );
 
       if (ownedMappings.length === 0) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'mentor',
+          action: 'EMERGENCY_CLOSE_QUEUED',
+          targetType: 'trade_mappings',
+          targetId: ticketStr,
+          result: 'failed',
+          details: `Emergency close failed: no active copied child positions found for parent ticket #${ticketStr}.`,
+        });
         return res.status(404).json({
           success: false,
           error: `No active copied child positions found for parent ticket #${ticketStr}.`,
@@ -4386,6 +5229,24 @@ export function createApiApp(deps?: ApiAppDependencies) {
         instructions: queued,
       });
     } catch (err: any) {
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'BRIDGE_EMERGENCY_CLOSE_ERROR',
+          level: 'error',
+          details: `Emergency close failed: ${err?.message || 'Unknown error'}`,
+          ticket: req.body?.parentTicket != null ? String(req.body.parentTicket) : undefined,
+        },
+        dbClient
+      );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'mentor',
+        action: 'EMERGENCY_CLOSE_QUEUED',
+        targetType: 'trade_mappings',
+        targetId: req.body?.parentTicket != null ? String(req.body.parentTicket) : undefined,
+        result: 'failed',
+        details: `Emergency close failed: ${err?.message || 'Unknown error'}`,
+      });
       return res.status(500).json({ success: false, error: err.message || 'Failed to queue emergency close' });
     }
   });
@@ -4516,6 +5377,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (parentAcc.account_type !== 'demo' || childAcc.account_type !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked admin assignment between parent ${cleanParentAccId} and child ${cleanChildAccId}: DEMO-only enforcement.`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: cleanChildAccId,
+          result: 'denied',
+          details: 'Blocked non-DEMO parent-child assignment.',
+        });
         return res.status(403).json({
           success: false,
           code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -4524,6 +5402,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (parentAcc.user_id !== cleanMentorId) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: cleanChildAccId,
+          result: 'denied',
+          details: `Parent MT5 account #${parentAcc.account_number} ownership mismatch with mentor ${cleanMentorId}.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'PARENT_ACCOUNT_OWNERSHIP_MISMATCH',
@@ -4532,6 +5419,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (childAcc.user_id !== cleanTraderId) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: cleanChildAccId,
+          result: 'denied',
+          details: `Child MT5 account #${childAcc.account_number} ownership mismatch with trader ${cleanTraderId}.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'CHILD_ACCOUNT_OWNERSHIP_MISMATCH',
@@ -4567,6 +5463,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         activeExisting.parent_account_id === cleanParentAccId &&
         activeExisting.child_account_id === cleanChildAccId
       ) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: activeExisting.id,
+          result: 'failed',
+          details: `Rejected duplicate assignment for Child #${childAcc.account_number} -> Parent #${parentAcc.account_number}.`,
+        });
         return res.status(409).json({
           success: false,
           code: 'DUPLICATE_ASSIGNMENT',
@@ -4575,6 +5480,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (activeExisting && !replaceExisting && activeExisting.mentor_id !== cleanMentorId) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: activeExisting.id,
+          result: 'failed',
+          details: `Rejected reassignment: Child #${childAcc.account_number} already assigned to another mentor.`,
+        });
         return res.status(409).json({
           success: false,
           code: 'CHILD_ALREADY_ASSIGNED',
@@ -4584,6 +5498,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, cleanChildAccId);
       if (!quotaCheck.allowed) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+          targetType: 'mentor_assignments',
+          targetId: cleanMentorId,
+          result: 'denied',
+          details: quotaCheck.error || `Follower quota exceeded for mentor ${cleanMentorId}.`,
+        });
         return res.status(403).json({
           success: false,
           code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
@@ -4601,6 +5524,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
 
       if (upsertRes.error || !upsertRes.assignment) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_CREATED',
+          targetType: 'mentor_assignments',
+          targetId: cleanChildAccId,
+          result: 'failed',
+          details: `Assignment persistence failed: ${upsertRes.error || 'Unknown error'}`,
+        });
         return res.status(422).json({ success: false, error: upsertRes.error || 'Failed to save mentor assignment.' });
       }
       const persistedAssignment = upsertRes.assignment;
@@ -4670,12 +5602,32 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const { data: matches, error: findErr } = await query;
       if (findErr) return res.status(500).json({ success: false, error: findErr.message });
       if (!matches || matches.length === 0) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ASSIGNMENT_REMOVED',
+          targetType: 'mentor_assignments',
+          targetId: cleanAssignId || cleanChildAccId || cleanTraderId,
+          result: 'failed',
+          details: 'Admin unassign failed: target mentor assignment not found.',
+        });
         return res.status(404).json({ success: false, error: 'Target mentor assignment not found.' });
       }
 
       for (const row of matches) {
         const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', row.id);
-        if (delErr) return res.status(500).json({ success: false, error: delErr.message });
+        if (delErr) {
+          await writeAuditLog(dbClient, {
+            actorId: caller.user.id,
+            actorRole: 'admin',
+            action: 'ADMIN_ASSIGNMENT_REMOVED',
+            targetType: 'mentor_assignments',
+            targetId: row.id,
+            result: 'failed',
+            details: `Admin unassign failed for ${row.id}: ${delErr.message}`,
+          });
+          return res.status(500).json({ success: false, error: delErr.message });
+        }
       }
 
       await bridgeStore.addSyncLog(
@@ -4750,6 +5702,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const targetProf = profRes.data;
 
       if (!acc) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'failed',
+          details: `Owner update failed: MT5 account ${accountId} not found.`,
+        });
         return res.status(404).json({
           success: false,
           code: 'ACCOUNT_NOT_FOUND',
@@ -4758,6 +5719,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (acc.account_type !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked admin owner update for non-DEMO MT5 account #${acc.account_number}.`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Blocked owner association for non-DEMO MT5 #${acc.account_number}.`,
+        });
         return res.status(403).json({
           success: false,
           code: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -4766,6 +5744,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (!targetProf || targetProf.status !== 'active') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'failed',
+          details: `Owner update failed for MT5 #${acc.account_number}: target profile ${cleanProfileId} inactive or missing.`,
+        });
         return res.status(400).json({
           success: false,
           code: 'TARGET_PROFILE_INACTIVE',
@@ -4774,6 +5761,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (acc.account_role === 'parent' && targetProf.role !== 'mentor') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Blocked parent MT5 #${acc.account_number} assignment to non-mentor role "${targetProf.role}".`,
+        });
         return res.status(400).json({
           success: false,
           code: 'INVALID_MENTOR_ROLE',
@@ -4782,6 +5778,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       if (acc.account_role === 'child' && targetProf.role !== 'trader') {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'denied',
+          details: `Blocked child MT5 #${acc.account_number} assignment to non-trader role "${targetProf.role}".`,
+        });
         return res.status(400).json({
           success: false,
           code: 'INVALID_TRADER_ROLE',
@@ -4795,6 +5800,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .eq('id', accountId);
 
       if (updErr) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+          targetType: 'mt5_accounts',
+          targetId: accountId,
+          result: 'failed',
+          details: `Owner update DB error for MT5 #${acc.account_number}: ${updErr.message}`,
+        });
         return res.status(500).json({ success: false, error: updErr.message });
       }
 

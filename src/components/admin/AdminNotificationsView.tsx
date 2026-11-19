@@ -31,7 +31,7 @@ export const AdminNotificationsView: React.FC<AdminNotificationsViewProps> = ({
   const [broadcastTitle, setBroadcastTitle] = useState('');
   const [broadcastMsg, setBroadcastMsg] = useState('');
   const [broadcastTargetRole, setBroadcastTargetRole] = useState<'all' | 'mentor' | 'trader' | 'admin'>('all');
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'info'; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
 
   // Live operational alerts derived from real platform state (no fabricated entries)
   const derivedAlerts = useMemo(() => {
@@ -146,13 +146,21 @@ export const AdminNotificationsView: React.FC<AdminNotificationsViewProps> = ({
     return matchesType && matchesSearch;
   });
 
-  const handleSendBroadcast = (e: React.FormEvent) => {
+  const handleSendBroadcast = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!broadcastTitle.trim() || !broadcastMsg.trim()) return;
-    broadcastAnnouncement(broadcastTitle.trim(), broadcastMsg.trim(), broadcastTargetRole);
+    const titleText = broadcastTitle.trim();
+    const res = await broadcastAnnouncement(titleText, broadcastMsg.trim(), broadcastTargetRole);
+    if (!res.success) {
+      setFeedback({
+        type: 'error',
+        message: res.message || `Failed to publish broadcast "${titleText}".`,
+      });
+      return;
+    }
     setFeedback({
       type: 'success',
-      message: `Broadcast "${broadcastTitle.trim()}" published to ${broadcastTargetRole}.`,
+      message: res.message || `Broadcast "${titleText}" published to ${broadcastTargetRole}.`,
     });
     setBroadcastTitle('');
     setBroadcastMsg('');

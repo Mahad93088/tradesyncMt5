@@ -179,16 +179,18 @@ export const MT5AccountsManagementView: React.FC<MT5AccountsManagementViewProps>
       isCloudMode,
     });
     if (res.success) {
-      addAuditLog({
-        actorId: currentUser.id,
-        actorName: currentUser.fullName,
-        actorRole: 'admin',
-        action: 'UNLINK_CHILD_ACCOUNT',
-        targetResource: 'mentor_assignments',
-        targetId: confirmUnlink.childAccountId,
-        result: 'success',
-        details: `Unlinked child MT5 account #${confirmUnlink.accountNumber || confirmUnlink.childAccountId} from parent mentor.`,
-      });
+      if (!isCloudMode) {
+        addAuditLog({
+          actorId: currentUser.id,
+          actorName: currentUser.fullName,
+          actorRole: 'admin',
+          action: 'UNLINK_CHILD_ACCOUNT',
+          targetResource: 'mentor_assignments',
+          targetId: confirmUnlink.childAccountId,
+          result: 'success',
+          details: `Unlinked child MT5 account #${confirmUnlink.accountNumber || confirmUnlink.childAccountId} from parent mentor.`,
+        });
+      }
       setFeedback({ type: 'success', message: 'Child account unlinked from parent stream.' });
       await loadAccounts();
       void refreshCloudData();
