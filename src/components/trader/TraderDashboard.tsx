@@ -12,13 +12,17 @@ import {
   Shield,
   Plus,
   CheckCircle2,
-  Power
+  Power,
+  Download,
+  Printer,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { RealEquityCurveChart } from '../common/RealEquityCurveChart';
+import { downloadCsvFile, printCurrentReport } from '../common/exportHelpers';
 import {
   formatLotRuleLabel,
   formatLinkProfitDisplay,
@@ -46,6 +50,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     parentChildLinks,
     mentorProfiles,
     mentorDirectory,
+    subscriptions,
     trades,
     tradeMappings,
     toggleLinkStatus,
@@ -81,13 +86,23 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     : null;
   const mentorProfile =
     !isCloudMode && link ? mentorProfiles.find((m) => m.userId === link.mentorId) : null;
+  const activeUserSub = subscriptions.find(
+    (s) => s.userId === currentUser.id || s.mentorId === currentUser.id
+  );
 
-  // Trades & mappings on selected child account (fallback to all trader trades when unsplit)
+  // Trades & mappings on selected child account
   const scopedTrades = childAccount
     ? trades.filter((t) => t.accountId === childAccount.id)
     : [];
   const openTrades = scopedTrades.filter((t) => t.status === 'OPEN');
   const realOpenTrades = openTrades.filter((t) => !t.isMappingFallback);
+  const closedRealizedTrades = scopedTrades.filter(
+    (t) => !t.isMappingFallback && t.status === 'CLOSED' && (!isCloudMode || t.isRealized !== false)
+  );
+  const totalCommission = closedRealizedTrades.reduce((acc, t) => acc + Number(t.commission || 0), 0);
+  const totalSwap = closedRealizedTrades.reduce((acc, t) => acc + Number(t.swap || 0), 0);
+  const totalPips = closedRealizedTrades.reduce((acc, t) => acc + Number(t.pips || 0), 0);
+
   const traderMappings = tradeMappings.filter(
     (m) =>
       (childAccount ? m.childAccountId === childAccount.id : m.traderId === currentUser.id) &&
@@ -152,6 +167,30 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     }
   };
 
+  const handleExportCsv = () => {
+    downloadCsvFile(
+      `tradesync_trader_report_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Ticket', 'Symbol', 'Type', 'Lots', 'Open Price', 'Close Price', 'Commission', 'Swap', 'Pips', 'Profit', 'Status', 'Open Time', 'Close Time'],
+      scopedTrades
+        .filter((t) => !t.isMappingFallback)
+        .map((t) => [
+          t.ticket,
+          t.symbol,
+          t.type,
+          t.lots.toFixed(2),
+          t.openPrice,
+          t.closePrice ?? '',
+          t.commission ?? 0,
+          t.swap ?? 0,
+          t.pips ?? 0,
+          t.profit.toFixed(2),
+          t.status,
+          t.openTime,
+          t.closeTime ?? '',
+        ])
+    );
+  };
+
   const copyingStreamSubtitle = !childAccount
     ? 'Terminal offline'
     : childAccount.isStale
@@ -184,6 +223,22 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors"
+          >
+            <Download className="h-3.5 w-3.5 text-cyan-400" />
+            <span>Export CSV</span>
+          </button>
+          <button
+            type="button"
+            onClick={printCurrentReport}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors print:hidden"
+          >
+            <Printer className="h-3.5 w-3.5 text-slate-300" />
+            <span>Print</span>
+          </button>
           {childAccounts.length > 1 && childAccount && (
             <select
               value={childAccount.id}
@@ -584,7 +639,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-400">Realized P&L:</span>
+                      <span className="text-slate-400">Realized P&amp;L:</span>
                       <span
                         className={
                           !linkProfit.available
@@ -597,9 +652,16 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                         {linkProfit.text}
                       </span>
                     </div>
-                    <p className="pt-1 border-t border-slate-800/80 text-[10px] font-sans text-slate-500">
-                      Mentor analytics & subscription billing metrics require Supabase schema provisioning.
-                    </p>
+                    <div className="flex justify-between pt-1 border-t border-slate-800/80">
+                      <span className="text-slate-400">SaaS License:</span>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('subscription')}
+                        className="text-cyan-400 hover:underline font-sans font-semibold"
+                      >
+                        {activeUserSub ? `${activeUserSub.planName} (${activeUserSub.status})` : 'Manage Billing →'}
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1.5 font-mono text-[11px]">
@@ -686,6 +748,19 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         </div>
       </div>
 
+      {/* Realized Reporting & Equity Curve */}
+      <RealEquityCurveChart
+        trades={scopedTrades}
+        isCloudMode={isCloudMode}
+        variant="dark"
+        title="Follower Realized Performance Curve"
+        subtitle={
+          reporting.realizedPnlAvailable
+            ? `Cumulative net profit across ${reporting.realizedClosedCount} settled child deal(s)`
+            : 'Renders automatically from closed child MT5 deals'
+        }
+      />
+
       {/* Realized Reporting & Execution Metrics */}
       <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
@@ -695,7 +770,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
             </h3>
             <p className="text-[11px] text-slate-400">
               {reporting.realizedPnlAvailable
-                ? `Computed strictly from ${reporting.realizedClosedCount} settled MT5 deal(s).`
+                ? `Computed strictly from ${reporting.realizedClosedCount} settled MT5 deal(s). Commission: $${totalCommission.toFixed(2)} • Swap: $${totalSwap.toFixed(2)} • Net Pips: ${totalPips.toFixed(1)}`
                 : 'Awaiting closed deal data from MT5 Expert Advisor.'}
             </p>
           </div>
@@ -776,4 +851,3 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     </div>
   );
 };
-

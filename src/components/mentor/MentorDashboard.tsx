@@ -13,13 +13,17 @@ import {
   Check,
   Plus,
   Power,
-  Layers
+  Layers,
+  Download,
+  Printer,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { RealEquityCurveChart } from '../common/RealEquityCurveChart';
+import { downloadCsvFile, printCurrentReport } from '../common/exportHelpers';
 import {
   getDeterministicInviteCode,
   formatHeartbeatAge,
@@ -44,6 +48,8 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     mt5Accounts,
     mentorProfiles,
     subscriptions,
+    subscriptionPlans,
+    mentorGroups,
     parentChildLinks,
     trades,
     tradeMappings,
@@ -62,15 +68,17 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     (a) => a.userId === currentUser.id && a.accountRole === 'parent'
   );
 
-  const profile = isCloudMode ? null : mentorProfiles.find((m) => m.userId === currentUser.id) || mentorProfiles[0];
-  const sub = isCloudMode ? null : subscriptions.find((s) => s.mentorId === currentUser.id);
-  const inviteCode = isCloudMode
-    ? getDeterministicInviteCode(currentUser.id)
-    : profile?.inviteCode || getDeterministicInviteCode(currentUser.id);
+  const profile = mentorProfiles.find((m) => m.userId === currentUser.id) || mentorProfiles[0] || null;
+  const sub =
+    subscriptions.find((s) => s.mentorId === currentUser.id || s.userId === currentUser.id) || null;
+  const activePlan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : null;
+  const inviteCode = profile?.inviteCode || getDeterministicInviteCode(currentUser.id);
+  const myGroups = mentorGroups.filter((g) => g.mentorId === currentUser.id);
 
   // Follower links
   const mentorLinks = parentChildLinks.filter((l) => l.mentorId === currentUser.id);
   const activeFollowers = mentorLinks.filter((l) => l.status === 'active').length;
+  const maxQuota = sub?.maxFollowers ?? activePlan?.maxFollowers ?? activePlan?.maxChildAccounts ?? profile?.maxFollowers ?? 25;
 
   // Parent trades (open & closed history)
   const parentTrades = trades.filter(
@@ -113,6 +121,27 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     setPendingEmergencyTicket(null);
   };
 
+  const handleExportMasterTrades = () => {
+    downloadCsvFile(
+      `tradesync_mentor_report_${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Ticket', 'Symbol', 'Direction', 'Lots', 'Open Price', 'Close Price', 'Commission', 'Swap', 'Profit', 'Status', 'Open Time', 'Close Time'],
+      parentTrades.map((t) => [
+        t.ticket,
+        t.symbol,
+        t.type,
+        t.lots.toFixed(2),
+        t.openPrice,
+        t.closePrice ?? '',
+        t.commission ?? 0,
+        t.swap ?? 0,
+        t.profit.toFixed(2),
+        t.status,
+        t.openTime,
+        t.closeTime ?? '',
+      ])
+    );
+  };
+
   const isStreamConnected = parentAccount?.connectionStatus === 'connected' && !parentAccount?.isStale;
 
   return (
@@ -129,13 +158,27 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            {isCloudMode
-              ? 'Master MT5 Demo Bridge • Multi-follower automated signal dispatcher.'
-              : `${profile?.strategyName || 'Master Strategy'} • Strategy performance and multi-follower automated mirror dispatcher.`}
+            {profile?.strategyName || 'Master Strategy'} • Strategy performance, follower groups, and multi-follower mirror dispatcher.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportMasterTrades}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors"
+          >
+            <Download className="h-3.5 w-3.5 text-cyan-400" />
+            <span>Export CSV</span>
+          </button>
+          <button
+            type="button"
+            onClick={printCurrentReport}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-750 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors print:hidden"
+          >
+            <Printer className="h-3.5 w-3.5 text-slate-300" />
+            <span>Print</span>
+          </button>
           <button
             onClick={onOpenInviteModal}
             className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-750 px-3.5 py-1.5 text-xs font-semibold text-slate-200 transition-colors"
@@ -206,7 +249,7 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
         <StatsCard
           title="Active Followers"
           value={activeFollowers}
-          subtitle={isCloudMode ? `${mentorLinks.length} total assigned link(s)` : `Max ${profile?.maxFollowers || 25} capacity`}
+          subtitle={`${activeFollowers} / ${maxQuota} plan quota (${myGroups.length} group${myGroups.length === 1 ? '' : 's'})`}
           icon={Users}
           accentColor="teal"
           onClick={() => onNavigateTab('child-accounts')}
@@ -304,6 +347,19 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
           </p>
         </div>
       </div>
+
+      {/* Real Equity Curve Chart */}
+      <RealEquityCurveChart
+        trades={parentTrades}
+        isCloudMode={isCloudMode}
+        variant="dark"
+        title="Master Strategy Realized Equity Curve"
+        subtitle={
+          reporting.realizedPnlAvailable
+            ? `Cumulative realized P&L across ${reporting.realizedClosedCount} settled master deal(s)`
+            : 'Renders automatically from verified closed master MT5 deals'
+        }
+      />
 
       {/* Grid: Parent MT5 Terminal Node + Invitation & Plan Box */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -585,7 +641,7 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
           )}
         </div>
 
-        {/* Quick Invite & Schema-Aware Status Box */}
+        {/* Quick Invite & Subscription Box */}
         <div className="space-y-4">
           {/* Quick Invite Code Box */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
@@ -611,58 +667,51 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
             </div>
           </div>
 
-          {/* Subscription & Groups Card (Honest in Cloud Mode, Interactive in Local Demo) */}
-          {isCloudMode ? (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-400 uppercase flex items-center gap-1.5">
-                  <Layers className="h-3.5 w-3.5 text-amber-400" />
-                  Groups & Billing
-                </span>
-                <span className="rounded bg-amber-950/70 border border-amber-800/70 px-2 py-0.5 text-[10px] font-mono text-amber-300">
-                  Unprovisioned
+          {/* Subscription & Groups Summary Card */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-400 uppercase flex items-center gap-1.5">
+                <Layers className="h-3.5 w-3.5 text-cyan-400" />
+                Plan & Follower Groups
+              </span>
+              <StatusBadge status={sub?.status || 'pending'} size="sm" />
+            </div>
+            <h4 className="font-bold text-white text-sm">
+              {sub?.planName || activePlan?.name || (isCloudMode ? 'Starter Free / No Paid Plan' : 'Demo Sandbox Tier')}
+            </h4>
+            <div className="text-xs text-slate-400 space-y-1 font-mono">
+              <div className="flex justify-between">
+                <span>Follower Quota:</span>
+                <span className="text-white">{activeFollowers} / {maxQuota}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Strategy Groups:</span>
+                <span className="text-slate-200">{myGroups.length} active</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Renewal Expiry:</span>
+                <span className="text-cyan-400">
+                  {sub?.expiresAt ? new Date(sub.expiresAt).toLocaleDateString() : 'N/A'}
                 </span>
               </div>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Dedicated <code className="text-cyan-300 font-mono">mentor_groups</code>, <code className="text-cyan-300 font-mono">subscription_plans</code>, and revenue tables are not yet provisioned in Supabase.
-              </p>
-              <p className="text-[11px] text-slate-400">
-                Active student linkages ({activeFollowers}) and MT5 copy execution operate directly via <code className="font-mono text-slate-300">mentor_assignments</code>.
-              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 pt-1">
               <button
-                onClick={() => onNavigateTab('subscription')}
-                className="w-full rounded-lg bg-slate-800 hover:bg-slate-700 py-1.5 text-xs text-slate-200 font-semibold transition-colors"
+                type="button"
+                onClick={() => onNavigateTab('child-accounts')}
+                className="rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 py-1.5 text-xs text-slate-200 font-semibold transition-colors"
               >
-                View Schema & Plan Status
+                Manage Groups
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('subscription')}
+                className="rounded-lg bg-cyan-600/90 hover:bg-cyan-500 py-1.5 text-xs text-white font-semibold transition-colors"
+              >
+                Billing & Plans
               </button>
             </div>
-          ) : (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-400 uppercase">Subscription Tier</span>
-                <StatusBadge status={sub?.status || 'active'} size="sm" />
-              </div>
-              <h4 className="font-bold text-white text-sm">{sub?.planName || 'Demo Sandbox Tier'}</h4>
-              <div className="text-xs text-slate-400 space-y-1 font-mono">
-                <div className="flex justify-between">
-                  <span>Follower Quota:</span>
-                  <span className="text-white">{activeFollowers} / {profile?.maxFollowers || 25}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Renewal Expiry:</span>
-                  <span className="text-cyan-400">
-                    {sub?.expiresAt ? new Date(sub.expiresAt).toLocaleDateString() : 'N/A'}
-                  </span>
-                </div>
-              </div>
-              <button
-                onClick={() => onNavigateTab('subscription')}
-                className="w-full rounded-lg bg-slate-800 hover:bg-slate-700 py-1.5 text-xs text-slate-200 font-semibold transition-colors"
-              >
-                Manage Subscription Plan
-              </button>
-            </div>
-          )}
+          </div>
         </div>
       </div>
 
@@ -679,4 +728,3 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     </div>
   );
 };
-

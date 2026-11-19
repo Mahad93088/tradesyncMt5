@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabaseDataService } from '../services/supabaseDataService';
 import { ensureValidSession } from '../lib/sessionManager';
+import { supabase } from '../lib/supabase';
 import {
   User,
   UserRole,
@@ -11,6 +12,10 @@ import {
   MentorDirectoryEntry,
   SubscriptionPlan,
   Subscription,
+  PaymentRecord,
+  InvoiceRecord,
+  MentorGroup,
+  PlatformSettingsConfig,
   ParentChildLink,
   Trade,
   TradeMapping,
@@ -78,6 +83,16 @@ interface AppContextType {
   mentorDirectory: MentorDirectoryEntry[];
   subscriptionPlans: SubscriptionPlan[];
   subscriptions: Subscription[];
+  payments: PaymentRecord[];
+  invoices: InvoiceRecord[];
+  mentorGroups: MentorGroup[];
+  platformSettings: PlatformSettingsConfig;
+  billingProviderStatus: {
+    stripeConfigured: boolean;
+    stripeWebhookConfigured: boolean;
+    paypalConfigured: boolean;
+    paypalWebhookConfigured: boolean;
+  };
   parentChildLinks: ParentChildLink[];
   trades: Trade[];
   tradeMappings: TradeMapping[];
@@ -99,6 +114,27 @@ interface AppContextType {
 
   // User Actions
   toggleUserStatus: (userId: string) => Promise<{ success: boolean; message?: string }>;
+  archiveUser: (userId: string) => Promise<{ success: boolean; message?: string }>;
+  savePlatformSettings: (next: Partial<PlatformSettingsConfig>) => Promise<{ success: boolean; message?: string }>;
+  createMentorGroup: (name: string, description?: string) => Promise<{ success: boolean; message?: string }>;
+  deleteMentorGroup: (groupId: string) => Promise<{ success: boolean; message?: string }>;
+  assignFollowerGroup: (assignmentId: string, groupId: string | null) => Promise<{ success: boolean; message?: string }>;
+  updateMentorStrategyProfile: (payload: {
+    strategyName: string;
+    description: string;
+    monthlyFee: number;
+    maxFollowers: number;
+  }) => Promise<{ success: boolean; message?: string }>;
+  requestBillingCheckout: (
+    planId: string,
+    billingCycle: 'monthly' | 'yearly',
+    provider: 'stripe' | 'paypal'
+  ) => Promise<{ success: boolean; checkoutUrl?: string; message?: string; code?: string }>;
+  assignUserSubscription: (
+    userId: string,
+    planId: string,
+    billingCycle: 'monthly' | 'yearly'
+  ) => Promise<{ success: boolean; message?: string }>;
   createMentor: (
     user: { fullName: string; email: string; username?: string; phone?: string; status?: AccountStatus },
     profile?: { strategyName?: string; description?: string; monthlyFee?: number },
@@ -253,6 +289,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const { user: authUser, isCloudMode, isConfigured } = useAuth();
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [mentorGroups, setMentorGroups] = useState<MentorGroup[]>([]);
+  const [platformSettings, setPlatformSettings] = useState<PlatformSettingsConfig>({
+    id: 'default',
+    demoOnlyEnforced: true,
+    defaultSlippageMaxPips: 3.0,
+    defaultMaxLotCap: 50.0,
+    heartbeatStaleSeconds: 60,
+    maintenanceMode: false,
+  });
+  const [billingProviderStatus, setBillingProviderStatus] = useState({
+    stripeConfigured: false,
+    stripeWebhookConfigured: false,
+    paypalConfigured: false,
+    paypalWebhookConfigured: false,
+  });
   const [followerAccounts, setFollowerAccounts] = useState<MT5Account[]>([]);
   const [mentorDirectory, setMentorDirectory] = useState<MentorDirectoryEntry[]>([]);
   const [cloudRefreshNonce, setCloudRefreshNonce] = useState(0);
@@ -318,6 +371,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setParentChildLinks([]);
     setSubscriptions([]);
     setSubscriptionPlans([]);
+    setPayments([]);
+    setInvoices([]);
+    setMentorGroups([]);
     setMentorProfiles([]);
     setAuditLogs([]);
     setNotifications([]);
@@ -339,6 +395,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     let isMounted = true;
+    let realtimeDebounce: ReturnType<typeof setTimeout> | null = null;
 
     const syncCloudDashboard = async () => {
       try {
@@ -348,13 +405,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const headers = { Authorization: `Bearer ${token}` };
 
-        const [healthRes, verifyRes, mappingsRes, logsRes, tradesRes, dirRes] = await Promise.all([
+        const [healthRes, verifyRes, mappingsRes, logsRes, tradesRes, dirRes, plansRes, notifRes] = await Promise.all([
           fetch('/api/health').catch(() => null),
           fetch('/api/supabase/verify').catch(() => null),
           fetch('/api/v1/bridge/mappings', { headers }).catch(() => null),
           fetch(authUser.role === 'admin' ? '/api/v1/bridge/logs' : '/api/v1/bridge/my-logs', { headers }).catch(() => null),
           fetch('/api/v1/bridge/trades', { headers }).catch(() => null),
           fetch('/api/v1/bridge/mentors/directory', { headers }).catch(() => null),
+          fetch(authUser.role === 'admin' ? '/api/admin/subscription-plans' : '/api/v1/billing/plans', { headers }).catch(() => null),
+          fetch(authUser.role === 'admin' ? '/api/admin/notifications' : '/api/v1/notifications', { headers }).catch(() => null),
         ]);
 
         const healthJson = healthRes && healthRes.ok ? await healthRes.json().catch(() => null) : null;
@@ -363,6 +422,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const logsJson = logsRes && logsRes.ok ? await logsRes.json().catch(() => null) : null;
         const tradesJson = tradesRes && tradesRes.ok ? await tradesRes.json().catch(() => null) : null;
         const dirJson = dirRes && dirRes.ok ? await dirRes.json().catch(() => null) : null;
+        const plansJson = plansRes && plansRes.ok ? await plansRes.json().catch(() => null) : null;
+        const notifJson = notifRes && notifRes.ok ? await notifRes.json().catch(() => null) : null;
 
         if (!isMounted) return;
 
@@ -377,28 +438,76 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setTradeMappings(loadedMappings);
         setTrades(combinedTrades);
         setSyncLogs(loadedLogs);
-        setAuditLogs(buildCloudAuditLogs(loadedLogs));
-        setNotifications((prev) => {
-          const readIds = new Set(prev.filter((n) => n.read).map((n) => n.id));
-          return buildCloudNotifications(loadedLogs, authUser.role).map((n) =>
-            readIds.has(n.id) ? { ...n, read: true } : n
-          );
-        });
+
+        if (plansJson?.success && Array.isArray(plansJson.plans)) {
+          setSubscriptionPlans(plansJson.plans);
+          if (plansJson.providerStatus) {
+            setBillingProviderStatus(plansJson.providerStatus);
+          }
+        }
+
+        if (notifJson?.success && Array.isArray(notifJson.notifications)) {
+          setNotifications((prev) => {
+            const localReadIds = new Set(prev.filter((n) => n.read).map((n) => n.id));
+            return notifJson.notifications.map((n: PlatformNotification) =>
+              localReadIds.has(n.id) ? { ...n, read: true } : n
+            );
+          });
+        } else {
+          setNotifications((prev) => {
+            const readIds = new Set(prev.filter((n) => n.read).map((n) => n.id));
+            return buildCloudAuditLogs(loadedLogs).length >= 0
+              ? buildCloudNotifications(loadedLogs, authUser.role).map((n) =>
+                  readIds.has(n.id) ? { ...n, read: true } : n
+                )
+              : [];
+          });
+        }
 
         if (dirJson?.success && Array.isArray(dirJson.mentors)) {
           setMentorDirectory(dirJson.mentors);
         }
 
         if (authUser.role === 'admin') {
-          const [accRes, statusRes] = await Promise.all([
+          const [accRes, statusRes, auditRes, subsRes, payRes, invRes, settingsRes] = await Promise.all([
             fetch('/api/v1/admin/accounts', { headers }).catch(() => null),
             fetch('/api/v1/bridge/status', { headers }).catch(() => null),
+            fetch('/api/admin/audit-logs', { headers }).catch(() => null),
+            fetch('/api/admin/subscriptions', { headers }).catch(() => null),
+            fetch('/api/admin/payments', { headers }).catch(() => null),
+            fetch('/api/admin/invoices', { headers }).catch(() => null),
+            fetch('/api/admin/platform-settings', { headers }).catch(() => null),
           ]);
 
           const accJson = accRes && accRes.ok ? await accRes.json().catch(() => null) : null;
           const statusJson = statusRes && statusRes.ok ? await statusRes.json().catch(() => null) : null;
+          const auditJson = auditRes && auditRes.ok ? await auditRes.json().catch(() => null) : null;
+          const subsJson = subsRes && subsRes.ok ? await subsRes.json().catch(() => null) : null;
+          const payJson = payRes && payRes.ok ? await payRes.json().catch(() => null) : null;
+          const invJson = invRes && invRes.ok ? await invRes.json().catch(() => null) : null;
+          const settingsJson = settingsRes && settingsRes.ok ? await settingsRes.json().catch(() => null) : null;
 
           if (!isMounted) return;
+
+          if (auditJson?.success && Array.isArray(auditJson.logs) && auditJson.logs.length > 0) {
+            setAuditLogs(auditJson.logs);
+          } else {
+            setAuditLogs(buildCloudAuditLogs(loadedLogs));
+          }
+
+          if (subsJson?.success && Array.isArray(subsJson.subscriptions)) {
+            setSubscriptions(subsJson.subscriptions);
+          }
+          if (payJson?.success && Array.isArray(payJson.payments)) {
+            setPayments(payJson.payments);
+            if (payJson.providerStatus) setBillingProviderStatus(payJson.providerStatus);
+          }
+          if (invJson?.success && Array.isArray(invJson.invoices)) {
+            setInvoices(invJson.invoices);
+          }
+          if (settingsJson?.success && settingsJson.settings) {
+            setPlatformSettings(settingsJson.settings);
+          }
 
           if (accJson?.success && Array.isArray(accJson.accounts)) {
             const serverAccounts = accJson.accounts.map(mapServerAccountToMT5Account);
@@ -465,10 +574,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             lastSyncTimestamp: statusJson?.timestamp || new Date().toISOString(),
           }));
         } else {
-          // Non-admin Cloud Mode user (mentor / trader): tenant-scoped endpoint only
-          const myRes = await fetch('/api/v1/bridge/my-accounts', { headers }).catch(() => null);
+          // Non-admin Cloud Mode user (mentor / trader): tenant-scoped endpoints only
+          setAuditLogs(buildCloudAuditLogs(loadedLogs));
+          const [myRes, billRes, mpRes, grpRes] = await Promise.all([
+            fetch('/api/v1/bridge/my-accounts', { headers }).catch(() => null),
+            fetch('/api/v1/billing/me', { headers }).catch(() => null),
+            authUser.role === 'mentor' ? fetch('/api/v1/bridge/mentor/profile', { headers }).catch(() => null) : Promise.resolve(null),
+            authUser.role === 'mentor' ? fetch('/api/v1/bridge/mentor/groups', { headers }).catch(() => null) : Promise.resolve(null),
+          ]);
+
           const myJson = myRes && myRes.ok ? await myRes.json().catch(() => null) : null;
+          const billJson = billRes && billRes.ok ? await billRes.json().catch(() => null) : null;
+          const mpJson = mpRes && mpRes.ok ? await mpRes.json().catch(() => null) : null;
+          const grpJson = grpRes && grpRes.ok ? await grpRes.json().catch(() => null) : null;
+
           if (!isMounted) return;
+
+          if (billJson?.success) {
+            if (Array.isArray(billJson.subscriptions)) setSubscriptions(billJson.subscriptions);
+            if (Array.isArray(billJson.payments)) setPayments(billJson.payments);
+            if (Array.isArray(billJson.invoices)) setInvoices(billJson.invoices);
+            if (billJson.providerStatus) setBillingProviderStatus(billJson.providerStatus);
+          }
+
+          if (grpJson?.success && Array.isArray(grpJson.groups)) {
+            setMentorGroups(grpJson.groups);
+          }
+
+          if (mpJson?.success && mpJson.mentorProfile) {
+            const mp = mpJson.mentorProfile;
+            setMentorProfiles([
+              {
+                id: mp.id || `mp_${mp.userId}`,
+                userId: mp.userId,
+                displayName: authUser.fullName,
+                strategyName: mp.strategyName || 'Master Strategy',
+                description: mp.description || '',
+                monthlyFee: Number(mp.monthlyFee ?? 0),
+                totalFollowers: 0,
+                maxFollowers: Number(mp.maxFollowers ?? 25),
+                winRate: 0,
+                profitFactor: 0,
+                totalTrades: 0,
+                inviteCode: mp.inviteCode || `TS-${authUser.id.slice(0, 8).toUpperCase()}`,
+                inviteLink: `${window.location.origin}/?invite=${mp.inviteCode || ''}`,
+                subscriptionPlanId: billJson?.subscriptions?.[0]?.planId || '',
+                subscriptionStatus: billJson?.subscriptions?.[0]?.status || 'trial',
+                subscriptionExpiresAt: billJson?.subscriptions?.[0]?.expiresAt || '',
+                riskScore: 'Medium',
+              },
+            ]);
+          }
 
           const persistenceReady = Boolean(healthJson?.bridgePersistenceReady);
           setCloudBridgeTelemetry((prev) => ({
@@ -538,9 +694,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     syncCloudDashboard();
     const intervalId = setInterval(syncCloudDashboard, 10000);
 
+    const scheduleRealtimeRefresh = () => {
+      if (realtimeDebounce) clearTimeout(realtimeDebounce);
+      realtimeDebounce = setTimeout(() => {
+        if (isMounted) syncCloudDashboard();
+      }, 450);
+    };
+
+    const realtimeChannel = supabase
+      .channel(`tradesync_realtime_${authUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'mt5_accounts' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trade_mappings' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'mentor_assignments' }, scheduleRealtimeRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, scheduleRealtimeRefresh)
+      .subscribe();
+
     return () => {
       isMounted = false;
       clearInterval(intervalId);
+      if (realtimeDebounce) clearTimeout(realtimeDebounce);
+      supabase.removeChannel(realtimeChannel).catch(() => {});
     };
   }, [isCloudMode, isConfigured, authUser?.id, authUser?.role, authUser?.status, cloudRefreshNonce]);
 
@@ -669,6 +843,267 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
+    return { success: true };
+  };
+
+  const archiveUser = async (userId: string): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/archive`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to archive user.` };
+        }
+        await refreshCloudData();
+        return { success: true, message: json.message };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Failed to archive user.' };
+      }
+    }
+    await toggleUserStatus(userId);
+    return { success: true, message: 'User suspended in Local Demo sandbox.' };
+  };
+
+  const savePlatformSettings = async (
+    next: Partial<PlatformSettingsConfig>
+  ): Promise<{ success: boolean; message?: string }> => {
+    const merged: PlatformSettingsConfig = {
+      ...platformSettings,
+      ...next,
+      demoOnlyEnforced: true,
+    };
+    setPlatformSettings(merged);
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/admin/platform-settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(merged),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || 'Failed to save platform settings.' };
+        }
+        if (json.settings) setPlatformSettings(json.settings);
+        await refreshCloudData();
+        return { success: true, message: 'Platform configuration persisted to Supabase.' };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error saving settings.' };
+      }
+    }
+    return { success: true, message: 'Saved locally.' };
+  };
+
+  const createMentorGroup = async (
+    name: string,
+    description = ''
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/v1/bridge/mentor/groups', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ name, description }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) return { success: false, message: json?.error || 'Failed to create group.' };
+        await refreshCloudData();
+        return { success: true, message: `Group "${name}" created.` };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error creating group.' };
+      }
+    }
+    const newGrp: MentorGroup = {
+      id: `grp_${Date.now()}`,
+      mentorId: currentUser.id,
+      name,
+      description,
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    };
+    setMentorGroups((prev) => [newGrp, ...prev]);
+    return { success: true, message: `Group "${name}" created.` };
+  };
+
+  const deleteMentorGroup = async (groupId: string): Promise<{ success: boolean; message?: string }> => {
+    setMentorGroups((prev) => prev.filter((g) => g.id !== groupId));
+    setParentChildLinks((prev) => prev.map((l) => (l.groupId === groupId ? { ...l, groupId: null } : l)));
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/v1/bridge/mentor/groups/${encodeURIComponent(groupId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || 'Failed to delete group.' };
+        }
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error deleting group.' };
+      }
+    }
+    return { success: true };
+  };
+
+  const assignFollowerGroup = async (
+    assignmentId: string,
+    groupId: string | null
+  ): Promise<{ success: boolean; message?: string }> => {
+    setParentChildLinks((prev) => prev.map((l) => (l.id === assignmentId ? { ...l, groupId } : l)));
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const targetGrpId = groupId || '00000000-0000-0000-0000-000000000000';
+        const res = await fetch(`/api/v1/bridge/mentor/groups/${encodeURIComponent(targetGrpId)}/assign`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ assignmentId, unassign: !groupId }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          await refreshCloudData();
+          return { success: false, message: json?.error || 'Failed to assign follower group.' };
+        }
+        await refreshCloudData();
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error assigning group.' };
+      }
+    }
+    return { success: true };
+  };
+
+  const updateMentorStrategyProfile = async (payload: {
+    strategyName: string;
+    description: string;
+    monthlyFee: number;
+    maxFollowers: number;
+  }): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/v1/bridge/mentor/profile', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) return { success: false, message: json?.error || 'Failed to update mentor profile.' };
+        await refreshCloudData();
+        return { success: true, message: 'Strategy profile saved to Supabase.' };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error updating strategy profile.' };
+      }
+    }
+    editMentorProfile(currentUser.id, {
+      fullName: currentUser.fullName,
+      email: currentUser.email,
+      phone: currentUser.phone,
+      ...payload,
+    });
+    return { success: true, message: 'Saved locally.' };
+  };
+
+  const requestBillingCheckout = async (
+    planId: string,
+    billingCycle: 'monthly' | 'yearly',
+    provider: 'stripe' | 'paypal'
+  ): Promise<{ success: boolean; checkoutUrl?: string; message?: string; code?: string }> => {
+    if (!isCloudMode || !isConfigured) {
+      return {
+        success: false,
+        code: 'DEMO_MODE_CHECKOUT_DISABLED',
+        message: 'Switch to Cloud Mode with configured Stripe/PayPal credentials to initiate live checkout.',
+      };
+    }
+    try {
+      const sessionCheck = await ensureValidSession();
+      const token = sessionCheck.session?.access_token;
+      if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+      const res = await fetch('/api/v1/billing/checkout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ planId, billingCycle, provider }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        return {
+          success: false,
+          code: json?.code,
+          message: json?.error || `HTTP ${res.status}: Billing gateway unavailable.`,
+        };
+      }
+      return { success: true, checkoutUrl: json.checkoutUrl, message: 'Checkout session created.' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error initiating checkout.' };
+    }
+  };
+
+  const assignUserSubscription = async (
+    userId: string,
+    planId: string,
+    billingCycle: 'monthly' | 'yearly'
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch('/api/admin/subscriptions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ userId, planId, billingCycle, status: 'active', autoRenew: true }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) return { success: false, message: json?.error || 'Failed to assign subscription.' };
+        await refreshCloudData();
+        return { success: true, message: 'Subscription assigned in Supabase.' };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Network error assigning subscription.' };
+      }
+    }
+    renewOrChangeSubscription(userId, planId, billingCycle);
     return { success: true };
   };
 
@@ -1662,6 +2097,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Subscriptions
   const createSubscriptionPlan = (plan: Omit<SubscriptionPlan, 'id'>) => {
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch('/api/admin/subscription-plans', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(plan),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+      return;
+    }
+
     const newPlan: SubscriptionPlan = {
       ...plan,
       isActive: plan.isActive ?? true,
@@ -1689,6 +2138,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return p;
       })
     );
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(planData),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+    }
   };
 
   const togglePlanStatus = (planId: string) => {
@@ -1698,6 +2159,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSubscriptionPlans((prev) =>
       prev.map((p) => (p.id === planId ? { ...p, isActive: nextActive } : p))
     );
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ isActive: nextActive }),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+      return;
+    }
     addAuditLog({
       actorId: currentUser.id,
       actorName: currentUser.fullName,
@@ -1711,6 +2185,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const renewOrChangeSubscription = (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => {
+    if (isCloudMode && isConfigured) {
+      const existingSub = subscriptions.find((s) => s.mentorId === mentorId || s.userId === mentorId);
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        if (existingSub) {
+          await fetch(`/api/admin/subscriptions/${encodeURIComponent(existingSub.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ planId, billingCycle, status: 'active', autoRenew: true }),
+          }).catch(() => null);
+        } else {
+          await fetch('/api/admin/subscriptions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ userId: mentorId, planId, billingCycle, status: 'active', autoRenew: true }),
+          }).catch(() => null);
+        }
+        await refreshCloudData();
+      });
+      return;
+    }
+
     const plan = subscriptionPlans.find((p) => p.id === planId);
     if (!plan) return;
 
@@ -1794,6 +2291,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'cancelled', autoRenew: false }),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+      return;
+    }
+
     const targetSub = subscriptions.find((s) => s.id === subscriptionId);
     if (targetSub) {
       setMentorProfiles((prev) =>
@@ -1833,6 +2344,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           : s
       )
     );
+
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch(`/api/admin/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: nextStatus }),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+      return;
+    }
 
     setMentorProfiles((prev) =>
       prev.map((m) =>
@@ -2331,6 +2856,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch(`/api/v1/notifications/${encodeURIComponent(id)}/read`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => null);
+      });
+    }
   };
 
   const addAuditLog = (logData: Omit<AuditLog, 'id' | 'timestamp'>) => {
@@ -2347,6 +2882,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     message: string,
     targetRole: 'all' | 'admin' | 'mentor' | 'trader'
   ) => {
+    if (isCloudMode && isConfigured) {
+      ensureValidSession().then(async (sessionCheck) => {
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return;
+        await fetch('/api/admin/notifications', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ title, message, targetRole, type: 'info' }),
+        }).catch(() => null);
+        await refreshCloudData();
+      });
+      return;
+    }
+
     const newNotif: PlatformNotification = {
       id: `notif_${Date.now()}`,
       targetRole,
@@ -2397,6 +2949,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         mentorDirectory,
         subscriptionPlans,
         subscriptions,
+        payments,
+        invoices,
+        mentorGroups,
+        platformSettings,
+        billingProviderStatus,
         parentChildLinks,
         setParentChildLinks,
         trades,
@@ -2415,6 +2972,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         switchRole,
         updateCurrentUserProfile,
         toggleUserStatus,
+        archiveUser,
+        savePlatformSettings,
+        createMentorGroup,
+        deleteMentorGroup,
+        assignFollowerGroup,
+        updateMentorStrategyProfile,
+        requestBillingCheckout,
+        assignUserSubscription,
         createMentor,
         editMentorProfile,
         createTrader,

@@ -142,6 +142,7 @@ export function mapAssignmentsToLinks(
       traderName: traderProf?.full_name || traderProf?.email || 'Trader Follower',
       parentAccountId: parentAccId,
       childAccountId: childAccId,
+      groupId: a.group_id || null,
       status: a.status === 'active' ? 'active' : 'paused',
       lotSettings: {
         mode:

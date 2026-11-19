@@ -21,6 +21,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
+import { RealEquityCurveChart } from '../common/RealEquityCurveChart';
 import { formatHeartbeatAge } from '../common/dashboardHelpers';
 import {
   AdminPageHeader,
@@ -50,6 +51,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     users,
     mt5Accounts,
     subscriptions,
+    payments,
     parentChildLinks,
     trades,
     tradeMappings,
@@ -88,9 +90,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const activeSubscriptions = subscriptions.filter((s) => s.status === 'active');
   const trialSubscriptions = subscriptions.filter((s) => s.status === 'trial');
-  const demoMrr = activeSubscriptions.reduce((sum, sub) => {
+  const computedMrr = activeSubscriptions.reduce((sum, sub) => {
     return sum + (sub.billingCycle === 'yearly' ? sub.price / 12 : sub.price);
   }, 0);
+  const settledPaymentsCount = payments.filter((p) => p.status === 'succeeded').length;
 
   const executedInstructions = tradeMappings.filter(
     (m) => m.status === 'EXECUTED' || m.status === 'CLOSED'
@@ -125,9 +128,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .map(({ label, primary, secondary }) => ({ label, primary, secondary }));
   }, [users]);
 
-  // Derived Subscription & Revenue Series (Demo Mode only; Cloud Mode explicitly Not Configured)
+  // Derived Subscription & Revenue Series
   const subscriptionGrowthPoints = useMemo(() => {
-    if (isCloudMode) return [];
     const buckets = new Map<string, { label: string; primary: number; secondary: number; sortKey: number }>();
     subscriptions.forEach((s) => {
       const ts = Date.parse(s.startedAt);
@@ -144,29 +146,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .sort((a, b) => a.sortKey - b.sortKey)
       .slice(-6)
       .map(({ label, primary, secondary }) => ({ label, primary, secondary }));
-  }, [isCloudMode, subscriptions]);
+  }, [subscriptions]);
 
   const monthlyRevenuePoints = useMemo(() => {
-    if (isCloudMode) return [];
     const buckets = new Map<string, { label: string; primary: number; sortKey: number }>();
-    subscriptions
-      .filter((s) => s.status === 'active' || s.status === 'expired')
-      .forEach((s) => {
-        const ts = Date.parse(s.startedAt);
+    const settled = payments.filter((p) => p.status === 'succeeded');
+    if (settled.length > 0) {
+      settled.forEach((p) => {
+        const ts = Date.parse(p.paidAt || p.createdAt);
         if (!Number.isFinite(ts)) return;
         const d = new Date(ts);
         const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
         const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
-        const normalized = Math.round(s.billingCycle === 'yearly' ? s.price / 12 : s.price);
         const existing = buckets.get(key) || { label, primary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
-        existing.primary += normalized;
+        existing.primary += Math.round(p.amountUsd);
         buckets.set(key, existing);
       });
+    } else {
+      subscriptions
+        .filter((s) => s.status === 'active' || s.status === 'expired')
+        .forEach((s) => {
+          const ts = Date.parse(s.startedAt);
+          if (!Number.isFinite(ts)) return;
+          const d = new Date(ts);
+          const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+          const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+          const normalized = Math.round(s.billingCycle === 'yearly' ? s.price / 12 : s.price);
+          const existing = buckets.get(key) || { label, primary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+          existing.primary += normalized;
+          buckets.set(key, existing);
+        });
+    }
     return Array.from(buckets.values())
       .sort((a, b) => a.sortKey - b.sortKey)
       .slice(-6)
       .map(({ label, primary }) => ({ label, primary }));
-  }, [isCloudMode, subscriptions]);
+  }, [payments, subscriptions]);
 
   const recentMentors = [...mentors]
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
@@ -355,18 +370,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
         <AdminStatCard
           title="Active Subscriptions"
-          value={isCloudMode ? 'Not Configured' : activeSubscriptions.length}
-          subtitle={isCloudMode ? 'Billing tables pending' : `${trialSubscriptions.length} trial · ${subscriptions.length} total`}
+          value={activeSubscriptions.length}
+          subtitle={`${trialSubscriptions.length} trial · ${subscriptions.length} total`}
           icon={CreditCard}
-          tone={isCloudMode ? 'amber' : 'emerald'}
+          tone="emerald"
           onClick={() => onNavigateTab('subscriptions')}
         />
         <AdminStatCard
           title="Monthly Recurring Rev"
-          value={isCloudMode ? 'Not Configured' : `$${Math.round(demoMrr).toLocaleString()}`}
-          subtitle={isCloudMode ? 'Payments schema pending' : 'Demo sandbox MRR'}
+          value={`$${Math.round(computedMrr).toLocaleString()}`}
+          subtitle={
+            isCloudMode
+              ? settledPaymentsCount > 0
+                ? `${settledPaymentsCount} settled payment(s)`
+                : 'From active subscriptions'
+              : 'Demo sandbox MRR'
+          }
           icon={DollarSign}
-          tone={isCloudMode ? 'amber' : 'emerald'}
+          tone="emerald"
           onClick={() => onNavigateTab('payments-revenue')}
         />
         <AdminStatCard
@@ -379,7 +400,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       </div>
 
-      {/* 5 Analytics Charts */}
+      {/* 5 Analytics Charts + Realized Equity Curve */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <AdminSparkBarChart
           title="Mentor & Trader Growth"
@@ -394,25 +415,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           points={subscriptionGrowthPoints}
           primaryLabel="Active"
           secondaryLabel="Other"
-          notConfiguredText={
-            isCloudMode
-              ? 'Subscription growth chart requires subscription_plans and subscriptions tables in Supabase.'
-              : undefined
-          }
         />
         <AdminSparkBarChart
           title="Monthly Revenue"
-          subtitle="Normalized monthly recurring billing"
+          subtitle={settledPaymentsCount > 0 ? 'Verified settled payments' : 'Normalized monthly recurring billing'}
           points={monthlyRevenuePoints}
-          primaryLabel="MRR ($)"
+          primaryLabel={settledPaymentsCount > 0 ? 'Settled ($)' : 'MRR ($)'}
           valuePrefix="$"
-          notConfiguredText={
-            isCloudMode
-              ? 'Revenue analytics require live payments and invoices tables. No synthetic MRR is shown in Cloud Mode.'
-              : undefined
-          }
         />
       </div>
+
+      <RealEquityCurveChart
+        trades={trades}
+        isCloudMode={isCloudMode}
+        variant="light"
+        title="Platform Realized Performance Curve"
+        subtitle="Cumulative P&L computed strictly from verified closed MT5 deals"
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <AdminDistributionChart

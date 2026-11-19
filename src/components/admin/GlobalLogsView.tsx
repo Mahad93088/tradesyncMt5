@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { FileSpreadsheet, Search } from 'lucide-react';
+import { FileSpreadsheet, Search, Download, Printer } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { downloadCsvFile, printCurrentReport } from '../common/exportHelpers';
 import {
   AdminPageHeader,
   AdminStatusText,
@@ -54,6 +55,58 @@ export const GlobalLogsView: React.FC = () => {
     return matchesSearch && matchesStatus && matchesDate;
   });
 
+  const handleExportCsv = () => {
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    if (activeSubTab === 'audit') {
+      downloadCsvFile(
+        `tradesync_audit_logs_${dateStamp}.csv`,
+        ['Timestamp', 'Actor', 'Role', 'Action', 'Resource', 'Target ID', 'Severity', 'Details'],
+        filteredAuditLogs.map((l) => [
+          l.timestamp,
+          l.actorName,
+          l.actorRole,
+          l.action,
+          l.targetResource,
+          l.targetId || '',
+          l.result,
+          l.details,
+        ])
+      );
+    } else if (activeSubTab === 'mappings') {
+      downloadCsvFile(
+        `tradesync_ticket_mappings_${dateStamp}.csv`,
+        ['Open Time', 'Parent Ticket', 'Child Ticket', 'Symbol', 'Order Type', 'Parent Lots', 'Child Lots', 'Latency (ms)', 'Status', 'Error'],
+        filteredMappings.map((m) => [
+          m.openTime,
+          m.parentTradeTicket,
+          m.childTradeTicket,
+          m.symbol,
+          m.orderType,
+          m.parentLots,
+          m.childLots,
+          m.latencyMs,
+          m.status,
+          m.errorMessage || '',
+        ])
+      );
+    } else {
+      downloadCsvFile(
+        `tradesync_bridge_logs_${dateStamp}.csv`,
+        ['Timestamp', 'Level', 'Event Type', 'Ticket', 'Mentor', 'Trader', 'Latency (ms)', 'Details'],
+        filteredSyncLogs.map((l) => [
+          l.timestamp,
+          l.level,
+          l.eventType,
+          l.ticket || '',
+          l.mentorName || '',
+          l.traderName || '',
+          l.latencyMs ?? '',
+          l.details,
+        ])
+      );
+    }
+  };
+
   return (
     <div className="space-y-6">
       <AdminPageHeader
@@ -61,34 +114,52 @@ export const GlobalLogsView: React.FC = () => {
         meta={`${auditLogs.length} Audit · ${syncLogs.length} Sync Events`}
         subtitle="Structured record of admin actions, account registrations & suspensions, bridge errors, and trade ticket mappings."
         actions={
-          <div className="flex rounded-lg border border-slate-200 bg-white p-1 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => { setActiveSubTab('audit'); setStatusFilter('all'); }}
-              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
-                activeSubTab === 'audit' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
-              }`}
+              onClick={handleExportCsv}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700"
             >
-              Audit Trail ({auditLogs.length})
+              <Download className="h-3.5 w-3.5 text-slate-500" />
+              <span>Export CSV</span>
             </button>
             <button
               type="button"
-              onClick={() => { setActiveSubTab('mappings'); setStatusFilter('all'); }}
-              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
-                activeSubTab === 'mappings' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
-              }`}
+              onClick={printCurrentReport}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700"
             >
-              Ticket Mappings ({tradeMappings.length})
+              <Printer className="h-3.5 w-3.5 text-slate-500" />
+              <span>Print Report</span>
             </button>
-            <button
-              type="button"
-              onClick={() => { setActiveSubTab('engine'); setStatusFilter('all'); }}
-              className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
-                activeSubTab === 'engine' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Bridge Logs ({syncLogs.length})
-            </button>
+            <div className="flex rounded-lg border border-slate-200 bg-white p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => { setActiveSubTab('audit'); setStatusFilter('all'); }}
+                className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                  activeSubTab === 'audit' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Audit Trail ({auditLogs.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => { setActiveSubTab('mappings'); setStatusFilter('all'); }}
+                className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                  activeSubTab === 'mappings' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Ticket Mappings ({tradeMappings.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => { setActiveSubTab('engine'); setStatusFilter('all'); }}
+                className={`rounded-md px-3 py-1 font-medium whitespace-nowrap transition-colors ${
+                  activeSubTab === 'engine' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Bridge Logs ({syncLogs.length})
+              </button>
+            </div>
           </div>
         }
       />

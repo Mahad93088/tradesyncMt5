@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CreditCard, Search, CheckCircle2, Clock, Ban } from 'lucide-react';
+import { CreditCard, Search, CheckCircle2, Clock, Ban, Plus, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { Subscription } from '../../types';
@@ -8,7 +8,6 @@ import {
   AdminPageHeader,
   AdminStatCard,
   AdminStatusText,
-  AdminNotConfiguredBanner,
   AdminFeedbackBanner,
   AdminEmptyState,
 } from './adminUi';
@@ -16,17 +15,25 @@ import {
 export const SubscriptionsView: React.FC = () => {
   const { isCloudMode } = useAuth();
   const {
+    users,
     subscriptions,
     subscriptionPlans,
     parentChildLinks,
     cancelSubscription,
     renewOrChangeSubscription,
+    toggleSubscriptionStatus,
+    assignUserSubscription,
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [suspendedMap, setSuspendedMap] = useState<Record<string, boolean>>({});
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'info'; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [assignUserId, setAssignUserId] = useState('');
+  const [assignPlanId, setAssignPlanId] = useState('');
+  const [assignCycle, setAssignCycle] = useState<'monthly' | 'yearly'>('monthly');
+  const [isAssigning, setIsAssigning] = useState(false);
 
   const [confirmAction, setConfirmAction] = useState<{
     isOpen: boolean;
@@ -38,51 +45,46 @@ export const SubscriptionsView: React.FC = () => {
     action: 'cancel',
   });
 
-  if (isCloudMode) {
-    return (
-      <div className="space-y-6">
-        <AdminPageHeader
-          title="Subscriptions"
-          meta="Schema Unprovisioned"
-          subtitle="Monitor mentor subscription lifecycles, renewal dates, trial statuses, and follower account usage."
-        />
-        <AdminNotConfiguredBanner
-          title="Subscriptions Table Not Configured in Cloud Mode"
-          description="Live subscriber billing records, trial expirations, and auto-renewal states are not yet backed by a Supabase subscriptions table. No mock subscriptions are shown in Cloud Mode."
-          requiredTables={[
-            'subscriptions (id, mentor_id, plan_id, status, started_at, renewal_date, expires_at, trial_status)',
-            'subscription_usage (subscription_id, active_child_accounts)',
-          ]}
-          enforcedToday={[
-            'Mentor & Trader active status verification in public.profiles',
-            'Active copy assignment counts in Trade Copier Monitoring',
-            'Interactive subscription lifecycle testing in Local Demo Mode',
-          ]}
-        />
-      </div>
-    );
-  }
-
-  const getEffectiveStatus = (sub: Subscription) => {
-    if (suspendedMap[sub.id]) return 'suspended';
-    return sub.status;
-  };
-
   const filteredSubs = subscriptions.filter((sub) => {
-    const effStatus = getEffectiveStatus(sub);
     const matchesSearch =
       sub.mentorName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      sub.planName.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || effStatus === statusFilter;
+      sub.planName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (sub.userEmail || '').toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = statusFilter === 'all' || sub.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
-  const activeCount = subscriptions.filter((s) => getEffectiveStatus(s) === 'active').length;
-  const trialCount = subscriptions.filter((s) => getEffectiveStatus(s) === 'trial').length;
-  const inactiveCount = subscriptions.filter((s) => {
-    const st = getEffectiveStatus(s);
-    return st === 'expired' || st === 'cancelled' || st === 'suspended';
-  }).length;
+  const activeCount = subscriptions.filter((s) => s.status === 'active').length;
+  const trialCount = subscriptions.filter((s) => s.status === 'trial').length;
+  const inactiveCount = subscriptions.filter(
+    (s) => s.status === 'expired' || s.status === 'cancelled' || s.status === 'suspended'
+  ).length;
+
+  const eligibleUsers = users.filter((u) => u.role === 'mentor' || u.role === 'trader');
+
+  const handleOpenAssign = () => {
+    setAssignUserId(eligibleUsers[0]?.id || '');
+    setAssignPlanId(subscriptionPlans[0]?.id || '');
+    setAssignCycle('monthly');
+    setShowAssignModal(true);
+  };
+
+  const handleAssignSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignUserId || !assignPlanId) return;
+    setIsAssigning(true);
+    const res = await assignUserSubscription(assignUserId, assignPlanId, assignCycle);
+    setIsAssigning(false);
+    if (!res.success) {
+      setFeedback({ type: 'error', message: res.message || 'Failed to assign subscription.' });
+      return;
+    }
+    setFeedback({
+      type: 'success',
+      message: res.message || 'Subscription assigned successfully.',
+    });
+    setShowAssignModal(false);
+  };
 
   const handleConfirm = () => {
     if (!confirmAction.sub) return;
@@ -91,12 +93,13 @@ export const SubscriptionsView: React.FC = () => {
       cancelSubscription(sub.id);
       setFeedback({ type: 'info', message: `Cancelled subscription for ${sub.mentorName}.` });
     } else if (confirmAction.action === 'suspend') {
-      setSuspendedMap((prev) => ({ ...prev, [sub.id]: true }));
-      setFeedback({ type: 'info', message: `Suspended subscription for ${sub.mentorName} in Demo Sandbox.` });
+      toggleSubscriptionStatus(sub.id);
+      setFeedback({ type: 'info', message: `Suspended subscription for ${sub.mentorName}.` });
     } else {
-      setSuspendedMap((prev) => ({ ...prev, [sub.id]: false }));
-      if (sub.status === 'cancelled' || sub.status === 'expired') {
-        renewOrChangeSubscription(sub.mentorId, sub.planId, sub.billingCycle);
+      if (sub.status === 'suspended') {
+        toggleSubscriptionStatus(sub.id);
+      } else {
+        renewOrChangeSubscription(sub.mentorId || sub.userId || '', sub.planId, sub.billingCycle);
       }
       setFeedback({ type: 'success', message: `Reactivated subscription for ${sub.mentorName}.` });
     }
@@ -106,8 +109,19 @@ export const SubscriptionsView: React.FC = () => {
     <div className="space-y-6">
       <AdminPageHeader
         title="Subscriptions"
-        meta={`${subscriptions.length} Demo Subscriptions`}
-        subtitle="Track mentor plans, start & renewal dates, expiration windows, trial status, and follower quota usage."
+        meta={`${subscriptions.length} ${isCloudMode ? 'Cloud Subscriptions' : 'Demo Subscriptions'}`}
+        subtitle="Track mentor & trader SaaS plans, renewal dates, expiration windows, trial status, and follower quota usage."
+        actions={
+          <button
+            type="button"
+            onClick={handleOpenAssign}
+            disabled={eligibleUsers.length === 0 || subscriptionPlans.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>Assign Subscription</span>
+          </button>
+        }
       />
 
       {feedback && (
@@ -119,7 +133,7 @@ export const SubscriptionsView: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-        <AdminStatCard title="Active Subscriptions" value={activeCount} subtitle="Billing current in sandbox" icon={CheckCircle2} tone="emerald" />
+        <AdminStatCard title="Active Subscriptions" value={activeCount} subtitle={isCloudMode ? 'Verified in Supabase' : 'Billing current in sandbox'} icon={CheckCircle2} tone="emerald" />
         <AdminStatCard title="Trial Accounts" value={trialCount} subtitle="Active evaluation window" icon={Clock} tone="blue" />
         <AdminStatCard title="Suspended / Cancelled / Exp" value={inactiveCount} subtitle="Requires renewal or review" icon={Ban} tone="amber" />
       </div>
@@ -129,7 +143,7 @@ export const SubscriptionsView: React.FC = () => {
           <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
           <input
             type="text"
-            placeholder="Search mentor or plan name..."
+            placeholder="Search subscriber, email, or plan name..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-1.5 text-xs text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:outline-none"
@@ -157,8 +171,24 @@ export const SubscriptionsView: React.FC = () => {
       {filteredSubs.length === 0 ? (
         <AdminEmptyState
           icon={CreditCard}
-          title="No subscriptions match the selected filter"
-          description="Try selecting All statuses or clearing the search filter."
+          title={subscriptions.length === 0 ? 'No subscriptions provisioned yet' : 'No subscriptions match the selected filter'}
+          description={
+            subscriptions.length === 0
+              ? 'Assign a SaaS plan to a mentor or trader manually, or connect Stripe/PayPal webhooks for automated checkouts.'
+              : 'Try selecting All statuses or clearing the search filter.'
+          }
+          action={
+            subscriptions.length === 0 && eligibleUsers.length > 0 && subscriptionPlans.length > 0 ? (
+              <button
+                type="button"
+                onClick={handleOpenAssign}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Assign First Plan</span>
+              </button>
+            ) : undefined
+          }
         />
       ) : (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -166,29 +196,34 @@ export const SubscriptionsView: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                 <tr>
-                  <th className="px-4 py-3">Mentor</th>
+                  <th className="px-4 py-3">Subscriber</th>
                   <th className="px-4 py-3">Selected Plan</th>
                   <th className="px-4 py-3">Start Date</th>
                   <th className="px-4 py-3">Renewal Date</th>
                   <th className="px-4 py-3">Expiration Date</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Trial</th>
-                  <th className="px-4 py-3">Account Usage</th>
+                  <th className="px-4 py-3">Quota Usage</th>
                   <th className="px-4 py-3 text-right">Controls</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredSubs.map((sub) => {
-                  const effStatus = getEffectiveStatus(sub);
                   const plan = subscriptionPlans.find((p) => p.id === sub.planId);
-                  const usedFollowers = parentChildLinks.filter(
-                    (l) => l.mentorId === sub.mentorId && l.status === 'active'
-                  ).length;
-                  const maxFollowers = plan?.maxChildAccounts || 25;
+                  const usedFollowers =
+                    sub.usedChildAccounts ??
+                    parentChildLinks.filter(
+                      (l) => l.mentorId === sub.mentorId && l.status === 'active'
+                    ).length;
+                  const maxFollowers = sub.maxFollowers ?? plan?.maxFollowers ?? plan?.maxChildAccounts ?? 10;
 
                   return (
                     <tr key={sub.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-4 py-3.5 font-semibold text-slate-900">{sub.mentorName}</td>
+                      <td className="px-4 py-3.5">
+                        <div className="font-semibold text-slate-900">{sub.mentorName}</div>
+                        {sub.userEmail && (
+                          <div className="text-[11px] font-mono text-slate-500">{sub.userEmail}</div>
+                        )}
+                      </td>
                       <td className="px-4 py-3.5">
                         <div className="font-medium text-slate-900">{sub.planName}</div>
                         <div className="font-mono text-[11px] text-slate-500 tabular-nums">
@@ -199,7 +234,7 @@ export const SubscriptionsView: React.FC = () => {
                         {new Date(sub.startedAt).toLocaleDateString()}
                       </td>
                       <td className="px-4 py-3.5 font-mono text-[11px] text-slate-600 tabular-nums">
-                        {sub.autoRenew && effStatus === 'active'
+                        {sub.autoRenew && sub.status === 'active'
                           ? new Date(sub.expiresAt).toLocaleDateString()
                           : 'Auto-renew off'}
                       </td>
@@ -207,17 +242,14 @@ export const SubscriptionsView: React.FC = () => {
                         {new Date(sub.expiresAt).toLocaleDateString()}
                       </td>
                       <td className="px-4 py-3.5">
-                        <AdminStatusText status={effStatus} />
-                      </td>
-                      <td className="px-4 py-3.5 font-mono text-[11px] text-slate-600">
-                        {effStatus === 'trial' ? 'In Trial' : 'Standard'}
+                        <AdminStatusText status={sub.status} />
                       </td>
                       <td className="px-4 py-3.5 font-mono text-[11px] text-slate-900 tabular-nums">
-                        {usedFollowers} / {maxFollowers} traders
+                        {usedFollowers} / {maxFollowers} followers
                       </td>
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {effStatus === 'active' || effStatus === 'trial' ? (
+                          {sub.status === 'active' || sub.status === 'trial' ? (
                             <>
                               <button
                                 type="button"
@@ -254,6 +286,79 @@ export const SubscriptionsView: React.FC = () => {
         </div>
       )}
 
+      {/* Assign Subscription Modal */}
+      {showAssignModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-bold text-slate-900">Assign SaaS Subscription</h3>
+              <button type="button" onClick={() => setShowAssignModal(false)} className="text-slate-400 hover:text-slate-700">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleAssignSubmit} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Mentor / Trader Profile</label>
+                <select
+                  value={assignUserId}
+                  onChange={(e) => setAssignUserId(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+                >
+                  {eligibleUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.fullName} ({u.role}) — {u.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Subscription Plan</label>
+                <select
+                  value={assignPlanId}
+                  onChange={(e) => setAssignPlanId(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+                >
+                  {subscriptionPlans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — ${p.monthlyPrice ?? p.price}/mo ({p.maxFollowers ?? p.maxChildAccounts} followers)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Billing Interval</label>
+                <select
+                  value={assignCycle}
+                  onChange={(e) => setAssignCycle(e.target.value as 'monthly' | 'yearly')}
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+                >
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Annual</option>
+                </select>
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setShowAssignModal(false)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAssigning}
+                  className="rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 px-3.5 py-1.5 font-semibold text-white"
+                >
+                  {isAssigning ? 'Assigning...' : 'Assign Plan'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       <ConfirmationModal
         isOpen={confirmAction.isOpen}
         onClose={() => setConfirmAction({ isOpen: false, sub: null, action: 'cancel' })}
@@ -284,3 +389,4 @@ export const SubscriptionsView: React.FC = () => {
     </div>
   );
 };
+

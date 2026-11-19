@@ -9,6 +9,7 @@ import {
   Eye,
   X,
   RefreshCw,
+  Archive,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -39,6 +40,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     parentChildLinks,
     auditLogs,
     toggleUserStatus,
+    archiveUser,
     editMentorProfile,
     renewOrChangeSubscription,
     refreshCloudData,
@@ -50,7 +52,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   const [confirmModalData, setConfirmModalData] = useState<{
     isOpen: boolean;
     mentor: User | null;
-    action: 'approve' | 'suspend' | 'reactivate';
+    action: 'approve' | 'suspend' | 'reactivate' | 'archive';
   }>({
     isOpen: false,
     mentor: null,
@@ -132,13 +134,18 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     const actionLabel = confirmModalData.action;
     setCloudError(null);
     setActionSuccess(null);
-    const res = await toggleUserStatus(target.id);
+    const res =
+      actionLabel === 'archive'
+        ? await archiveUser(target.id)
+        : await toggleUserStatus(target.id);
     if (!res.success) {
       setCloudError(res.message || `Failed to ${actionLabel} mentor account.`);
     } else {
       setActionSuccess(
         res.message ||
-          `${target.fullName} status updated (${actionLabel === 'suspend' ? 'suspended' : 'active'}).`
+          (actionLabel === 'archive'
+            ? `${target.fullName} archived and billing history preserved.`
+            : `${target.fullName} status updated (${actionLabel === 'suspend' ? 'suspended' : 'active'}).`)
       );
     }
   };
@@ -343,10 +350,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                   const parentAccount = mt5Accounts.find(
                     (a) => a.userId === mentor.id && a.accountRole === 'parent'
                   );
-                  const sub = subscriptions.find((s) => s.mentorId === mentor.id);
+                  const sub = subscriptions.find((s) => s.mentorId === mentor.id || s.userId === mentor.id);
                   const followersCount = parentChildLinks.filter(
                     (l) => l.mentorId === mentor.id && l.status === 'active'
                   ).length;
+                  const maxFollowersQuota = sub?.maxFollowers ?? profile?.maxFollowers ?? 25;
                   const deterministicInvite = `TS-${mentor.id.slice(0, 8).toUpperCase()}`;
 
                   return (
@@ -368,9 +376,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                               )}
                             </div>
                             <p className="text-[11px] text-sky-700 font-mono">
-                              {isCloudMode
-                                ? `Invite: ${deterministicInvite}`
-                                : profile?.strategyName || 'Strategy Alpha'}
+                              {profile?.strategyName || (isCloudMode ? `Invite: ${deterministicInvite}` : 'Strategy Alpha')}
                             </p>
                             <span className="text-[11px] text-slate-500">{mentor.email}</span>
                           </div>
@@ -397,21 +403,21 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
 
                       <td className="px-4 py-3.5 font-mono tabular-nums">
                         <span className="font-semibold text-slate-900">{followersCount}</span>
-                        {!isCloudMode && (
-                          <span className="text-slate-500 text-[11px]"> / {profile?.maxFollowers || 25}</span>
-                        )}
+                        <span className="text-slate-500 text-[11px]"> / {maxFollowersQuota}</span>
                       </td>
 
                       <td className="px-4 py-3.5">
-                        {isCloudMode ? (
-                          <span className="text-[11px] font-mono text-slate-500">Not Configured</span>
-                        ) : (
+                        {sub ? (
                           <div className="space-y-1">
                             <span className="text-slate-800 font-medium text-[11px] block">
-                              {sub?.planName || 'Standard Tier'}
+                              {sub.planName}
                             </span>
-                            <AdminStatusText status={sub?.status || 'active'} />
+                            <AdminStatusText status={sub.status} />
                           </div>
+                        ) : (
+                          <span className="text-[11px] font-mono text-slate-500">
+                            {isCloudMode ? 'No active plan' : 'Standard Tier'}
+                          </span>
                         )}
                       </td>
 
@@ -486,6 +492,21 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                               ? 'Approve'
                               : 'Reactivate'}
                           </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmModalData({
+                                isOpen: true,
+                                mentor,
+                                action: 'archive',
+                              });
+                            }}
+                            title="Archive user & preserve billing history"
+                            className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+                          >
+                            <Archive className="h-3.5 w-3.5" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -549,13 +570,13 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
                   <span className="text-slate-500 text-[10px] uppercase font-mono">Subscription</span>
                   <p className="font-mono font-bold text-slate-900 text-xs mt-1">
-                    {isCloudMode ? 'Not Configured' : `${sub?.planName || 'Standard'} (${sub?.status || 'active'})`}
+                    {sub ? `${sub.planName} (${sub.status})` : isCloudMode ? 'No Active Plan' : 'Standard (active)'}
                   </p>
                 </div>
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
                   <span className="text-slate-500 text-[10px] uppercase font-mono">Plan Limit</span>
                   <p className="font-mono font-bold text-slate-900 text-sm mt-0.5 tabular-nums">
-                    {isCloudMode ? 'N/A' : `${followers.length} / ${profile?.maxFollowers || 25}`}
+                    {followers.length} / {sub?.maxFollowers ?? profile?.maxFollowers ?? 25}
                   </p>
                 </div>
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
@@ -809,27 +830,33 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
           void handleConfirmStatusChange();
         }}
         title={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? 'Archive Mentor Account'
+            : confirmModalData.action === 'suspend'
             ? 'Suspend Mentor Account'
             : confirmModalData.action === 'approve'
             ? 'Approve Mentor Account'
             : 'Reactivate Mentor Account'
         }
         description={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? `Archive ${confirmModalData.mentor?.fullName}? Active copy assignments will pause, terminals will disconnect, and all subscriptions, payments, and invoices remain preserved cleanly for audit compliance.`
+            : confirmModalData.action === 'suspend'
             ? `Are you sure you want to suspend ${confirmModalData.mentor?.fullName}? Active follower copy links will be paused immediately to prevent unsanctioned trade execution.`
             : confirmModalData.action === 'approve'
             ? `Approve ${confirmModalData.mentor?.fullName} as an active mentor? They will gain access to Parent MT5 registration and follower linking.`
             : `Are you sure you want to reactivate ${confirmModalData.mentor?.fullName}? Their follower copy streams can resume operation.`
         }
         confirmLabel={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? 'Archive & Preserve History'
+            : confirmModalData.action === 'suspend'
             ? 'Suspend Account'
             : confirmModalData.action === 'approve'
             ? 'Approve Mentor'
             : 'Reactivate Account'
         }
-        variant={confirmModalData.action === 'suspend' ? 'danger' : 'primary'}
+        variant={confirmModalData.action === 'suspend' || confirmModalData.action === 'archive' ? 'danger' : 'primary'}
       />
     </div>
   );

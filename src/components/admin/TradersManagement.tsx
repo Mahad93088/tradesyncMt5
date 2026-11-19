@@ -8,6 +8,7 @@ import {
   X,
   Link as LinkIcon,
   Server,
+  Archive,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -33,7 +34,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   setIsAddOpen: externalSetIsAddOpen,
 }) => {
   const { isCloudMode } = useAuth();
-  const { users, mt5Accounts, parentChildLinks, tradeMappings, auditLogs, toggleUserStatus } = useApp();
+  const { users, mt5Accounts, subscriptions, parentChildLinks, tradeMappings, auditLogs, toggleUserStatus, archiveUser } = useApp();
 
   const [internalIsAddOpen, setInternalIsAddOpen] = useState(false);
   const isAddOpen = externalIsAddOpen !== undefined ? externalIsAddOpen : internalIsAddOpen;
@@ -50,7 +51,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
   const [confirmModalData, setConfirmModalData] = useState<{
     isOpen: boolean;
     trader: User | null;
-    action: 'approve' | 'suspend' | 'reactivate';
+    action: 'approve' | 'suspend' | 'reactivate' | 'archive';
   }>({
     isOpen: false,
     trader: null,
@@ -79,7 +80,10 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
     if (!confirmModalData.trader) return;
     const target = confirmModalData.trader;
     setActionFeedback(null);
-    const res = await toggleUserStatus(target.id);
+    const res =
+      confirmModalData.action === 'archive'
+        ? await archiveUser(target.id)
+        : await toggleUserStatus(target.id);
     if (!res.success) {
       setActionFeedback({
         type: 'error',
@@ -193,6 +197,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                     (a) => a.userId === trader.id && a.accountRole === 'child'
                   );
                   const link = parentChildLinks.find((l) => l.traderId === trader.id);
+                  const sub = subscriptions.find((s) => s.userId === trader.id || s.mentorId === trader.id);
 
                   return (
                     <tr key={trader.id} className="hover:bg-slate-50/80 transition-colors">
@@ -231,8 +236,11 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                       </td>
 
                       <td className="px-4 py-3.5">
-                        {isCloudMode ? (
-                          <span className="text-[11px] font-mono text-slate-500">Not Configured</span>
+                        {sub ? (
+                          <div className="space-y-1">
+                            <span className="text-[11px] font-medium text-slate-800 block">{sub.planName}</span>
+                            <AdminStatusText status={sub.status} />
+                          </div>
                         ) : link ? (
                           <div className="space-y-1">
                             <span className="text-[11px] font-medium text-slate-800 block">Follower Membership</span>
@@ -322,6 +330,21 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                               ? 'Approve'
                               : 'Reactivate'}
                           </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmModalData({
+                                isOpen: true,
+                                trader,
+                                action: 'archive',
+                              });
+                            }}
+                            title="Archive trader & preserve billing history"
+                            className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+                          >
+                            <Archive className="h-3.5 w-3.5" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -385,7 +408,8 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                 <div>
                   <span className="text-slate-500 block text-[10px]">MEMBERSHIP</span>
                   <span className="text-slate-800">
-                    {isCloudMode ? 'Not Configured' : link ? `Follower (${link.status})` : 'Unassigned'}
+                    {subscriptions.find((s) => s.userId === detailsTrader.id || s.mentorId === detailsTrader.id)?.planName ||
+                      (link ? `Follower (${link.status})` : 'Free Demo / Unassigned')}
                   </span>
                 </div>
               </div>
@@ -501,27 +525,33 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
           void handleConfirmStatus();
         }}
         title={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? 'Archive Trader Account'
+            : confirmModalData.action === 'suspend'
             ? 'Suspend Trader Account'
             : confirmModalData.action === 'approve'
             ? 'Approve Trader Account'
             : 'Reactivate Trader Account'
         }
         description={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? `Archive trader ${confirmModalData.trader?.fullName}? Active copy links will pause, their Child MT5 terminal will disconnect, and billing/payment records will remain archived safely.`
+            : confirmModalData.action === 'suspend'
             ? `Are you sure you want to suspend trader ${confirmModalData.trader?.fullName}? Automated trade mirroring to their child terminal will be paused immediately.`
             : confirmModalData.action === 'approve'
             ? `Approve ${confirmModalData.trader?.fullName} as an active follower trader? They will be able to register a Child MT5 account and follow mentors.`
             : `Are you sure you want to reactivate trader ${confirmModalData.trader?.fullName}?`
         }
         confirmLabel={
-          confirmModalData.action === 'suspend'
+          confirmModalData.action === 'archive'
+            ? 'Archive & Preserve'
+            : confirmModalData.action === 'suspend'
             ? 'Suspend Trader'
             : confirmModalData.action === 'approve'
             ? 'Approve Trader'
             : 'Reactivate Trader'
         }
-        variant={confirmModalData.action === 'suspend' ? 'danger' : 'primary'}
+        variant={confirmModalData.action === 'suspend' || confirmModalData.action === 'archive' ? 'danger' : 'primary'}
       />
 
       <AddTraderModal

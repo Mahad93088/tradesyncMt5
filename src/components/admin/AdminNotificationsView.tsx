@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Bell, Check, Search } from 'lucide-react';
+import { Bell, Check, Search, Send, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatHeartbeatAge } from '../common/dashboardHelpers';
 import {
   AdminPageHeader,
   AdminStatusText,
   AdminEmptyState,
+  AdminFeedbackBanner,
 } from './adminUi';
 
 interface AdminNotificationsViewProps {
@@ -21,10 +22,16 @@ export const AdminNotificationsView: React.FC<AdminNotificationsViewProps> = ({
     users,
     tradeMappings,
     markNotificationRead,
+    broadcastAnnouncement,
   } = useApp();
 
   const [filterType, setFilterType] = useState<'all' | 'error' | 'warning' | 'info' | 'success'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [showComposer, setShowComposer] = useState(false);
+  const [broadcastTitle, setBroadcastTitle] = useState('');
+  const [broadcastMsg, setBroadcastMsg] = useState('');
+  const [broadcastTargetRole, setBroadcastTargetRole] = useState<'all' | 'mentor' | 'trader' | 'admin'>('all');
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'info'; message: string } | null>(null);
 
   // Live operational alerts derived from real platform state (no fabricated entries)
   const derivedAlerts = useMemo(() => {
@@ -139,25 +146,119 @@ export const AdminNotificationsView: React.FC<AdminNotificationsViewProps> = ({
     return matchesType && matchesSearch;
   });
 
+  const handleSendBroadcast = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!broadcastTitle.trim() || !broadcastMsg.trim()) return;
+    broadcastAnnouncement(broadcastTitle.trim(), broadcastMsg.trim(), broadcastTargetRole);
+    setFeedback({
+      type: 'success',
+      message: `Broadcast "${broadcastTitle.trim()}" published to ${broadcastTargetRole}.`,
+    });
+    setBroadcastTitle('');
+    setBroadcastMsg('');
+    setShowComposer(false);
+  };
+
   return (
     <div className="space-y-6">
       <AdminPageHeader
         title="Notifications & Alerts"
         meta={`${derivedAlerts.length} Live Signals · ${unreadCount} Unread`}
-        subtitle="Real-time operational alerts for offline/stale terminals, pending mentor & trader approvals, failed bridge instructions, and system notices."
+        subtitle="Real-time operational alerts for offline/stale terminals, pending mentor & trader approvals, failed bridge instructions, and broadcast announcements."
         actions={
-          unreadCount > 0 ? (
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => notifications.forEach((n) => markNotificationRead(n.id))}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 transition-colors"
+              onClick={() => setShowComposer((v) => !v)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
             >
-              <Check className="h-3.5 w-3.5 text-emerald-600" />
-              <span>Mark All as Read</span>
+              <Send className="h-3.5 w-3.5" />
+              <span>Broadcast Notice</span>
             </button>
-          ) : undefined
+            {unreadCount > 0 && (
+              <button
+                type="button"
+                onClick={() => notifications.forEach((n) => markNotificationRead(n.id))}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <Check className="h-3.5 w-3.5 text-emerald-600" />
+                <span>Mark All as Read</span>
+              </button>
+            )}
+          </div>
         }
       />
+
+      {feedback && (
+        <AdminFeedbackBanner
+          type={feedback.type}
+          message={feedback.message}
+          onDismiss={() => setFeedback(null)}
+        />
+      )}
+
+      {showComposer && (
+        <form onSubmit={handleSendBroadcast} className="rounded-xl border border-slate-200 bg-white p-4 space-y-3 text-xs">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+            <h3 className="font-bold text-slate-900">Publish Platform Notification</h3>
+            <button type="button" onClick={() => setShowComposer(false)} className="text-slate-400 hover:text-slate-700">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="sm:col-span-2">
+              <label className="block text-slate-700 font-semibold mb-1">Notification Title</label>
+              <input
+                type="text"
+                required
+                placeholder="e.g. Scheduled Bridge Maintenance"
+                value={broadcastTitle}
+                onChange={(e) => setBroadcastTitle(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-700 font-semibold mb-1">Target Audience</label>
+              <select
+                value={broadcastTargetRole}
+                onChange={(e) => setBroadcastTargetRole(e.target.value as any)}
+                className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+              >
+                <option value="all">All Platform Users</option>
+                <option value="mentor">Mentors Only</option>
+                <option value="trader">Traders Only</option>
+                <option value="admin">Admins Only</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-slate-700 font-semibold mb-1">Message</label>
+            <textarea
+              rows={2}
+              required
+              placeholder="Enter operational notice..."
+              value={broadcastMsg}
+              onChange={(e) => setBroadcastMsg(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowComposer(false)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 font-semibold text-white"
+            >
+              Send Broadcast
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* Search & Severity Filters */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-xs">

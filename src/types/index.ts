@@ -64,12 +64,15 @@ export interface MentorProfile {
 
 export interface SubscriptionPlan {
   id: string;
+  code?: string;
+  tier?: 'free_demo' | 'trader_pro' | 'mentor_pro' | 'enterprise';
   name: string;
   billingCycle: 'monthly' | 'yearly';
   price: number;
   monthlyPrice?: number;
   yearlyPrice?: number;
   maxMentorAccounts?: number;
+  maxFollowers?: number;
   maxChildAccounts: number;
   maxLotSize: number;
   trialDays?: number;
@@ -83,19 +86,75 @@ export interface SubscriptionPlan {
 
 export interface Subscription {
   id: string;
+  userId?: string;
   mentorId: string;
   mentorName: string;
+  userEmail?: string;
   planId: string;
   planName: string;
   status: SubscriptionStatus;
   billingCycle: 'monthly' | 'yearly';
   price: number;
+  currency?: string;
   startedAt: string;
   expiresAt: string;
   trialEndsAt?: string;
   suspendedAt?: string;
   usedChildAccounts?: number;
+  maxFollowers?: number;
   autoRenew: boolean;
+}
+
+export interface PaymentRecord {
+  id: string;
+  subscriptionId?: string | null;
+  userId?: string | null;
+  userName?: string;
+  userEmail?: string;
+  provider: 'stripe' | 'paypal' | 'manual';
+  providerPaymentId?: string | null;
+  amountUsd: number;
+  currency: string;
+  status: 'pending' | 'succeeded' | 'failed' | 'refunded';
+  paidAt?: string | null;
+  createdAt: string;
+}
+
+export interface InvoiceRecord {
+  id: string;
+  subscriptionId?: string | null;
+  paymentId?: string | null;
+  userId?: string | null;
+  userName?: string;
+  userEmail?: string;
+  invoiceNumber: string;
+  amountUsd: number;
+  currency: string;
+  status: 'draft' | 'open' | 'paid' | 'void' | 'uncollectible';
+  issuedAt: string;
+  dueAt?: string | null;
+  paidAt?: string | null;
+}
+
+export interface MentorGroup {
+  id: string;
+  mentorId: string;
+  name: string;
+  description: string;
+  status: 'active' | 'archived';
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface PlatformSettingsConfig {
+  id: string;
+  demoOnlyEnforced: true;
+  defaultSlippageMaxPips: number;
+  defaultMaxLotCap: number;
+  heartbeatStaleSeconds: number;
+  maintenanceMode: boolean;
+  updatedAt?: string;
+  source?: string;
 }
 
 export type LotCopyMode = 'parent_lot' | 'custom_lot';
@@ -125,6 +184,7 @@ export interface ParentChildLink {
   traderName: string;
   parentAccountId: string;
   childAccountId: string;
+  groupId?: string | null;
   status: CopyLinkStatus;
   lotSettings: LotSettings;
   linkedAt: string;

@@ -12,6 +12,9 @@ import {
   type AuthenticateTerminalOptions,
   type TerminalHeartbeatTelemetry,
 } from './bridgeStore.ts';
+import { createCorsAndSecurityMiddleware, SlidingWindowRateLimiter } from './securityMiddleware.ts';
+import { checkMentorFollowerQuota, writeAuditLog } from './billingService.ts';
+import { registerDay2Routes } from './day2Routes.ts';
 import type { MappingExecutionStatus } from '../types';
 
 dotenv.config();
@@ -62,11 +65,19 @@ export interface ApiAppDependencies {
   authUserResolverOverride?: (token: string) => Promise<{ user: any; error?: any }>;
   supabaseUrlOverride?: string;
   serviceRoleKeyOverride?: string;
+  allowedOriginsOverride?: string[];
+  rateLimitOverrides?: Partial<Record<'ea_bridge' | 'webhook' | 'auth_sensitive' | 'default_api', number>>;
 }
 
 export function createApiApp(deps?: ApiAppDependencies) {
   const app = express();
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf.toString('utf8');
+      },
+    })
+  );
 
   // Defensive body-parser error handler to prevent unhandled 'SyntaxError: Unexpected end of JSON input'
   app.use((err: any, _req: Request, res: Response, next: express.NextFunction) => {
@@ -79,16 +90,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
     next(err);
   });
 
-  // Universal CORS & Preflight handling for MT5 WebRequests and Web Clients
-  app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Terminal-Token, X-Account-Number');
-    if (req.method === 'OPTIONS') {
-      return res.status(200).end();
-    }
-    next();
-  });
+  // Security headers, configurable CORS allowlist (preserving non-browser MT5 EA WebRequests), and per-IP rate limiting
+  app.use(createCorsAndSecurityMiddleware({ allowedOrigins: deps?.allowedOriginsOverride }));
+  const rateLimiter = new SlidingWindowRateLimiter(deps?.rateLimitOverrides);
+  app.use(rateLimiter.middleware());
 
   const cleanEnvValue = (val?: unknown): string => {
     if (typeof val !== 'string') return '';
@@ -651,6 +656,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      await writeAuditLog(getServiceRoleClient(), {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_USER_APPROVED',
+        targetType: 'profiles',
+        targetId: targetUserId,
+        result: 'success',
+        details: `Approved user ${targetProfile.email || targetUserId} with active status.`,
+      });
+
       return res.status(200).json({
         success: true,
         message: `User ${targetProfile.email || targetUserId} successfully approved with active status. Role (${updatedProfile.role}) preserved.`,
@@ -779,6 +794,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
           },
           dbClient
         );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: 'admin',
+          action: 'ADMIN_USER_ROLE_PROMOTED',
+          targetType: 'profiles',
+          targetId: targetUserId,
+          result: 'success',
+          details: `Updated ${targetProfile.email || targetUserId} to role '${newRole}' with active status.`,
+        });
       }
 
       return res.status(200).json({
@@ -892,6 +916,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_USER_STATUS_CHANGED',
+        targetType: 'profiles',
+        targetId: targetUserId,
+        result: 'success',
+        details: `Changed ${targetProfile.email || targetUserId} status from ${targetProfile.status} to ${normalizedStatus}.`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -1101,6 +1135,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_USER_CREATED',
+        targetType: 'profiles',
+        targetId: newUserId,
+        result: 'success',
+        details: `Provisioned ${requestedRole} account ${cleanEmail} (${requestedStatus}).`,
+      });
 
       const strategyWarning =
         hasStrategyMetadata && !strategyProfilePersisted
@@ -1740,6 +1783,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'admin',
+        action: 'TERMINAL_TOKEN_ROTATED',
+        targetType: 'mt5_accounts',
+        targetId: dbAcc.id,
+        result: 'success',
+        details: `Issued/rotated terminal token for ${targetRole} MT5 account #${dbAcc.account_number}.`,
+      });
+
       return res.status(200).json({
         success: true,
         terminalToken: rawToken,
@@ -2092,6 +2145,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_MT5_ACCOUNT_REGISTERED',
+        targetType: 'mt5_accounts',
+        targetId: accountId,
+        result: 'success',
+        details: `Registered ${role.toUpperCase()} MT5 Demo account #${cleanAccNumber} (${cleanBrokerServer}).`,
+      });
 
       const serverHost = `${req.protocol}://${req.get('host')}`;
 
@@ -2384,6 +2446,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'trader',
+        action: 'MT5_ACCOUNT_REGISTERED',
+        targetType: 'mt5_accounts',
+        targetId: accountId,
+        result: 'success',
+        details: `Registered ${role.toUpperCase()} MT5 Demo account #${cleanAccNumber} (${cleanBrokerServer}).`,
+      });
 
       const serverHost = `${req.protocol}://${req.get('host')}`;
       return res.status(200).json({
@@ -3928,6 +3999,25 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      const quotaCheck = await checkMentorFollowerQuota(dbClient, matchedMentor.id, resolvedChildId);
+      if (!quotaCheck.allowed) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+          targetType: 'mentor_assignments',
+          targetId: matchedMentor.id,
+          result: 'denied',
+          details: quotaCheck.error || 'Mentor follower plan quota exceeded.',
+        });
+        return res.status(403).json({
+          success: false,
+          code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+          error: quotaCheck.error,
+          quota: quotaCheck,
+        });
+      }
+
       const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
         mentorId: matchedMentor.id,
         traderId: targetTraderId,
@@ -4006,6 +4096,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
         if (!traderProf || traderProf.status !== 'active') {
           return res.status(403).json({ success: false, error: 'Cannot activate link: trader profile is not active.' });
+        }
+        const quotaCheck = await checkMentorFollowerQuota(dbClient, existing.mentor_id, existing.child_account_id);
+        if (!quotaCheck.allowed) {
+          return res.status(403).json({
+            success: false,
+            code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+            error: quotaCheck.error,
+            quota: quotaCheck,
+          });
         }
       }
 
@@ -4270,6 +4369,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
         dbClient
       );
 
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'mentor',
+        action: 'EMERGENCY_CLOSE_QUEUED',
+        targetType: 'trade_mappings',
+        targetId: ticketStr,
+        result: 'success',
+        details: `Queued emergency CLOSE for parent ticket #${ticketStr} across ${queued.length} follower terminal(s).`,
+      });
+
       return res.status(200).json({
         success: true,
         parentTicket: ticketStr,
@@ -4473,6 +4582,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, cleanChildAccId);
+      if (!quotaCheck.allowed) {
+        return res.status(403).json({
+          success: false,
+          code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+          error: quotaCheck.error,
+          quota: quotaCheck,
+        });
+      }
+
       const upsertRes = await upsertAssignmentByChildAccount(dbClient, {
         mentorId: cleanMentorId,
         traderId: cleanTraderId,
@@ -4494,6 +4613,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_ASSIGNMENT_CREATED',
+        targetType: 'mentor_assignments',
+        targetId: persistedAssignment?.id,
+        result: 'success',
+        details: `Assigned Child #${childAcc.account_number} to Parent #${parentAcc.account_number}.`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -4558,6 +4686,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_ASSIGNMENT_REMOVED',
+        targetType: 'mentor_assignments',
+        targetId: matches[0]?.id,
+        result: 'success',
+        details: `Unassigned ${matches.length} mentor assignment record(s).`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -4669,6 +4806,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
         },
         dbClient
       );
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'ADMIN_ACCOUNT_OWNER_UPDATED',
+        targetType: 'mt5_accounts',
+        targetId: accountId,
+        result: 'success',
+        details: `Associated ${acc.account_role.toUpperCase()} MT5 #${acc.account_number} with ${targetProf.email || cleanProfileId}.`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -4711,6 +4857,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="TradeSync_Receiver.mq5"');
     res.send(source);
+  });
+
+  // Register Day 2 SaaS Portal, Billing, Webhook, Audit, Settings & Group routes
+  registerDay2Routes({
+    registerRoute,
+    authenticateSupabaseCaller,
+    requireServiceRoleClient,
+    getServiceRoleClient,
+    isValidUUID,
   });
 
   return app;
