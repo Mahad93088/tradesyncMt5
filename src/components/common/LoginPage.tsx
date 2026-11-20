@@ -131,26 +131,26 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0B1220] text-slate-100 flex flex-col justify-between p-4 sm:p-8 font-sans">
+    <div className="min-h-screen bg-[#0B1220] text-slate-100 flex flex-col justify-between p-4 sm:p-8 font-sans overflow-x-hidden">
       {/* Top Wordmark */}
-      <header className="max-w-5xl w-full mx-auto flex items-center justify-between gap-8 py-2">
+      <header className="max-w-5xl w-full mx-auto flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2">
         <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 border border-slate-700 text-sky-400">
             <Terminal className="h-4 w-4" />
           </div>
           <span className="text-base font-bold tracking-tight text-white">TradeSync MT5</span>
         </div>
-        <div className="text-xs text-slate-400 font-mono whitespace-nowrap shrink-0">
+        <div className="text-xs text-slate-400 font-mono">
           Demo-Only Trade Copier Bridge
         </div>
       </header>
 
       {/* Main Split Workspace */}
-      <main className="max-w-5xl w-full mx-auto my-auto py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
+      <main className="max-w-5xl w-full mx-auto my-auto py-6 sm:py-8 grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 items-stretch">
         {/* Left: Platform Architecture Overview */}
-        <section className="lg:col-span-6 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/70 p-6 sm:p-8 space-y-6">
+        <section className="lg:col-span-6 min-w-0 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/70 p-5 sm:p-8 space-y-6">
           <div className="space-y-4">
-            <div className="flex items-center gap-2 text-xs text-sky-400 font-mono">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-sky-400 font-mono">
               <span>Role-Isolated Access</span>
               <span aria-hidden="true">·</span>
               <span>MT5 Demo Bridge</span>
@@ -166,7 +166,7 @@ export const LoginPage: React.FC = () => {
           <div className="space-y-4 border-t border-slate-800 pt-5 text-xs">
             <div className="flex items-start gap-3">
               <Shield className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
-              <div>
+              <div className="min-w-0">
                 <p className="font-semibold text-slate-100">Three Independent Role Portals</p>
                 <p className="text-slate-400 mt-0.5 leading-relaxed">
                   Super Admin governance, Mentor strategy broadcasting &amp; student hubs, and Follower Trader execution workspaces.
@@ -176,16 +176,16 @@ export const LoginPage: React.FC = () => {
 
             <div className="flex items-start gap-3">
               <Layers className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-              <div>
+              <div className="min-w-0">
                 <p className="font-semibold text-slate-100">Strict Demo Account Safeguards</p>
                 <p className="text-slate-400 mt-0.5 leading-relaxed">
-                  Both MQL5 Expert Advisors and cloud bridge APIs enforce <code className="font-mono text-slate-200">ACCOUNT_TRADE_MODE_DEMO</code> and broker-specific symbol verification.
+                  Both MQL5 Expert Advisors and cloud bridge APIs enforce <code className="font-mono text-slate-200 break-words">ACCOUNT_TRADE_MODE_DEMO</code> and broker-specific symbol verification.
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+          <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
             <span>Prefer offline evaluation?</span>
             <button
               type="button"
@@ -199,7 +199,7 @@ export const LoginPage: React.FC = () => {
         </section>
 
         {/* Right: Auth Card */}
-        <section className="lg:col-span-6 rounded-xl border border-slate-800 bg-slate-900 p-6 sm:p-8 flex flex-col justify-center">
+        <section className="lg:col-span-6 min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-5 sm:p-8 flex flex-col justify-center">
           {isRecoveryMode ? (
             <div className="space-y-5">
               <div>
@@ -271,13 +271,19 @@ export const LoginPage: React.FC = () => {
           ) : (
             <div className="space-y-5">
               {/* Tabs */}
-              <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-950 border border-slate-800">
+              <div
+                role="tablist"
+                aria-label="Authentication options"
+                className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-1 p-1.5 sm:p-1 rounded-lg bg-slate-950 border border-slate-800 w-full"
+              >
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'signin'}
                   onClick={() => setActiveTab('signin')}
-                  className={`flex-1 py-2 px-3 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                  className={`w-full sm:w-auto sm:flex-1 py-2.5 sm:py-2 px-3 rounded-md text-xs font-semibold text-center transition-colors whitespace-nowrap ${
                     activeTab === 'signin'
-                      ? 'bg-slate-800 text-white'
+                      ? 'bg-slate-800 text-white shadow-sm'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -285,10 +291,12 @@ export const LoginPage: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'signup'}
                   onClick={() => setActiveTab('signup')}
-                  className={`flex-1 py-2 px-3 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                  className={`w-full sm:w-auto sm:flex-1 py-2.5 sm:py-2 px-3 rounded-md text-xs font-semibold text-center transition-colors whitespace-nowrap ${
                     activeTab === 'signup'
-                      ? 'bg-slate-800 text-white'
+                      ? 'bg-slate-800 text-white shadow-sm'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -296,10 +304,12 @@ export const LoginPage: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'reset'}
                   onClick={() => setActiveTab('reset')}
-                  className={`flex-1 py-2 px-3 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                  className={`w-full sm:w-auto sm:flex-1 py-2.5 sm:py-2 px-3 rounded-md text-xs font-semibold text-center transition-colors whitespace-nowrap ${
                     activeTab === 'reset'
-                      ? 'bg-slate-800 text-white'
+                      ? 'bg-slate-800 text-white shadow-sm'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
@@ -490,7 +500,7 @@ export const LoginPage: React.FC = () => {
         </section>
       </main>
 
-      <footer className="max-w-5xl w-full mx-auto py-2 flex items-center justify-between text-[11px] text-slate-500">
+      <footer className="max-w-5xl w-full mx-auto py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-[11px] text-slate-500">
         <span>TradeSync MT5</span>
         <span>Demo-only automated trade copying · No live real-money execution</span>
       </footer>
