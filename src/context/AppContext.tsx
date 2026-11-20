@@ -26,7 +26,9 @@ import {
   LotSettings,
   OrderType,
   MentorEditPayload,
-  TraderEditPayload
+  TraderEditPayload,
+  Broker,
+  MentorTraderInvitation
 } from '../types';
 import {
   mapServerAccountToMT5Account,
@@ -96,6 +98,9 @@ interface AppContextType {
   followerAccounts: MT5Account[];
   mentorProfiles: MentorProfile[];
   mentorDirectory: MentorDirectoryEntry[];
+  brokers: Broker[];
+  brokersSchemaMissing: boolean;
+  mentorInvitations: MentorTraderInvitation[];
   subscriptionPlans: SubscriptionPlan[];
   subscriptions: Subscription[];
   payments: PaymentRecord[];
@@ -141,6 +146,8 @@ interface AppContextType {
     description: string;
     monthlyFee: number;
     maxFollowers: number;
+    studentMonthlyFeeUsd?: number;
+    studentBillingPeriod?: 'monthly' | 'quarterly' | 'yearly' | 'free';
   }) => Promise<{ success: boolean; message?: string }>;
   requestBillingCheckout: (
     planId: string,
@@ -157,13 +164,13 @@ interface AppContextType {
     profile?: { strategyName?: string; description?: string; monthlyFee?: number },
     planId?: string
   ) => User;
-  editMentorProfile: (mentorUserId: string, payload: MentorEditPayload) => void;
+  editMentorProfile: (mentorUserId: string, payload: MentorEditPayload) => Promise<{ success: boolean; message?: string }>;
   createTrader: (
     user: { fullName: string; email: string; username?: string; phone?: string; status?: AccountStatus },
     mentorId?: string,
     planId?: string
   ) => User;
-  editTrader: (traderUserId: string, payload: TraderEditPayload) => void;
+  editTrader: (traderUserId: string, payload: TraderEditPayload) => Promise<{ success: boolean; message?: string }>;
 
   // MT5 Actions
   connectMT5Account: (
@@ -191,6 +198,7 @@ interface AppContextType {
   // Subscriptions
   createSubscriptionPlan: (plan: Omit<SubscriptionPlan, 'id'>) => Promise<{ success: boolean; message?: string }>;
   updateSubscriptionPlan: (planId: string, planData: Partial<SubscriptionPlan>) => Promise<{ success: boolean; message?: string }>;
+  archiveSubscriptionPlan: (planId: string) => Promise<{ success: boolean; message?: string }>;
   togglePlanStatus: (planId: string) => Promise<{ success: boolean; message?: string }>;
   renewOrChangeSubscription: (mentorId: string, planId: string, billingCycle: 'monthly' | 'yearly') => Promise<{ success: boolean; message?: string }>;
   cancelSubscription: (subscriptionId: string) => Promise<{ success: boolean; message?: string }>;
@@ -325,6 +333,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [followerAccounts, setFollowerAccounts] = useState<MT5Account[]>([]);
   const [mentorDirectory, setMentorDirectory] = useState<MentorDirectoryEntry[]>([]);
+  const [brokers, setBrokers] = useState<Broker[]>([]);
+  const [brokersSchemaMissing, setBrokersSchemaMissing] = useState(false);
+  const [mentorInvitations, setMentorInvitations] = useState<MentorTraderInvitation[]>([]);
   const [cloudRefreshNonce, setCloudRefreshNonce] = useState(0);
   const [isArchitectureModalOpen, setIsArchitectureModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -479,7 +490,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const headers = { Authorization: `Bearer ${token}` };
 
-        const [healthRes, verifyRes, mappingsRes, logsRes, tradesRes, dirRes, plansRes, notifRes] = await Promise.all([
+        const [healthRes, verifyRes, mappingsRes, logsRes, tradesRes, dirRes, plansRes, notifRes, brokersRes] = await Promise.all([
           fetch('/api/health').catch(() => null),
           fetch('/api/supabase/verify').catch(() => null),
           fetch('/api/v1/bridge/mappings', { headers }).catch(() => null),
@@ -488,9 +499,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           fetch('/api/v1/bridge/mentors/directory', { headers }).catch(() => null),
           fetch(authUser.role === 'admin' ? '/api/admin/subscription-plans' : '/api/v1/billing/plans', { headers }).catch(() => null),
           fetch(authUser.role === 'admin' ? '/api/admin/notifications' : '/api/v1/notifications', { headers }).catch(() => null),
+          fetch(authUser.role === 'admin' ? '/api/admin/brokers' : '/api/v1/brokers', { headers }).catch(() => null),
         ]);
 
-        const [healthJson, verifyJson, mappingsParsed, logsParsed, tradesJson, dirJson, plansJson, notifJson] = await Promise.all([
+        const [healthJson, verifyJson, mappingsParsed, logsParsed, tradesJson, dirJson, plansJson, notifJson, brokersJson] = await Promise.all([
           healthRes && healthRes.ok ? healthRes.json().catch(() => null) : Promise.resolve(null),
           verifyRes && verifyRes.ok ? verifyRes.json().catch(() => null) : Promise.resolve(null),
           parseResponseWithDiagnostics(mappingsRes, '/api/v1/bridge/mappings'),
@@ -499,9 +511,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           dirRes && dirRes.ok ? dirRes.json().catch(() => null) : Promise.resolve(null),
           plansRes && plansRes.ok ? plansRes.json().catch(() => null) : Promise.resolve(null),
           notifRes && notifRes.ok ? notifRes.json().catch(() => null) : Promise.resolve(null),
+          brokersRes && brokersRes.ok ? brokersRes.json().catch(() => null) : Promise.resolve(null),
         ]);
 
         if (!isMounted) return;
+
+        if (brokersJson?.success && Array.isArray(brokersJson.brokers)) {
+          setBrokers(brokersJson.brokers);
+          setBrokersSchemaMissing(Boolean(brokersJson.schemaMissing));
+        }
 
         const mappingsJson = mappingsParsed.json;
         const logsJson = logsParsed.json;
@@ -629,6 +647,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 mapAssignmentsToLinks(accJson.assignments, accJson.profiles || [], loadedMappings, combinedTrades)
               );
             }
+            if (Array.isArray(accJson.mentorProfiles)) {
+              const profById = new Map<string, any>((accJson.profiles || []).map((p: any) => [p.id, p]));
+              setMentorProfiles(
+                accJson.mentorProfiles.map((mp: any) => {
+                  const prof = profById.get(mp.user_id);
+                  return {
+                    id: mp.id || `mp_${mp.user_id}`,
+                    userId: mp.user_id,
+                    displayName: prof?.full_name || prof?.email || 'Mentor',
+                    strategyName: mp.strategy_name || 'Master Strategy',
+                    description: mp.description || '',
+                    monthlyFee: Number(mp.monthly_fee ?? 0),
+                    studentMonthlyFeeUsd: Number(mp.student_monthly_fee_usd ?? mp.monthly_fee ?? 0),
+                    studentBillingPeriod: mp.student_billing_period || 'monthly',
+                    totalFollowers: 0,
+                    maxFollowers: Number(mp.max_followers ?? 25),
+                    winRate: 0,
+                    profitFactor: 0,
+                    totalTrades: 0,
+                    inviteCode: mp.invite_code || `TS-${String(mp.user_id).slice(0, 8).toUpperCase()}`,
+                    inviteLink: `${window.location.origin}/?invite=${mp.invite_code || ''}`,
+                    subscriptionPlanId: '',
+                    subscriptionStatus: 'active',
+                    subscriptionExpiresAt: '',
+                    riskScore: 'Medium',
+                  };
+                })
+              );
+            }
           }
 
           const bt = statusJson?.bridgeTelemetry;
@@ -680,19 +727,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             syncLogs: logsParsed.status,
             mappings: mappingsParsed.status,
           });
-          const [myRes, billRes, mpRes, grpRes] = await Promise.all([
+          const [myRes, billRes, mpRes, grpRes, invRes] = await Promise.all([
             fetch('/api/v1/bridge/my-accounts', { headers }).catch(() => null),
             fetch('/api/v1/billing/me', { headers }).catch(() => null),
             authUser.role === 'mentor' ? fetch('/api/v1/bridge/mentor/profile', { headers }).catch(() => null) : Promise.resolve(null),
             authUser.role === 'mentor' ? fetch('/api/v1/bridge/mentor/groups', { headers }).catch(() => null) : Promise.resolve(null),
+            authUser.role === 'mentor'
+              ? fetch('/api/v1/bridge/mentor/students', { headers }).catch(() => null)
+              : fetch('/api/v1/bridge/trader/invitations', { headers }).catch(() => null),
           ]);
 
           const myJson = myRes && myRes.ok ? await myRes.json().catch(() => null) : null;
           const billJson = billRes && billRes.ok ? await billRes.json().catch(() => null) : null;
           const mpJson = mpRes && mpRes.ok ? await mpRes.json().catch(() => null) : null;
           const grpJson = grpRes && grpRes.ok ? await grpRes.json().catch(() => null) : null;
+          const invJson = invRes && invRes.ok ? await invRes.json().catch(() => null) : null;
 
           if (!isMounted) return;
+
+          if (invJson?.success && Array.isArray(invJson.invitations)) {
+            setMentorInvitations(invJson.invitations);
+          } else {
+            setMentorInvitations([]);
+          }
 
           if (billJson?.success) {
             if (Array.isArray(billJson.subscriptions)) setSubscriptions(billJson.subscriptions);
@@ -715,6 +772,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 strategyName: mp.strategyName || 'Master Strategy',
                 description: mp.description || '',
                 monthlyFee: Number(mp.monthlyFee ?? 0),
+                studentMonthlyFeeUsd: Number(mp.studentMonthlyFeeUsd ?? mp.monthlyFee ?? 0),
+                studentBillingPeriod: mp.studentBillingPeriod || 'monthly',
                 totalFollowers: 0,
                 maxFollowers: Number(mp.maxFollowers ?? 25),
                 winRate: 0,
@@ -1122,6 +1181,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     description: string;
     monthlyFee: number;
     maxFollowers: number;
+    studentMonthlyFeeUsd?: number;
+    studentBillingPeriod?: 'monthly' | 'quarterly' | 'yearly' | 'free';
   }): Promise<{ success: boolean; message?: string }> => {
     if (isCloudMode && isConfigured) {
       try {
@@ -1144,12 +1205,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: err.message || 'Network error updating strategy profile.' };
       }
     }
-    editMentorProfile(currentUser.id, {
-      fullName: currentUser.fullName,
-      email: currentUser.email,
-      phone: currentUser.phone,
-      ...payload,
-    });
+    setMentorProfiles((prev) =>
+      prev.map((mp) =>
+        mp.userId === currentUser.id
+          ? {
+              ...mp,
+              strategyName: payload.strategyName,
+              description: payload.description,
+              monthlyFee: payload.monthlyFee,
+              maxFollowers: payload.maxFollowers,
+              studentMonthlyFeeUsd: payload.studentMonthlyFeeUsd ?? payload.monthlyFee,
+              studentBillingPeriod: payload.studentBillingPeriod ?? mp.studentBillingPeriod ?? 'monthly',
+            }
+          : mp
+      )
+    );
     return { success: true, message: 'Saved locally.' };
   };
 
@@ -1357,7 +1427,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newUser;
   };
 
-  const editMentorProfile = (mentorUserId: string, payload: MentorEditPayload) => {
+  const editMentorProfile = async (
+    mentorUserId: string,
+    payload: MentorEditPayload
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      const res = await mt5AdminService.updateAdminMentor(mentorUserId, {
+        fullName: payload.fullName,
+        strategyName: payload.strategyName,
+        description: payload.description,
+        monthlyFee: payload.monthlyFee,
+        maxFollowers: payload.maxFollowers,
+      });
+      if (!res.success) {
+        return { success: false, message: res.error || 'Failed to update mentor profile in Supabase.' };
+      }
+      await refreshCloudData();
+      return { success: true, message: `Updated mentor ${payload.fullName} in Supabase.` };
+    }
+
     setUsers((prev) =>
       prev.map((u) => {
         if (u.id === mentorUserId) {
@@ -1398,6 +1486,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: 'success',
       details: `Updated mentor profile for ${payload.fullName} (${payload.strategyName}).`
     });
+    return { success: true };
   };
 
   const createTrader = (
@@ -1534,7 +1623,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newUser;
   };
 
-  const editTrader = (traderUserId: string, payload: TraderEditPayload) => {
+  const editTrader = async (
+    traderUserId: string,
+    payload: TraderEditPayload
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      const res = await mt5AdminService.updateAdminTrader(traderUserId, {
+        fullName: payload.fullName,
+        status: payload.status,
+        mentorId: payload.mentorId,
+      });
+      if (!res.success) {
+        return { success: false, message: res.error || 'Failed to update trader in Supabase.' };
+      }
+      await refreshCloudData();
+      return { success: true, message: `Updated trader ${payload.fullName} in Supabase.` };
+    }
+
     setUsers((prev) =>
       prev.map((u) => {
         if (u.id === traderUserId) {
@@ -1645,6 +1750,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       result: 'success',
       details: `Updated trader follower account for ${payload.fullName}.`
     });
+    return { success: true };
   };
 
   // MT5 Actions
@@ -1663,6 +1769,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const res = await mt5AdminService.registerMT5Account({
           accountRole: accountData.accountRole,
           brokerName: accountData.broker,
+          brokerId: accountData.brokerId || undefined,
+          tradingSymbol: accountData.tradingSymbol || undefined,
           brokerServer: accountData.server,
           accountNumber: accountData.accountNumber,
           accountType: 'demo',
@@ -2290,6 +2398,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((p) => (p.id === planId ? { ...p, ...planData } : p))
     );
     return { success: true };
+  };
+
+  const archiveSubscriptionPlan = async (planId: string): Promise<{ success: boolean; message?: string }> => {
+    if (isCloudMode && isConfigured) {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) return { success: false, message: 'Session expired.' };
+        const res = await fetch(`/api/admin/subscription-plans/${encodeURIComponent(planId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { success: false, message: json?.error || `HTTP ${res.status}: Failed to archive plan.` };
+        }
+        await refreshCloudData();
+        return { success: true, message: 'Subscription plan safely archived while preserving historical billing records.' };
+      } catch (err: any) {
+        return { success: false, message: err?.message || 'Network error archiving plan.' };
+      }
+    }
+
+    setSubscriptionPlans((prev) =>
+      prev.map((p) => (p.id === planId ? { ...p, isActive: false, isArchived: true, archivedAt: new Date().toISOString() } : p))
+    );
+    return { success: true, message: 'Plan archived in Demo Sandbox.' };
   };
 
   const togglePlanStatus = async (planId: string): Promise<{ success: boolean; message?: string }> => {
@@ -3125,6 +3260,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setMt5Accounts,
         mentorProfiles,
         mentorDirectory,
+        brokers,
+        brokersSchemaMissing,
+        mentorInvitations,
         subscriptionPlans,
         subscriptions,
         payments,
@@ -3175,6 +3313,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         emergencyCloseParentTicket,
         createSubscriptionPlan,
         updateSubscriptionPlan,
+        archiveSubscriptionPlan,
         togglePlanStatus,
         renewOrChangeSubscription,
         cancelSubscription,

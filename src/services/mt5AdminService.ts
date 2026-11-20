@@ -1039,6 +1039,8 @@ export const mt5AdminService = {
   async registerMT5Account(params: {
     accountRole: 'parent' | 'child';
     brokerName: string;
+    brokerId?: string;
+    tradingSymbol?: string;
     brokerServer: string;
     accountNumber: string;
     accountType?: 'demo' | 'live';
@@ -1103,6 +1105,9 @@ export const mt5AdminService = {
           accountRole: params.accountRole,
           accountNumber: cleanAccNumber,
           broker: cleanBroker,
+          brokerId: params.brokerId || null,
+          tradingSymbol: params.tradingSymbol || 'XAUUSD',
+          symbolVerified: false,
           server: cleanServer,
           accountType: 'demo',
           balance: parsedBalance,
@@ -1173,6 +1178,8 @@ export const mt5AdminService = {
         body: JSON.stringify({
           accountRole: params.accountRole,
           brokerName: params.brokerName.trim(),
+          brokerId: params.brokerId || undefined,
+          tradingSymbol: params.tradingSymbol || undefined,
           brokerServer: params.brokerServer.trim(),
           accountNumber: params.accountNumber.trim(),
           accountType: 'demo',
@@ -1207,6 +1214,9 @@ export const mt5AdminService = {
         accountRole: result.account.accountRole,
         accountNumber: result.account.accountNumber,
         broker: result.account.brokerName,
+        brokerId: result.account.brokerId || params.brokerId || null,
+        tradingSymbol: result.account.tradingSymbol || params.tradingSymbol || 'XAUUSD',
+        symbolVerified: Boolean(result.account.symbolVerified),
         server: result.account.brokerServer,
         accountType: result.account.accountType,
         balance: result.account.balance,
@@ -2024,12 +2034,18 @@ export const mt5AdminService = {
     role?: 'mentor' | 'trader';
     status?: 'active' | 'pending' | 'suspended';
     strategyName?: string;
+    description?: string;
     monthlyFee?: number;
+    maxFollowers?: number;
+    planId?: string;
+    billingCycle?: 'monthly' | 'yearly';
+    mentorId?: string;
   }): Promise<{
     success: boolean;
     profile?: any;
     warning?: string;
     strategyProfilePersisted?: boolean | null;
+    subscriptionPersisted?: boolean;
     missingSchemaTable?: string;
     message?: string;
     error?: string;
@@ -2064,7 +2080,12 @@ export const mt5AdminService = {
           role: params.role || 'mentor',
           status: params.status || 'active',
           strategyName: params.strategyName,
+          description: params.description,
           monthlyFee: params.monthlyFee,
+          maxFollowers: params.maxFollowers,
+          planId: params.planId,
+          billingCycle: params.billingCycle,
+          mentorId: params.mentorId,
         }),
       });
 
@@ -2082,6 +2103,7 @@ export const mt5AdminService = {
         profile: parsed.data.profile,
         warning: parsed.data.warning,
         strategyProfilePersisted: parsed.data.strategyProfilePersisted,
+        subscriptionPersisted: parsed.data.subscriptionPersisted,
         missingSchemaTable: parsed.data.missingSchemaTable,
         message: parsed.data.message,
       };
@@ -2090,6 +2112,99 @@ export const mt5AdminService = {
         success: false,
         error: err.message || 'Network error creating user account.',
       };
+    }
+  },
+
+  async updateAdminMentor(
+    mentorId: string,
+    payload: {
+      fullName?: string;
+      status?: 'active' | 'pending' | 'suspended';
+      strategyName?: string;
+      description?: string;
+      monthlyFee?: number;
+      maxFollowers?: number;
+    }
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!isSupabaseConfigured()) return { success: false, error: 'Supabase not configured.' };
+    try {
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        return { success: false, error: 'Active Super Admin session required.' };
+      }
+      const res = await fetch(`/api/admin/mentors/${encodeURIComponent(mentorId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionCheck.session.access_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const parsed = await this.safeParseApiResponse(res);
+      if (!parsed.ok || !parsed.data?.success) {
+        return { success: false, error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to update mentor` };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error updating mentor.' };
+    }
+  },
+
+  async updateAdminTrader(
+    traderId: string,
+    payload: {
+      fullName?: string;
+      status?: 'active' | 'pending' | 'suspended';
+      mentorId?: string;
+    }
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!isSupabaseConfigured()) return { success: false, error: 'Supabase not configured.' };
+    try {
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        return { success: false, error: 'Active Super Admin session required.' };
+      }
+      const res = await fetch(`/api/admin/traders/${encodeURIComponent(traderId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionCheck.session.access_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const parsed = await this.safeParseApiResponse(res);
+      if (!parsed.ok || !parsed.data?.success) {
+        return { success: false, error: parsed.data?.error || parsed.error || `HTTP ${res.status}: Failed to update trader` };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error updating trader.' };
+    }
+  },
+
+  async fetchBrokers(includeAdmin: boolean = false): Promise<{ success: boolean; brokers: any[]; schemaMissing?: boolean; error?: string }> {
+    if (!isSupabaseConfigured()) {
+      return { success: true, brokers: [], schemaMissing: false };
+    }
+    try {
+      const sessionCheck = await ensureValidSession();
+      if (!sessionCheck.valid || !sessionCheck.session?.access_token) {
+        return { success: false, brokers: [], error: 'Authentication required.' };
+      }
+      const res = await fetch(includeAdmin ? '/api/admin/brokers' : '/api/v1/brokers', {
+        headers: { Authorization: `Bearer ${sessionCheck.session.access_token}` },
+      });
+      const parsed = await this.safeParseApiResponse(res);
+      if (!parsed.ok || !parsed.data?.success) {
+        return { success: false, brokers: [], error: parsed.data?.error || parsed.error || 'Failed to load brokers.' };
+      }
+      return {
+        success: true,
+        brokers: parsed.data.brokers || [],
+        schemaMissing: Boolean(parsed.data.schemaMissing),
+      };
+    } catch (err: any) {
+      return { success: false, brokers: [], error: err.message || 'Network error loading brokers.' };
     }
   },
 

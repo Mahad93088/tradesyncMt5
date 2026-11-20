@@ -6,8 +6,6 @@ import {
   Server,
   Activity,
   AlertTriangle,
-  Link2,
-  DollarSign,
   Clock,
   Plus,
   Bell,
@@ -17,12 +15,16 @@ import {
   Wifi,
   CheckCircle2,
   UserPlus,
+  UserX,
+  Layers,
+  Eye,
+  X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
-import { RealEquityCurveChart } from '../common/RealEquityCurveChart';
 import { formatHeartbeatAge } from '../common/dashboardHelpers';
+import { User } from '../../types';
 import {
   AdminPageHeader,
   AdminStatCard,
@@ -49,11 +51,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { isCloudMode } = useAuth();
   const {
     users,
+    mentorProfiles,
     mt5Accounts,
+    subscriptionPlans,
     subscriptions,
     payments,
     parentChildLinks,
-    trades,
     tradeMappings,
     syncLogs,
     auditLogs,
@@ -65,19 +68,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   } = useApp();
 
   const [activityTab, setActivityTab] = useState<ActivityFeedTab>('mentors');
+  const [selectedMentor, setSelectedMentor] = useState<User | null>(null);
   const [announcementTitle, setAnnouncementTitle] = useState('');
   const [announcementMsg, setAnnouncementMsg] = useState('');
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
 
-  // Core metrics
+  // Mentor-Centric KPI Metrics
   const mentors = users.filter((u) => u.role === 'mentor');
   const traders = users.filter((u) => u.role === 'trader');
+
   const activeMentors = mentors.filter((m) => m.status === 'active').length;
+  const suspendedInactiveMentors = mentors.filter((m) => m.status === 'suspended').length;
   const pendingMentors = mentors.filter((m) => m.status === 'pending').length;
+
   const activeTraders = traders.filter((t) => t.status === 'active').length;
   const pendingTraders = traders.filter((t) => t.status === 'pending').length;
   const totalPendingApprovals = pendingMentors + pendingTraders;
+
+  const activePlansCount = subscriptionPlans.filter(
+    (p) => p.isActive !== false && !p.isArchived
+  ).length;
+  const activeSubscriptions = subscriptions.filter(
+    (s) => s.status === 'active' || s.status === 'trial'
+  );
+  const expiredSubscriptions = subscriptions.filter(
+    (s) => s.status === 'expired' || s.status === 'cancelled'
+  );
 
   const connectedTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'connected').length;
   const staleTerminals = isCloudMode
@@ -85,15 +102,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     : mt5Accounts.filter((a) => a.isStale).length;
   const disconnectedTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'disconnected').length;
   const errorTerminals = mt5Accounts.filter((a) => a.connectionStatus === 'error').length;
-
-  const activeCopyAssignments = parentChildLinks.filter((l) => l.status === 'active').length;
-
-  const activeSubscriptions = subscriptions.filter((s) => s.status === 'active');
-  const trialSubscriptions = subscriptions.filter((s) => s.status === 'trial');
-  const computedMrr = activeSubscriptions.reduce((sum, sub) => {
-    return sum + (sub.billingCycle === 'yearly' ? sub.price / 12 : sub.price);
-  }, 0);
-  const settledPaymentsCount = payments.filter((p) => p.status === 'succeeded').length;
 
   const executedInstructions = tradeMappings.filter(
     (m) => m.status === 'EXECUTED' || m.status === 'CLOSED'
@@ -107,28 +115,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     ? cloudBridgeTelemetry.averageCopyLatencyMs || systemHealth.averageCopyLatencyMs
     : systemHealth.averageCopyLatencyMs;
 
-  // Derived Growth Series (grouped by month from actual user records, never fabricated)
+  // Derived Growth Series (grouped by month from actual user records)
   const userGrowthPoints = useMemo(() => {
     const buckets = new Map<string, { label: string; primary: number; secondary: number; sortKey: number }>();
-    const addUser = (u: typeof users[number]) => {
+    users.forEach((u) => {
       const ts = Date.parse(u.createdAt);
       if (!Number.isFinite(ts)) return;
       const d = new Date(ts);
       const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
       const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
-      const existing = buckets.get(key) || { label, primary: 0, secondary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+      const existing = buckets.get(key) || {
+        label,
+        primary: 0,
+        secondary: 0,
+        sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth(),
+      };
       if (u.role === 'mentor') existing.primary += 1;
       if (u.role === 'trader') existing.secondary += 1;
       buckets.set(key, existing);
-    };
-    users.forEach(addUser);
+    });
     return Array.from(buckets.values())
       .sort((a, b) => a.sortKey - b.sortKey)
       .slice(-6)
       .map(({ label, primary, secondary }) => ({ label, primary, secondary }));
   }, [users]);
 
-  // Derived Subscription & Revenue Series
   const subscriptionGrowthPoints = useMemo(() => {
     const buckets = new Map<string, { label: string; primary: number; secondary: number; sortKey: number }>();
     subscriptions.forEach((s) => {
@@ -137,8 +148,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const d = new Date(ts);
       const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
       const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
-      const existing = buckets.get(key) || { label, primary: 0, secondary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
-      if (s.status === 'active') existing.primary += 1;
+      const existing = buckets.get(key) || {
+        label,
+        primary: 0,
+        secondary: 0,
+        sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth(),
+      };
+      if (s.status === 'active' || s.status === 'trial') existing.primary += 1;
       else existing.secondary += 1;
       buckets.set(key, existing);
     });
@@ -158,7 +174,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const d = new Date(ts);
         const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
         const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
-        const existing = buckets.get(key) || { label, primary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+        const existing = buckets.get(key) || {
+          label,
+          primary: 0,
+          sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth(),
+        };
         existing.primary += Math.round(p.amountUsd);
         buckets.set(key, existing);
       });
@@ -172,7 +192,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
           const label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
           const normalized = Math.round(s.billingCycle === 'yearly' ? s.price / 12 : s.price);
-          const existing = buckets.get(key) || { label, primary: 0, sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth() };
+          const existing = buckets.get(key) || {
+            label,
+            primary: 0,
+            sortKey: d.getUTCFullYear() * 100 + d.getUTCMonth(),
+          };
           existing.primary += normalized;
           buckets.set(key, existing);
         });
@@ -183,9 +207,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .map(({ label, primary }) => ({ label, primary }));
   }, [payments, subscriptions]);
 
-  const recentMentors = [...mentors]
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, 6);
+  const mentorRows = useMemo(() => {
+    return [...mentors]
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .map((mentor) => {
+        const links = parentChildLinks.filter((l) => l.mentorId === mentor.id);
+        const activeLinks = links.filter((l) => l.status === 'active');
+        const sub = subscriptions.find((s) => s.mentorId === mentor.id || s.userId === mentor.id);
+        const profile = mentorProfiles.find((p) => p.userId === mentor.id);
+        return {
+          mentor,
+          profile,
+          assignedCount: links.length,
+          activeCount: activeLinks.length,
+          sub,
+        };
+      });
+  }, [mentors, parentChildLinks, subscriptions, mentorProfiles]);
+
   const recentTraders = [...traders]
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
     .slice(0, 6);
@@ -208,8 +247,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     <div className="space-y-6">
       <AdminPageHeader
         title="Platform Overview"
-        meta={isCloudMode ? 'Cloud Demo Bridge · Live Telemetry' : 'Demo Sandbox Mode'}
-        subtitle="Executive command center for TradeSync MT5 mentor approvals, follower terminals, copier execution health, and billing readiness."
+        meta={isCloudMode ? 'Cloud Demo Bridge · Mentor-Centric Administration' : 'Demo Sandbox Mode'}
+        subtitle="Super Admin command center for mentor approvals, trader allocations, subscription plans, and MT5 demo bridge health."
         actions={
           <>
             <button
@@ -237,9 +276,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" />
-              <span>{isCloudMode ? 'Approve / Provision Mentor' : 'Provision Mentor'}</span>
+              <span>Add Mentor</span>
             </button>
-            {!isCloudMode && onOpenAddTrader && (
+            {onOpenAddTrader && (
               <button
                 type="button"
                 onClick={onOpenAddTrader}
@@ -260,11 +299,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <span>
             {isCloudMode ? (
               <>
-                <strong>Cloud Demo Bridge Active:</strong> Displaying live Supabase profiles, MT5 terminals, copy assignments, and bridge audit telemetry. Real-money accounts remain blocked by EA Demo safeguards.
+                <strong>Cloud Demo Bridge Active:</strong> Displaying live Supabase mentor cohorts, assigned traders, subscriptions, and MT5 terminal telemetry. Live real-money accounts remain blocked.
               </>
             ) : (
               <>
-                <strong>Demo Sandbox Mode:</strong> Displaying interactive simulated mentors, traders, MT5 accounts, and sandbox billing metrics. Switch to Cloud Auth for live Supabase telemetry.
+                <strong>Demo Sandbox Mode:</strong> Displaying interactive simulated mentors, traders, subscriptions, and MT5 terminals. Switch to Cloud Auth for live Supabase telemetry.
               </>
             )}
           </span>
@@ -284,7 +323,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
             <span>
-              <strong>{totalPendingApprovals} registration(s) awaiting Super Admin approval</strong> ({pendingMentors} mentor, {pendingTraders} trader). Review pending profiles to grant platform access.
+              <strong>{totalPendingApprovals} registration(s) awaiting Super Admin approval</strong> ({pendingMentors} mentor, {pendingTraders} trader).
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -310,12 +349,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* 10 Summary KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
+      {/* Mentor-Centric Summary KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         <AdminStatCard
           title="Total Mentors"
           value={mentors.length}
-          subtitle={`${pendingMentors} pending review`}
+          subtitle={`${activeMentors} active · ${pendingMentors} pending`}
           icon={Users}
           tone="blue"
           onClick={() => onNavigateTab('mentors')}
@@ -329,9 +368,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onClick={() => onNavigateTab('mentors')}
         />
         <AdminStatCard
-          title="Total Traders"
+          title="Suspended / Inactive Mentors"
+          value={suspendedInactiveMentors}
+          subtitle="Paused from trade broadcasting"
+          icon={UserX}
+          tone={suspendedInactiveMentors > 0 ? 'amber' : 'neutral'}
+          onClick={() => onNavigateTab('mentors')}
+        />
+        <AdminStatCard
+          title="Pending Mentor Approvals"
+          value={pendingMentors}
+          subtitle={`${pendingTraders} pending trader approvals`}
+          icon={Clock}
+          tone={pendingMentors > 0 ? 'amber' : 'neutral'}
+          onClick={() => onNavigateTab('mentors')}
+        />
+        <AdminStatCard
+          title="Total Traders (All Mentors)"
           value={traders.length}
-          subtitle={`${pendingTraders} pending review`}
+          subtitle={`${parentChildLinks.length} mentor assignment(s)`}
           icon={UserCheck}
           tone="blue"
           onClick={() => onNavigateTab('traders')}
@@ -345,98 +400,152 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onClick={() => onNavigateTab('traders')}
         />
         <AdminStatCard
-          title="Total MT5 Accounts"
-          value={mt5Accounts.length}
-          subtitle={`${mt5Accounts.filter((a) => a.accountRole === 'parent').length} parent · ${mt5Accounts.filter((a) => a.accountRole === 'child').length} child`}
-          icon={Server}
-          tone="neutral"
-          onClick={() => onNavigateTab('mt5-accounts')}
-        />
-        <AdminStatCard
-          title="Connected Terminals"
-          value={connectedTerminals}
-          subtitle={staleTerminals > 0 ? `${staleTerminals} stale · ${disconnectedTerminals + errorTerminals} offline` : `${disconnectedTerminals + errorTerminals} offline`}
-          icon={Wifi}
-          tone={errorTerminals > 0 || staleTerminals > 0 ? 'amber' : 'emerald'}
-          onClick={() => onNavigateTab('system-health')}
-        />
-        <AdminStatCard
-          title="Active Copy Assignments"
-          value={activeCopyAssignments}
-          subtitle={`${parentChildLinks.length} total mappings`}
-          icon={Link2}
+          title="Active Subscription Plans"
+          value={activePlansCount}
+          subtitle={`${subscriptionPlans.length} total catalog plans`}
+          icon={Layers}
           tone="blue"
-          onClick={() => onNavigateTab('copier-monitoring')}
+          onClick={() => onNavigateTab('plans')}
         />
         <AdminStatCard
-          title="Active Subscriptions"
-          value={activeSubscriptions.length}
-          subtitle={`${trialSubscriptions.length} trial · ${subscriptions.length} total`}
+          title="Active & Expired Subscriptions"
+          value={`${activeSubscriptions.length} / ${expiredSubscriptions.length}`}
+          subtitle={`${activeSubscriptions.length} active · ${expiredSubscriptions.length} expired`}
           icon={CreditCard}
-          tone="emerald"
+          tone={expiredSubscriptions.length > 0 ? 'amber' : 'emerald'}
           onClick={() => onNavigateTab('subscriptions')}
-        />
-        <AdminStatCard
-          title="Monthly Recurring Rev"
-          value={`$${Math.round(computedMrr).toLocaleString()}`}
-          subtitle={
-            isCloudMode
-              ? settledPaymentsCount > 0
-                ? `${settledPaymentsCount} settled payment(s)`
-                : 'From active subscriptions'
-              : 'Demo sandbox MRR'
-          }
-          icon={DollarSign}
-          tone="emerald"
-          onClick={() => onNavigateTab('payments-revenue')}
-        />
-        <AdminStatCard
-          title="Pending Approvals"
-          value={totalPendingApprovals}
-          subtitle={`${pendingMentors} mentors · ${pendingTraders} traders`}
-          icon={Clock}
-          tone={totalPendingApprovals > 0 ? 'amber' : 'neutral'}
-          onClick={() => onNavigateTab(pendingMentors > 0 ? 'mentors' : 'traders')}
         />
       </div>
 
-      {/* 5 Analytics Charts + Realized Equity Curve */}
+      {/* Primary Centerpiece: Mentor Overview Table (click any row to inspect mentor's assigned traders) */}
+      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-3.5 border-b border-slate-200 bg-slate-50/70">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Mentor Overview &amp; Trader Allocations</h2>
+            <p className="text-[11px] text-slate-500">
+              Select a mentor row to inspect their assigned traders, subscription plan status, and parent terminal telemetry.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('mentors')}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:text-sky-900 whitespace-nowrap shrink-0"
+          >
+            <span>Open Mentor Management</span>
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {mentorRows.length === 0 ? (
+          <div className="p-8 text-center space-y-3">
+            <p className="text-xs text-slate-500">No mentors have been provisioned or approved yet.</p>
+            <button
+              type="button"
+              onClick={onOpenCreateMentor}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Add First Mentor</span>
+            </button>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Mentor Name &amp; Email</th>
+                  <th className="px-4 py-3">Account Status</th>
+                  <th className="px-4 py-3 text-right">Assigned Traders</th>
+                  <th className="px-4 py-3 text-right">Active Traders</th>
+                  <th className="px-4 py-3">Subscription Plan</th>
+                  <th className="px-4 py-3">Plan Status</th>
+                  <th className="px-4 py-3">Registered</th>
+                  <th className="px-4 py-3 text-right">Inspect</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {mentorRows.map(({ mentor, assignedCount, activeCount, sub }) => (
+                  <tr
+                    key={mentor.id}
+                    onClick={() => setSelectedMentor(mentor)}
+                    className="hover:bg-slate-50 cursor-pointer transition-colors"
+                  >
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-slate-900">{mentor.fullName}</div>
+                      <div className="font-mono text-[11px] text-slate-500">{mentor.email}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <AdminStatusText status={mentor.status} />
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold text-slate-900 tabular-nums">
+                      {assignedCount}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold text-emerald-700 tabular-nums">
+                      {activeCount}
+                    </td>
+                    <td className="px-4 py-3 text-slate-800 font-medium">
+                      {sub ? sub.planName : 'Unassigned'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {sub ? (
+                        <AdminStatusText status={sub.status} />
+                      ) : (
+                        <span className="text-[11px] text-slate-400">No subscription</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-[11px] text-slate-600 tabular-nums">
+                      {new Date(mentor.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedMentor(mentor);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        <Eye className="h-3 w-3" />
+                        <span>Traders</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Platform Cohort & Billing Growth Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <AdminSparkBarChart
-          title="Mentor & Trader Growth"
-          subtitle="Registrations grouped by onboarding month"
+          title="Mentor & Trader Onboarding"
+          subtitle="Registrations grouped by month"
           points={userGrowthPoints}
           primaryLabel="Mentors"
           secondaryLabel="Traders"
         />
         <AdminSparkBarChart
-          title="Subscription Growth"
-          subtitle="Active vs non-active subscription records"
+          title="Subscription Records"
+          subtitle="Active vs non-active subscriptions"
           points={subscriptionGrowthPoints}
           primaryLabel="Active"
           secondaryLabel="Other"
         />
         <AdminSparkBarChart
-          title="Monthly Revenue"
-          subtitle={settledPaymentsCount > 0 ? 'Verified settled payments' : 'Normalized monthly recurring billing'}
+          title="Platform Billing"
+          subtitle={payments.some((p) => p.status === 'succeeded') ? 'Verified settled payments' : 'Normalized recurring billing'}
           points={monthlyRevenuePoints}
-          primaryLabel={settledPaymentsCount > 0 ? 'Settled ($)' : 'MRR ($)'}
+          primaryLabel="Revenue ($)"
           valuePrefix="$"
         />
       </div>
 
-      <RealEquityCurveChart
-        trades={trades}
-        isCloudMode={isCloudMode}
-        variant="light"
-        title="Platform Realized Performance Curve"
-        subtitle="Cumulative P&L computed strictly from verified closed MT5 deals"
-      />
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <AdminDistributionChart
-          title="Account Connection Statistics"
-          subtitle="Live MT5 terminal telemetry & heartbeat state"
+          title="MT5 Terminal Connectivity"
+          subtitle={`${mt5Accounts.length} total demo accounts (${connectedTerminals} active)`}
           items={[
             { label: 'Connected (EA Active)', value: connectedTerminals, colorClass: 'bg-emerald-600' },
             { label: 'Stale Heartbeat', value: staleTerminals, colorClass: 'bg-amber-500' },
@@ -445,8 +554,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           ]}
         />
         <AdminDistributionChart
-          title="Copier Activity Overview"
-          subtitle={`${isCloudMode ? tradeMappings.length : trades.length} total tracked instructions`}
+          title="Copier Instruction Health"
+          subtitle={`${tradeMappings.length} total mapped instructions`}
           items={[
             { label: 'Executed & Closed Copies', value: executedInstructions, colorClass: 'bg-emerald-600' },
             { label: 'Pending Queue Instructions', value: pendingInstructions, colorClass: 'bg-sky-600' },
@@ -455,20 +564,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       </div>
 
-      {/* Recent Activity Feeds */}
+      {/* Recent Platform Activity Tabs */}
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/70">
           <div>
-            <h2 className="text-sm font-bold text-slate-900">Recent Platform Activity</h2>
-            <p className="text-[11px] text-slate-500">Real-time operational feeds across users, terminals, admin events, and alerts.</p>
+            <h2 className="text-sm font-bold text-slate-900">Operational Activity Feeds</h2>
+            <p className="text-[11px] text-slate-500">Live operational records across traders, MT5 terminals, admin actions, and system alerts.</p>
           </div>
           <div className="flex items-center flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1">
             {([
-              { id: 'mentors', label: 'Recent Mentors' },
-              { id: 'traders', label: 'Recent Traders' },
-              { id: 'connections', label: 'Terminal Connections' },
-              { id: 'admin-actions', label: 'Admin Actions' },
-              { id: 'alerts', label: 'System Alerts' },
+              { id: 'mentors', label: 'Mentors' },
+              { id: 'traders', label: 'Traders' },
+              { id: 'connections', label: 'Terminals' },
+              { id: 'admin-actions', label: 'Admin Audit' },
+              { id: 'alerts', label: 'Alerts' },
             ] as const).map((tab) => (
               <button
                 key={tab.id}
@@ -488,190 +597,305 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         <div className="p-4">
           {activityTab === 'mentors' && (
-            <div className="space-y-2">
-              {recentMentors.length === 0 ? (
-                <p className="py-6 text-center text-xs text-slate-500">No mentor profiles registered yet.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="pb-2.5 pr-4">Mentor</th>
-                        <th className="pb-2.5 pr-4">Email</th>
-                        <th className="pb-2.5 pr-4">Status</th>
-                        <th className="pb-2.5 pr-4">Joined</th>
-                        <th className="pb-2.5 text-right">View</th>
+            mentorRows.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500">No mentor profiles registered yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="pb-2.5 pr-4">Mentor</th>
+                      <th className="pb-2.5 pr-4">Email</th>
+                      <th className="pb-2.5 pr-4">Status</th>
+                      <th className="pb-2.5 pr-4">Assigned Traders</th>
+                      <th className="pb-2.5 text-right">View</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {mentorRows.slice(0, 6).map(({ mentor, assignedCount, activeCount }) => (
+                      <tr key={mentor.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 pr-4 font-semibold text-slate-900">{mentor.fullName}</td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{mentor.email}</td>
+                        <td className="py-2.5 pr-4"><AdminStatusText status={mentor.status} /></td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-700 tabular-nums">
+                          {activeCount} active / {assignedCount} assigned
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMentor(mentor)}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                          >
+                            Details <ArrowUpRight className="h-3 w-3" />
+                          </button>
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {recentMentors.map((m) => (
-                        <tr key={m.id} className="hover:bg-slate-50">
-                          <td className="py-2.5 pr-4 font-semibold text-slate-900">{m.fullName}</td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{m.email}</td>
-                          <td className="py-2.5 pr-4"><AdminStatusText status={m.status} /></td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-500 tabular-nums">
-                            {new Date(m.createdAt).toLocaleDateString()}
-                          </td>
-                          <td className="py-2.5 text-right">
-                            <button
-                              type="button"
-                              onClick={() => onNavigateTab('mentors')}
-                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
-                            >
-                              Manage <ArrowUpRight className="h-3 w-3" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
 
           {activityTab === 'traders' && (
-            <div className="space-y-2">
-              {recentTraders.length === 0 ? (
-                <p className="py-6 text-center text-xs text-slate-500">No follower traders registered yet.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="pb-2.5 pr-4">Trader</th>
-                        <th className="pb-2.5 pr-4">Email</th>
-                        <th className="pb-2.5 pr-4">Status</th>
-                        <th className="pb-2.5 pr-4">Joined</th>
-                        <th className="pb-2.5 text-right">View</th>
+            recentTraders.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500">No follower traders registered yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="pb-2.5 pr-4">Trader</th>
+                      <th className="pb-2.5 pr-4">Email</th>
+                      <th className="pb-2.5 pr-4">Status</th>
+                      <th className="pb-2.5 pr-4">Joined</th>
+                      <th className="pb-2.5 text-right">View</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {recentTraders.map((t) => (
+                      <tr key={t.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 pr-4 font-semibold text-slate-900">{t.fullName}</td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{t.email}</td>
+                        <td className="py-2.5 pr-4"><AdminStatusText status={t.status} /></td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-500 tabular-nums">
+                          {new Date(t.createdAt).toLocaleDateString()}
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => onNavigateTab('traders')}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                          >
+                            Manage <ArrowUpRight className="h-3 w-3" />
+                          </button>
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {recentTraders.map((t) => (
-                        <tr key={t.id} className="hover:bg-slate-50">
-                          <td className="py-2.5 pr-4 font-semibold text-slate-900">{t.fullName}</td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600">{t.email}</td>
-                          <td className="py-2.5 pr-4"><AdminStatusText status={t.status} /></td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-500 tabular-nums">
-                            {new Date(t.createdAt).toLocaleDateString()}
-                          </td>
-                          <td className="py-2.5 text-right">
-                            <button
-                              type="button"
-                              onClick={() => onNavigateTab('traders')}
-                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
-                            >
-                              Manage <ArrowUpRight className="h-3 w-3" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
 
           {activityTab === 'connections' && (
-            <div className="space-y-2">
-              {recentConnections.length === 0 ? (
-                <p className="py-6 text-center text-xs text-slate-500">No MT5 terminals registered yet.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="pb-2.5 pr-4">Account #</th>
-                        <th className="pb-2.5 pr-4">Role</th>
-                        <th className="pb-2.5 pr-4">Broker & Server</th>
-                        <th className="pb-2.5 pr-4">Status</th>
-                        <th className="pb-2.5 pr-4">Last Heartbeat</th>
-                        <th className="pb-2.5 text-right">Inspect</th>
+            recentConnections.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500">No MT5 terminals registered yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-slate-200 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="pb-2.5 pr-4">Account #</th>
+                      <th className="pb-2.5 pr-4">Role</th>
+                      <th className="pb-2.5 pr-4">Broker &amp; Symbol</th>
+                      <th className="pb-2.5 pr-4">Status</th>
+                      <th className="pb-2.5 pr-4">Last Heartbeat</th>
+                      <th className="pb-2.5 text-right">Inspect</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {recentConnections.map((acc) => (
+                      <tr key={acc.id} className="hover:bg-slate-50">
+                        <td className="py-2.5 pr-4 font-mono font-semibold text-slate-900 tabular-nums">#{acc.accountNumber}</td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] uppercase text-slate-600">{acc.accountRole}</td>
+                        <td className="py-2.5 pr-4 text-slate-700">
+                          {acc.broker} · <span className="font-mono text-[11px] text-slate-600">{acc.tradingSymbol || 'Default Gold'}</span>
+                        </td>
+                        <td className="py-2.5 pr-4"><AdminStatusText status={acc.isStale ? 'stale' : acc.connectionStatus} /></td>
+                        <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600 tabular-nums">{formatHeartbeatAge(acc.lastHeartbeat)}</td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => onNavigateTab('mt5-accounts')}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
+                          >
+                            Open <ArrowUpRight className="h-3 w-3" />
+                          </button>
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {recentConnections.map((acc) => (
-                        <tr key={acc.id} className="hover:bg-slate-50">
-                          <td className="py-2.5 pr-4 font-mono font-semibold text-slate-900 tabular-nums">#{acc.accountNumber}</td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] uppercase text-slate-600">{acc.accountRole}</td>
-                          <td className="py-2.5 pr-4 text-slate-700">{acc.broker} · <span className="font-mono text-[11px] text-slate-500">{acc.server}</span></td>
-                          <td className="py-2.5 pr-4"><AdminStatusText status={acc.isStale ? 'stale' : acc.connectionStatus} /></td>
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-slate-600 tabular-nums">{formatHeartbeatAge(acc.lastHeartbeat)}</td>
-                          <td className="py-2.5 text-right">
-                            <button
-                              type="button"
-                              onClick={() => onNavigateTab('mt5-accounts')}
-                              className="inline-flex items-center gap-1 text-xs font-medium text-sky-700 hover:text-sky-900"
-                            >
-                              Open <ArrowUpRight className="h-3 w-3" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
 
           {activityTab === 'admin-actions' && (
-            <div className="space-y-2">
-              {recentAdminActions.length === 0 ? (
-                <div className="py-6 text-center text-xs text-slate-500">
-                  {syncLogs.length > 0
-                    ? `${syncLogs.length} bridge synchronization event(s) available in System Audit Logs.`
-                    : 'No admin audit events recorded in this session.'}
-                </div>
-              ) : (
-                <div className="divide-y divide-slate-100">
-                  {recentAdminActions.map((log) => (
-                    <div key={log.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                      <div className="space-y-0.5 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-mono font-semibold text-slate-900">{log.action}</span>
-                          <AdminStatusText status={log.result} />
-                          <span className="text-[11px] text-slate-500">by {log.actorName}</span>
-                        </div>
-                        <p className="text-slate-600 truncate">{log.details}</p>
+            recentAdminActions.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500">
+                {syncLogs.length > 0
+                  ? `${syncLogs.length} bridge synchronization event(s) available in System Audit Logs.`
+                  : 'No admin audit events recorded yet.'}
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {recentAdminActions.map((log) => (
+                  <div key={log.id} className="py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-semibold text-slate-900">{log.action}</span>
+                        <AdminStatusText status={log.result} />
+                        <span className="text-[11px] text-slate-500">by {log.actorName}</span>
                       </div>
-                      <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
-                        {new Date(log.timestamp).toLocaleTimeString()}
-                      </span>
+                      <p className="text-slate-600 truncate">{log.details}</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                    <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                      {new Date(log.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )
           )}
 
           {activityTab === 'alerts' && (
-            <div className="space-y-2">
-              {systemAlerts.length === 0 ? (
-                <p className="py-6 text-center text-xs text-slate-500">No active error or warning alerts flagged.</p>
-              ) : (
-                <div className="divide-y divide-slate-100">
-                  {systemAlerts.map((n) => (
-                    <div key={n.id} className="py-2.5 flex items-start justify-between gap-3 text-xs">
-                      <div className="space-y-0.5">
-                        <div className="flex items-center gap-2">
-                          <AdminStatusText status={n.type} />
-                          <span className="font-semibold text-slate-900">{n.title}</span>
-                        </div>
-                        <p className="text-slate-600">{n.message}</p>
+            systemAlerts.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500">No active error or warning alerts flagged.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {systemAlerts.map((n) => (
+                  <div key={n.id} className="py-2.5 flex items-start justify-between gap-3 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <AdminStatusText status={n.type} />
+                        <span className="font-semibold text-slate-900">{n.title}</span>
                       </div>
-                      <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
-                        {new Date(n.timestamp).toLocaleTimeString()}
-                      </span>
+                      <p className="text-slate-600">{n.message}</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                    <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                      {new Date(n.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )
           )}
         </div>
       </div>
+
+      {/* Mentor Details Modal (shows ONLY this mentor's assigned traders) */}
+      {selectedMentor && (() => {
+        const mentorLinks = parentChildLinks.filter((l) => l.mentorId === selectedMentor.id);
+        const mentorSub = subscriptions.find((s) => s.mentorId === selectedMentor.id || s.userId === selectedMentor.id);
+        const parentAccount = mt5Accounts.find((a) => a.userId === selectedMentor.id && a.accountRole === 'parent');
+        const profile = mentorProfiles.find((p) => p.userId === selectedMentor.id);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-6 shadow-2xl space-y-5 my-auto">
+              <div className="flex items-start justify-between border-b border-slate-200 pb-3">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">{selectedMentor.fullName}</h3>
+                  <p className="text-xs text-slate-500 font-mono">{selectedMentor.email}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedMentor(null)}
+                  className="text-slate-400 hover:text-slate-700"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                  <span className="text-[10px] uppercase font-mono text-slate-500 block">Status</span>
+                  <div className="mt-1"><AdminStatusText status={selectedMentor.status} /></div>
+                </div>
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                  <span className="text-[10px] uppercase font-mono text-slate-500 block">Plan</span>
+                  <span className="font-semibold text-slate-900 mt-1 block">{mentorSub ? mentorSub.planName : 'None'}</span>
+                </div>
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                  <span className="text-[10px] uppercase font-mono text-slate-500 block">Strategy</span>
+                  <span className="font-semibold text-slate-900 mt-1 block truncate">{profile?.strategyName || 'Standard'}</span>
+                </div>
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                  <span className="text-[10px] uppercase font-mono text-slate-500 block">Parent MT5</span>
+                  <span className="font-mono font-semibold text-slate-900 mt-1 block">
+                    {parentAccount ? `#${parentAccount.accountNumber}` : 'Unbound'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-slate-900">
+                    Assigned Traders for {selectedMentor.fullName} ({mentorLinks.length})
+                  </h4>
+                  <span className="text-[11px] font-mono text-slate-500">
+                    {mentorLinks.filter((l) => l.status === 'active').length} active
+                  </span>
+                </div>
+
+                {mentorLinks.length === 0 ? (
+                  <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-center text-slate-500">
+                    No traders assigned to this mentor yet.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto rounded-lg border border-slate-200">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-semibold text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">Trader</th>
+                          <th className="px-3 py-2">Child MT5</th>
+                          <th className="px-3 py-2">Link Status</th>
+                          <th className="px-3 py-2">Membership</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {mentorLinks.map((link) => {
+                          const traderUser = users.find((u) => u.id === link.traderId);
+                          const childAcc = mt5Accounts.find((a) => a.id === link.childAccountId);
+                          return (
+                            <tr key={link.id}>
+                              <td className="px-3 py-2">
+                                <div className="font-semibold text-slate-900">{link.traderName}</div>
+                                <div className="text-[11px] font-mono text-slate-500">{traderUser?.email || link.traderId}</div>
+                              </td>
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-700">
+                                {childAcc ? `#${childAcc.accountNumber} (${childAcc.broker})` : 'No MT5 bound'}
+                              </td>
+                              <td className="px-3 py-2">
+                                <AdminStatusText status={link.status} />
+                              </td>
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-600">
+                                {link.membershipStatus || 'active'}
+                                {link.membershipPriceUsd ? ` · $${link.membershipPriceUsd}` : ''}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMentor(null);
+                    onNavigateTab('mentors');
+                  }}
+                  className="text-xs font-semibold text-sky-700 hover:text-sky-900"
+                >
+                  Open in Mentor Management &rarr;
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedMentor(null)}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Broadcast Announcement Modal */}
       {showBroadcastModal && (

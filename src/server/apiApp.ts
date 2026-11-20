@@ -13,8 +13,10 @@ import {
   type TerminalHeartbeatTelemetry,
 } from './bridgeStore.ts';
 import { createCorsAndSecurityMiddleware, SlidingWindowRateLimiter } from './securityMiddleware.ts';
-import { checkMentorFollowerQuota, writeAuditLog } from './billingService.ts';
+import { checkMentorFollowerQuota, isMissingRelationError, writeAuditLog } from './billingService.ts';
 import { registerDay2Routes } from './day2Routes.ts';
+import { registerBrokerRoutes } from './brokerRoutes.ts';
+import { registerMentorStudentRoutes } from './mentorStudentRoutes.ts';
 import type { MappingExecutionStatus } from '../types';
 
 dotenv.config();
@@ -1126,7 +1128,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
         role = 'mentor',
         status = 'active',
         strategyName,
+        description,
         monthlyFee,
+        maxFollowers,
+        planId,
+        billingCycle = 'monthly',
+        mentorId,
       } = req.body || {};
 
       const cleanName = String(fullName || '').trim();
@@ -1209,8 +1216,21 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const hasStrategyMetadata = Boolean(
         (strategyName !== undefined && String(strategyName).trim() !== '') ||
-        (monthlyFee !== undefined && monthlyFee !== null && monthlyFee !== '')
+        (description !== undefined && String(description).trim() !== '') ||
+        (monthlyFee !== undefined && monthlyFee !== null && monthlyFee !== '') ||
+        (maxFollowers !== undefined && maxFollowers !== null && maxFollowers !== '')
       );
+
+      if (requestedRole === 'trader' && mentorId && isValidUUID(mentorId)) {
+        const quotaCheck = await checkMentorFollowerQuota(dbClient, String(mentorId).trim());
+        if (!quotaCheck.allowed) {
+          return res.status(403).json({
+            success: false,
+            code: quotaCheck.code || 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
+            error: quotaCheck.error,
+          });
+        }
+      }
 
       // Duplicate check against public.profiles before calling Auth Admin
       const { data: existingProf, error: existingErr } = await dbClient
@@ -1332,18 +1352,36 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      let strategyProfilePersisted: boolean | null = hasStrategyMetadata ? false : null;
-      if (hasStrategyMetadata && requestedRole === 'mentor') {
+      let selectedPlan: any = null;
+      if (planId && isValidUUID(planId)) {
+        const { data: pRow } = await dbClient
+          .from('subscription_plans')
+          .select('*')
+          .eq('id', String(planId).trim())
+          .maybeSingle();
+        if (pRow) selectedPlan = pRow;
+      }
+
+      let strategyProfilePersisted: boolean | null = hasStrategyMetadata || requestedRole === 'mentor' ? false : null;
+      if (requestedRole === 'mentor') {
         try {
           const inviteCode = `TS-${String(newUserId).slice(0, 8).toUpperCase()}`;
+          const computedMaxFollowers =
+            maxFollowers != null && Number.isFinite(Number(maxFollowers))
+              ? Math.max(1, Math.round(Number(maxFollowers)))
+              : selectedPlan?.max_followers != null
+              ? Number(selectedPlan.max_followers)
+              : 25;
           const { error: mpErr } = await dbClient
             .from('mentor_profiles')
             .upsert(
               [
                 {
                   user_id: newUserId,
-                  strategy_name: String(strategyName || 'Master Strategy').trim() || 'Master Strategy',
+                  strategy_name: String(strategyName || `${cleanName}'s Strategy`).trim() || 'Master Strategy',
+                  description: String(description || '').trim(),
                   monthly_fee: monthlyFee != null && Number.isFinite(Number(monthlyFee)) ? Math.max(0, Number(monthlyFee)) : 0,
+                  max_followers: computedMaxFollowers,
                   invite_code: inviteCode,
                   updated_at: nowIso,
                 },
@@ -1354,6 +1392,51 @@ export function createApiApp(deps?: ApiAppDependencies) {
         } catch {
           strategyProfilePersisted = false;
         }
+      }
+
+      // Optional initial subscription assignment for mentor (respects trial_days if present)
+      let subscriptionPersisted = false;
+      if (selectedPlan) {
+        const cycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
+        const trialDays = Number(selectedPlan.trial_days ?? 0);
+        const amount = Number(cycle === 'yearly' ? selectedPlan.yearly_price_usd : selectedPlan.monthly_price_usd);
+        const nowMs = Date.now();
+        const periodEndMs =
+          trialDays > 0
+            ? nowMs + trialDays * 86400_000
+            : nowMs + (cycle === 'yearly' ? 365 : 30) * 86400_000;
+        const { error: subErr } = await dbClient.from('subscriptions').insert([
+          {
+            user_id: newUserId,
+            mentor_id: requestedRole === 'mentor' ? newUserId : null,
+            plan_id: selectedPlan.id,
+            status: trialDays > 0 ? 'trial' : 'active',
+            billing_cycle: cycle,
+            amount_usd: Number.isFinite(amount) ? amount : 0,
+            currency: 'USD',
+            current_period_start: nowIso,
+            current_period_end: new Date(periodEndMs).toISOString(),
+            cancel_at_period_end: false,
+          },
+        ]);
+        if (!subErr) subscriptionPersisted = true;
+      }
+
+      // Optional mentor invitation when Admin provisions a Trader linked to a specific Mentor
+      if (requestedRole === 'trader' && mentorId && isValidUUID(mentorId)) {
+        await dbClient
+          .from('mentor_trader_invitations')
+          .insert([
+            {
+              mentor_id: String(mentorId).trim(),
+              trader_id: newUserId,
+              invited_email: cleanEmail,
+              direction: 'mentor_invite',
+              status: 'pending',
+              message: 'Pre-assigned by Super Admin during trader provisioning. Connect your Child MT5 Demo account to activate copy trading.',
+            },
+          ])
+          .then(() => null, () => null);
       }
 
       await bridgeStore.addSyncLog(
@@ -1371,7 +1454,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         targetType: 'profiles',
         targetId: newUserId,
         result: 'success',
-        details: `Provisioned ${requestedRole} account ${cleanEmail} (${requestedStatus}).`,
+        details: `Provisioned ${requestedRole} account ${cleanEmail} (${requestedStatus})${selectedPlan ? ` with plan ${selectedPlan.name}` : ''}.`,
       });
 
       const strategyWarning =
@@ -1383,6 +1466,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         success: true,
         profile: persistedProfile,
         strategyProfilePersisted,
+        subscriptionPersisted,
         missingSchemaTable: hasStrategyMetadata && !strategyProfilePersisted ? 'mentor_profiles' : undefined,
         warning: strategyWarning,
         message: `Successfully registered and approved ${cleanName} (${cleanEmail}) as ${requestedRole}.`,
@@ -2114,6 +2198,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const {
         accountRole = 'parent',
         brokerName = 'XM',
+        brokerId,
+        tradingSymbol,
         brokerServer,
         accountNumber,
         accountType = 'demo',
@@ -2375,12 +2461,46 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      let resolvedBrokerId: string | null = brokerId && isValidUUID(brokerId) ? String(brokerId).trim() : null;
+      let resolvedBrokerName = cleanBrokerName;
+      let resolvedTradingSymbol = tradingSymbol ? String(tradingSymbol).trim() : 'XAUUSD';
+      let resolvedSymbolVerified = false;
+
+      if (resolvedBrokerId) {
+        const { data: bRow, error: bErr } = await dbClient
+          .from('brokers')
+          .select('id, name, is_active')
+          .eq('id', resolvedBrokerId)
+          .maybeSingle();
+        if (!bErr && bRow) {
+          resolvedBrokerName = bRow.name;
+          const { data: syms } = await dbClient
+            .from('broker_symbols')
+            .select('symbol_code, is_active, is_verified')
+            .eq('broker_id', resolvedBrokerId)
+            .eq('is_active', true);
+          if (syms && syms.length > 0 && tradingSymbol) {
+            const matchedSym = syms.find((s: any) => s.symbol_code === resolvedTradingSymbol);
+            if (!matchedSym) {
+              return res.status(400).json({
+                success: false,
+                code: 'INVALID_BROKER_SYMBOL',
+                error: `Symbol "${resolvedTradingSymbol}" is not in the active Gold symbol list for ${bRow.name}. Allowed: ${syms.map((s: any) => s.symbol_code).join(', ')}.`,
+              });
+            }
+            resolvedSymbolVerified = Boolean(matchedSym.is_verified);
+          }
+        }
+      } else if (tradingSymbol) {
+        resolvedTradingSymbol = String(tradingSymbol).trim();
+      }
+
       const accountPayload: Record<string, any> = {
         id: accountId,
         user_id: targetUserId,
         account_number: cleanAccNumber,
         broker_server: cleanBrokerServer,
-        broker_name: cleanBrokerName,
+        broker_name: resolvedBrokerName,
         account_role: role,
         account_type: accountType,
         balance: Number(balance) || 10000,
@@ -2393,49 +2513,58 @@ export function createApiApp(deps?: ApiAppDependencies) {
         is_investor_password: true,
         auto_trading_enabled: true,
       };
+      const extendedFields: Record<string, any> = {
+        ...(resolvedBrokerId ? { broker_id: resolvedBrokerId } : {}),
+        trading_symbol: resolvedTradingSymbol,
+        symbol_verified: resolvedSymbolVerified,
+      };
 
       if (existingAcc) {
         accountId = existingAcc.id;
-        const { error: updateErr } = await dbClient
+        const basePatch = {
+          user_id: targetUserId,
+          broker_name: resolvedBrokerName,
+          account_role: role,
+          account_type: accountType,
+          balance: Number(balance) || 10000,
+          equity: Number(equity || balance) || 10000,
+          currency: currency || 'USD',
+          leverage: Number(leverage) || 100,
+          connection_status: 'disconnected',
+          terminal_token_hash: tokenHash,
+          terminal_token_prefix: tokenPrefix,
+          terminal_token_created_at: new Date().toISOString(),
+        };
+        let updRes = await dbClient
           .from('mt5_accounts')
-          .update({
-            user_id: targetUserId,
-            broker_name: cleanBrokerName,
-            account_role: role,
-            account_type: accountType,
-            balance: Number(balance) || 10000,
-            equity: Number(equity || balance) || 10000,
-            currency: currency || 'USD',
-            leverage: Number(leverage) || 100,
-            connection_status: 'disconnected',
-            terminal_token_hash: tokenHash,
-            terminal_token_prefix: tokenPrefix,
-            terminal_token_created_at: new Date().toISOString(),
-          })
+          .update({ ...basePatch, ...extendedFields })
           .eq('id', accountId);
+        if (updRes.error && isMissingRelationError(updRes.error)) {
+          updRes = await dbClient.from('mt5_accounts').update(basePatch).eq('id', accountId);
+        }
 
-        if (updateErr) {
+        if (updRes.error) {
           return res.status(500).json({
             success: false,
-            error: `Failed to update MT5 account in Supabase: ${updateErr.message}`,
+            error: `Failed to update MT5 account in Supabase: ${updRes.error.message}`,
           });
         }
       } else {
-        const { error: insertErr } = await dbClient
-          .from('mt5_accounts')
-          .insert([
-            {
-              ...accountPayload,
-              terminal_token_hash: tokenHash,
-              terminal_token_prefix: tokenPrefix,
-              terminal_token_created_at: new Date().toISOString(),
-            },
-          ]);
+        const baseInsert = {
+          ...accountPayload,
+          terminal_token_hash: tokenHash,
+          terminal_token_prefix: tokenPrefix,
+          terminal_token_created_at: new Date().toISOString(),
+        };
+        let insRes = await dbClient.from('mt5_accounts').insert([{ ...baseInsert, ...extendedFields }]);
+        if (insRes.error && isMissingRelationError(insRes.error)) {
+          insRes = await dbClient.from('mt5_accounts').insert([baseInsert]);
+        }
 
-        if (insertErr) {
+        if (insRes.error) {
           return res.status(500).json({
             success: false,
-            error: `Failed to insert MT5 account in Supabase: ${insertErr.message}`,
+            error: `Failed to insert MT5 account in Supabase: ${insRes.error.message}`,
           });
         }
       }
@@ -2563,6 +2692,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const {
         accountRole,
         brokerName = 'XM',
+        brokerId,
+        tradingSymbol,
         brokerServer,
         accountNumber,
         accountType = 'demo',
@@ -2781,55 +2912,96 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const tokenPrefix = rawToken.substring(0, 12) + '...';
       let accountId = existingAcc ? existingAcc.id : crypto.randomUUID();
 
-      if (existingAcc) {
-        const { error: updateErr } = await dbClient
-          .from('mt5_accounts')
-          .update({
-            user_id: targetUserId,
-            broker_name: cleanBrokerName,
-            account_role: role,
-            account_type: accountType,
-            balance: Number(balance) || 10000,
-            equity: Number(equity || balance) || 10000,
-            currency: currency || 'USD',
-            leverage: Number(leverage) || 100,
-            connection_status: 'disconnected',
-            terminal_token_hash: tokenHash,
-            terminal_token_prefix: tokenPrefix,
-            terminal_token_created_at: new Date().toISOString(),
-          })
-          .eq('id', accountId);
+      let resolvedBrokerId: string | null = brokerId && isValidUUID(brokerId) ? String(brokerId).trim() : null;
+      let resolvedBrokerName = cleanBrokerName;
+      let resolvedTradingSymbol = tradingSymbol ? String(tradingSymbol).trim() : 'XAUUSD';
+      let resolvedSymbolVerified = false;
 
-        if (updateErr) {
-          return res.status(500).json({ success: false, error: `Failed to update MT5 account: ${updateErr.message}` });
+      if (resolvedBrokerId) {
+        const { data: bRow, error: bErr } = await dbClient
+          .from('brokers')
+          .select('id, name')
+          .eq('id', resolvedBrokerId)
+          .maybeSingle();
+        if (!bErr && bRow) {
+          resolvedBrokerName = bRow.name;
+          const { data: syms } = await dbClient
+            .from('broker_symbols')
+            .select('symbol_code, is_active, is_verified')
+            .eq('broker_id', resolvedBrokerId)
+            .eq('is_active', true);
+          if (syms && syms.length > 0 && tradingSymbol) {
+            const matchedSym = syms.find((s: any) => s.symbol_code === resolvedTradingSymbol);
+            if (!matchedSym) {
+              return res.status(400).json({
+                success: false,
+                code: 'INVALID_BROKER_SYMBOL',
+                error: `Symbol "${resolvedTradingSymbol}" is not in the active Gold symbol list for ${bRow.name}. Allowed: ${syms.map((s: any) => s.symbol_code).join(', ')}.`,
+              });
+            }
+            resolvedSymbolVerified = Boolean(matchedSym.is_verified);
+          }
+        }
+      }
+
+      const extFields: Record<string, any> = {
+        ...(resolvedBrokerId ? { broker_id: resolvedBrokerId } : {}),
+        trading_symbol: resolvedTradingSymbol,
+        symbol_verified: resolvedSymbolVerified,
+      };
+
+      if (existingAcc) {
+        const basePatch = {
+          user_id: targetUserId,
+          broker_name: resolvedBrokerName,
+          account_role: role,
+          account_type: accountType,
+          balance: Number(balance) || 10000,
+          equity: Number(equity || balance) || 10000,
+          currency: currency || 'USD',
+          leverage: Number(leverage) || 100,
+          connection_status: 'disconnected',
+          terminal_token_hash: tokenHash,
+          terminal_token_prefix: tokenPrefix,
+          terminal_token_created_at: new Date().toISOString(),
+        };
+        let updRes = await dbClient.from('mt5_accounts').update({ ...basePatch, ...extFields }).eq('id', accountId);
+        if (updRes.error && isMissingRelationError(updRes.error)) {
+          updRes = await dbClient.from('mt5_accounts').update(basePatch).eq('id', accountId);
+        }
+
+        if (updRes.error) {
+          return res.status(500).json({ success: false, error: `Failed to update MT5 account: ${updRes.error.message}` });
         }
       } else {
-        const { error: insertErr } = await dbClient.from('mt5_accounts').insert([
-          {
-            id: accountId,
-            user_id: targetUserId,
-            account_number: cleanAccNumber,
-            broker_server: cleanBrokerServer,
-            broker_name: cleanBrokerName,
-            account_role: role,
-            account_type: accountType,
-            balance: Number(balance) || 10000,
-            equity: Number(equity || balance) || 10000,
-            margin: 0,
-            free_margin: Number(balance) || 10000,
-            currency: currency || 'USD',
-            leverage: Number(leverage) || 100,
-            connection_status: 'disconnected',
-            is_investor_password: true,
-            auto_trading_enabled: true,
-            terminal_token_hash: tokenHash,
-            terminal_token_prefix: tokenPrefix,
-            terminal_token_created_at: new Date().toISOString(),
-          },
-        ]);
+        const baseInsert = {
+          id: accountId,
+          user_id: targetUserId,
+          account_number: cleanAccNumber,
+          broker_server: cleanBrokerServer,
+          broker_name: resolvedBrokerName,
+          account_role: role,
+          account_type: accountType,
+          balance: Number(balance) || 10000,
+          equity: Number(equity || balance) || 10000,
+          margin: 0,
+          free_margin: Number(balance) || 10000,
+          currency: currency || 'USD',
+          leverage: Number(leverage) || 100,
+          connection_status: 'disconnected',
+          is_investor_password: true,
+          auto_trading_enabled: true,
+          terminal_token_hash: tokenHash,
+          terminal_token_prefix: tokenPrefix,
+          terminal_token_created_at: new Date().toISOString(),
+        };
+        let insRes = await dbClient.from('mt5_accounts').insert([{ ...baseInsert, ...extFields }]);
+        if (insRes.error && isMissingRelationError(insRes.error)) {
+          insRes = await dbClient.from('mt5_accounts').insert([baseInsert]);
+        }
 
-        if (insertErr) {
-          return res.status(500).json({ success: false, error: `Failed to insert MT5 account: ${insertErr.message}` });
+        if (insRes.error) {
+          return res.status(500).json({ success: false, error: `Failed to insert MT5 account: ${insRes.error.message}` });
         }
       }
 
@@ -2951,14 +3123,20 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const dbClient = requireServiceRoleClient(res);
       if (!dbClient) return;
 
-      const safeAccountColumns =
+      const coreAccountColumns =
         'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at';
+      const extendedAccountColumns = `${coreAccountColumns}, broker_id, trading_symbol, symbol_verified`;
 
-      const [accResult, assignResult, profilesResult] = await Promise.all([
-        dbClient.from('mt5_accounts').select(safeAccountColumns).order('created_at', { ascending: false }),
+      let [accResult, assignResult, profilesResult, mpResult]: [any, any, any, any] = await Promise.all([
+        dbClient.from('mt5_accounts').select(extendedAccountColumns).order('created_at', { ascending: false }),
         dbClient.from('mentor_assignments').select('*').in('status', ['active', 'inactive']),
         dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status, created_at'),
+        dbClient.from('mentor_profiles').select('*'),
       ]);
+
+      if (accResult.error && isMissingRelationError(accResult.error)) {
+        accResult = await dbClient.from('mt5_accounts').select(coreAccountColumns).order('created_at', { ascending: false });
+      }
 
       if (accResult.error) {
         return res.status(500).json({ success: false, error: accResult.error.message });
@@ -3003,6 +3181,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         accounts: enrichedAccounts,
         assignments: assignResult.data || [],
         profiles: profilesResult.data || [],
+        mentorProfiles: mpResult && !mpResult.error ? mpResult.data || [] : [],
       });
     } catch (err: any) {
       console.error('[AdminAPI] Failed to get accounts:', err);
@@ -3023,13 +3202,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const dbClient = requireServiceRoleClient(res);
       if (!dbClient) return;
 
-      const safeAccountColumns =
+      const coreAccountColumns =
         'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at';
+      const extendedAccountColumns = `${coreAccountColumns}, broker_id, trading_symbol, symbol_verified`;
 
-      const [accRes, asMentorRes, asTraderRes] = await Promise.all([
+      let [accRes, asMentorRes, asTraderRes]: [any, any, any] = await Promise.all([
         dbClient
           .from('mt5_accounts')
-          .select(safeAccountColumns)
+          .select(extendedAccountColumns)
           .eq('user_id', caller.user.id)
           .order('created_at', { ascending: false }),
         dbClient
@@ -3043,6 +3223,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .eq('trader_id', caller.user.id)
           .in('status', ['active', 'inactive']),
       ]);
+
+      if (accRes.error && isMissingRelationError(accRes.error)) {
+        accRes = await dbClient
+          .from('mt5_accounts')
+          .select(coreAccountColumns)
+          .eq('user_id', caller.user.id)
+          .order('created_at', { ascending: false });
+      }
 
       if (accRes.error) {
         return res.status(500).json({ success: false, error: accRes.error.message });
@@ -4593,7 +4781,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
     if (!dbClient) return;
 
     try {
-      const { inviteCodeOrMentorId, childAccountId, traderId, lotSettings } = req.body || {};
+      const { inviteCodeOrMentorId, childAccountId, traderId, lotSettings, requestApproval, message } = req.body || {};
       const query = String(inviteCodeOrMentorId || '').trim();
       if (!query) {
         return res.status(400).json({ success: false, error: 'Mentor invite code or mentor UUID is required.' });
@@ -4635,6 +4823,52 @@ export function createApiApp(deps?: ApiAppDependencies) {
           success: false,
           code: 'SELF_ASSIGNMENT_FORBIDDEN',
           error: 'Security error: A user cannot link to themselves as mentor.',
+        });
+      }
+
+      if (requestApproval) {
+        const { data: reqRow, error: reqErr } = await dbClient
+          .from('mentor_trader_invitations')
+          .insert([
+            {
+              mentor_id: matchedMentor.id,
+              trader_id: targetTraderId,
+              invited_email: String(caller.profile?.email || '').toLowerCase() || `${targetTraderId}@trader.local`,
+              direction: 'student_request',
+              status: 'pending',
+              message: String(message || 'Student requested approval to copy your strategy.').trim(),
+            },
+          ])
+          .select('*')
+          .single();
+
+        if (reqErr) {
+          if (isMissingRelationError(reqErr)) {
+            return res.status(503).json({
+              success: false,
+              code: 'MIGRATION_10_REQUIRED',
+              error: 'Join request queue table is not provisioned yet. Execute Migration 10 in Supabase.',
+            });
+          }
+          return res.status(500).json({ success: false, error: reqErr.message });
+        }
+
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'STUDENT_JOIN_REQUEST_SENT',
+          targetType: 'mentor_trader_invitations',
+          targetId: reqRow.id,
+          result: 'success',
+          details: `Trader ${targetTraderId} submitted join approval request to mentor ${matchedMentor.full_name || matchedMentor.id}.`,
+        });
+
+        return res.status(201).json({
+          success: true,
+          pendingApproval: true,
+          request: reqRow,
+          mentorName: matchedMentor.full_name || 'Verified Mentor',
+          message: `Join request submitted to ${matchedMentor.full_name || 'Verified Mentor'} for approval.`,
         });
       }
 
@@ -5874,13 +6108,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
   });
 
   // Register Day 2 SaaS Portal, Billing, Webhook, Audit, Settings & Group routes
-  registerDay2Routes({
+  const sharedRouteCtx = {
     registerRoute,
     authenticateSupabaseCaller,
     requireServiceRoleClient,
     getServiceRoleClient,
     isValidUUID,
-  });
+  };
+  registerDay2Routes(sharedRouteCtx);
+  registerBrokerRoutes(sharedRouteCtx);
+  registerMentorStudentRoutes(sharedRouteCtx);
 
   return app;
 }

@@ -7,6 +7,8 @@ import {
   X,
   ToggleLeft,
   ToggleRight,
+  Archive,
+  UserCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -21,25 +23,40 @@ import {
 export const SubscriptionPlansView: React.FC = () => {
   const { isCloudMode } = useAuth();
   const {
+    users,
     subscriptionPlans,
     subscriptions,
     createSubscriptionPlan,
     updateSubscriptionPlan,
+    archiveSubscriptionPlan,
     togglePlanStatus,
+    assignUserSubscription,
+    renewOrChangeSubscription,
   } = useApp();
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<SubscriptionPlan | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Assign Plan to Mentor modal state
+  const [assignModalPlan, setAssignModalPlan] = useState<SubscriptionPlan | null>(null);
+  const [assignMentorId, setAssignMentorId] = useState<string>('');
+  const [assignCycle, setAssignCycle] = useState<'monthly' | 'yearly'>('monthly');
+  const [assigning, setAssigning] = useState(false);
 
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [description, setDescription] = useState('');
   const [tier, setTier] = useState<'free_demo' | 'trader_pro' | 'mentor_pro' | 'enterprise'>('mentor_pro');
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [monthlyPrice, setMonthlyPrice] = useState<number>(49);
   const [annualPrice, setAnnualPrice] = useState<number>(490);
   const [maxFollowers, setMaxFollowers] = useState<number>(10);
   const [maxLotSize, setMaxLotSize] = useState<number>(50);
+  const [trialDays, setTrialDays] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [priorityExecution, setPriorityExecution] = useState(true);
   const [slTpSync, setSlTpSync] = useState(true);
@@ -47,16 +64,22 @@ export const SubscriptionPlansView: React.FC = () => {
     'Up to 10 Follower accounts, Real-time SL/TP Sync, Demo-Only Safeguards'
   );
 
+  const mentors = users.filter((u) => u.role === 'mentor');
+  const visiblePlans = subscriptionPlans.filter((p) => (showArchived ? true : !p.isArchived));
+
   const handleOpenAdd = () => {
     setEditingPlan(null);
+    setModalError(null);
     setName('');
     setCode('');
+    setDescription('');
     setTier('mentor_pro');
     setBillingCycle('monthly');
     setMonthlyPrice(49);
     setAnnualPrice(490);
     setMaxFollowers(10);
     setMaxLotSize(50);
+    setTrialDays(0);
     setIsActive(true);
     setPriorityExecution(true);
     setSlTpSync(true);
@@ -66,8 +89,10 @@ export const SubscriptionPlansView: React.FC = () => {
 
   const handleOpenEdit = (plan: SubscriptionPlan) => {
     setEditingPlan(plan);
+    setModalError(null);
     setName(plan.name);
     setCode(plan.code || plan.id);
+    setDescription(plan.description || '');
     setTier(plan.tier || 'mentor_pro');
     setBillingCycle(plan.billingCycle);
     const resolvedMonthly =
@@ -78,6 +103,7 @@ export const SubscriptionPlansView: React.FC = () => {
     setAnnualPrice(resolvedYearly);
     setMaxFollowers(plan.maxFollowers ?? plan.maxChildAccounts ?? 10);
     setMaxLotSize(plan.maxLotSize || 50);
+    setTrialDays(plan.trialDays || 0);
     setIsActive(plan.isActive !== false);
     setPriorityExecution(plan.priorityExecution);
     setSlTpSync(plan.slTpSync);
@@ -105,8 +131,26 @@ export const SubscriptionPlansView: React.FC = () => {
     });
   };
 
+  const handleArchivePlan = async (plan: SubscriptionPlan) => {
+    const res = await archiveSubscriptionPlan(plan.id);
+    if (!res.success) {
+      setFeedback({
+        type: 'error',
+        message: res.message || `Failed to archive plan "${plan.name}".`,
+      });
+      return;
+    }
+    setFeedback({
+      type: 'info',
+      message: res.message || `Plan "${plan.name}" archived cleanly. Historical subscriber billing remains preserved.`,
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError(null);
+    setIsSubmitting(true);
+
     const features = featureList
       .split(',')
       .map((f) => f.trim())
@@ -114,83 +158,130 @@ export const SubscriptionPlansView: React.FC = () => {
 
     const effectivePrice = billingCycle === 'yearly' ? annualPrice : monthlyPrice;
 
-    if (editingPlan) {
-      const res = await updateSubscriptionPlan(editingPlan.id, {
-        name: name.trim(),
-        tier,
-        billingCycle,
-        price: effectivePrice,
-        monthlyPrice,
-        yearlyPrice: annualPrice,
-        maxFollowers,
-        maxChildAccounts: maxFollowers,
-        maxLotSize,
-        isActive,
-        priorityExecution,
-        slTpSync,
-        features,
-      });
-      if (!res.success) {
-        setFeedback({
-          type: 'error',
-          message: res.message || `Failed to update subscription plan "${name.trim()}".`,
+    try {
+      if (editingPlan) {
+        const res = await updateSubscriptionPlan(editingPlan.id, {
+          name: name.trim(),
+          description: description.trim() || undefined,
+          tier,
+          billingCycle,
+          price: effectivePrice,
+          monthlyPrice,
+          yearlyPrice: annualPrice,
+          maxFollowers,
+          maxChildAccounts: maxFollowers,
+          maxLotSize,
+          trialDays,
+          isActive,
+          priorityExecution,
+          slTpSync,
+          features,
         });
-        return;
-      }
-      setFeedback({
-        type: 'success',
-        message: res.message || `Updated subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ''}.`,
-      });
-    } else {
-      const slugCode = (code.trim() || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/^_+|_+$/g, '');
-      const res = await createSubscriptionPlan({
-        code: slugCode,
-        tier,
-        name: name.trim(),
-        billingCycle,
-        price: effectivePrice,
-        monthlyPrice,
-        yearlyPrice: annualPrice,
-        maxFollowers,
-        maxChildAccounts: maxFollowers,
-        maxLotSize,
-        isActive,
-        priorityExecution,
-        slTpSync,
-        features,
-      });
-      if (!res.success) {
+        if (!res.success) {
+          setModalError(res.message || `Failed to update subscription plan "${name.trim()}".`);
+          setIsSubmitting(false);
+          return;
+        }
         setFeedback({
-          type: 'error',
-          message: res.message || `Failed to create subscription plan "${name.trim()}".`,
+          type: 'success',
+          message: res.message || `Updated subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ''}.`,
         });
-        return;
+      } else {
+        const slugCode = (code.trim() || name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')).replace(/^_+|_+$/g, '');
+        const res = await createSubscriptionPlan({
+          code: slugCode,
+          tier,
+          name: name.trim(),
+          description: description.trim() || undefined,
+          billingCycle,
+          price: effectivePrice,
+          monthlyPrice,
+          yearlyPrice: annualPrice,
+          maxFollowers,
+          maxChildAccounts: maxFollowers,
+          maxLotSize,
+          trialDays,
+          isActive,
+          priorityExecution,
+          slTpSync,
+          features,
+        });
+        if (!res.success) {
+          setModalError(res.message || `Failed to create subscription plan "${name.trim()}".`);
+          setIsSubmitting(false);
+          return;
+        }
+        setFeedback({
+          type: 'success',
+          message:
+            res.message ||
+            `Created subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ' in Demo Sandbox'}.`,
+        });
       }
-      setFeedback({
-        type: 'success',
-        message:
-          res.message ||
-          `Created subscription plan "${name.trim()}"${isCloudMode ? ' in Supabase' : ' in Demo Sandbox'}.`,
-      });
+      setIsModalOpen(false);
+    } finally {
+      setIsSubmitting(false);
     }
-    setIsModalOpen(false);
+  };
+
+  const handleOpenAssignModal = (plan: SubscriptionPlan) => {
+    setAssignModalPlan(plan);
+    setAssignMentorId(mentors[0]?.id || '');
+    setAssignCycle(plan.billingCycle || 'monthly');
+  };
+
+  const handleAssignSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignModalPlan || !assignMentorId) return;
+    setAssigning(true);
+    const res = isCloudMode
+      ? await assignUserSubscription(assignMentorId, assignModalPlan.id, assignCycle)
+      : await renewOrChangeSubscription(assignMentorId, assignModalPlan.id, assignCycle);
+    setAssigning(false);
+
+    if (!res.success) {
+      setFeedback({
+        type: 'error',
+        message: res.message || 'Failed to assign plan to mentor.',
+      });
+      return;
+    }
+    const mentorName = mentors.find((m) => m.id === assignMentorId)?.fullName || 'Mentor';
+    setFeedback({
+      type: 'success',
+      message: res.message || `Assigned "${assignModalPlan.name}" (${assignCycle}) to ${mentorName}.`,
+    });
+    setAssignModalPlan(null);
   };
 
   return (
     <div className="space-y-6">
       <AdminPageHeader
         title="Subscription Plans"
-        meta={`${subscriptionPlans.length} ${isCloudMode ? 'Cloud Plans' : 'Demo Plans'}`}
-        subtitle="Create and edit TradeSync MT5 tiers (Starter 10, Pro 50, Business 200) with monthly & annual pricing, follower caps, and activation status."
+        meta={`${visiblePlans.length} ${isCloudMode ? 'Cloud Plans' : 'Demo Plans'}`}
+        subtitle="Create, edit, archive, and assign TradeSync MT5 mentor tiers with monthly & annual pricing, follower caps, and trial periods."
         actions={
-          <button
-            type="button"
-            onClick={handleOpenAdd}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Create Plan</span>
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => setShowArchived(!showArchived)}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+                showArchived
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              {showArchived ? 'Hide Archived' : 'Show Archived'}
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Create Plan</span>
+            </button>
+          </>
         }
       />
 
@@ -202,28 +293,11 @@ export const SubscriptionPlansView: React.FC = () => {
         />
       )}
 
-      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-slate-600">
-        <span>
-          {isCloudMode ? (
-            <>
-              <strong>Cloud Billing Catalog:</strong> Plans persist in <code className="font-mono">public.subscription_plans</code> and enforce follower quota limits across copy assignments.
-            </>
-          ) : (
-            <>
-              <strong>Demo Sandbox Mode:</strong> Changes persist locally in your browser. No live Stripe or PayPal charges are executed.
-            </>
-          )}
-        </span>
-        <span className="font-mono text-[11px] text-slate-500">
-          {isCloudMode ? 'Backing Store: Supabase' : 'Billing Gateway: Sandbox'}
-        </span>
-      </div>
-
-      {subscriptionPlans.length === 0 ? (
+      {visiblePlans.length === 0 ? (
         <AdminEmptyState
           icon={CreditCard}
           title="No subscription plans found"
-          description="Apply Migration 08/09 in Supabase or create a plan manually to seed Starter 10, Pro 50, and Business 200."
+          description="Create a subscription plan to configure pricing tiers, trial periods, and follower capacity limits."
           action={
             <button
               type="button"
@@ -237,8 +311,8 @@ export const SubscriptionPlansView: React.FC = () => {
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {subscriptionPlans.map((plan) => {
-            const planActive = plan.isActive !== false;
+          {visiblePlans.map((plan) => {
+            const planActive = plan.isActive !== false && !plan.isArchived;
             const followerCap = plan.maxFollowers ?? plan.maxChildAccounts ?? 10;
             const subscriberCount = subscriptions.filter(
               (s) => s.planId === plan.id && (s.status === 'active' || s.status === 'trial')
@@ -252,7 +326,7 @@ export const SubscriptionPlansView: React.FC = () => {
               <div
                 key={plan.id}
                 className={`flex flex-col justify-between rounded-xl border bg-white p-5 space-y-4 transition-colors ${
-                  planActive ? 'border-slate-200' : 'border-slate-200 opacity-70 bg-slate-50/60'
+                  planActive ? 'border-slate-200' : 'border-slate-200 opacity-75 bg-slate-50/60'
                 }`}
               >
                 <div className="space-y-3.5">
@@ -260,12 +334,16 @@ export const SubscriptionPlansView: React.FC = () => {
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="text-sm font-bold text-slate-900">{plan.name}</h3>
-                        <AdminStatusText status={planActive ? 'active' : 'paused'} />
+                        <AdminStatusText status={plan.isArchived ? 'archived' : planActive ? 'active' : 'paused'} />
                       </div>
                       {plan.code && (
                         <div className="mt-0.5 font-mono text-[10px] text-slate-500 uppercase">
-                          Code: {plan.code} · {plan.tier || 'mentor_pro'}
+                          {plan.code} · {plan.tier || 'mentor_pro'}
+                          {plan.trialDays && plan.trialDays > 0 ? ` · ${plan.trialDays}d trial` : ''}
                         </div>
+                      )}
+                      {plan.description && (
+                        <p className="mt-1 text-xs text-slate-600">{plan.description}</p>
                       )}
                       <div className="mt-2 flex items-baseline gap-2 font-mono tabular-nums">
                         <span className="text-2xl font-bold text-slate-900">${displayMonthly}</span>
@@ -274,19 +352,21 @@ export const SubscriptionPlansView: React.FC = () => {
                         <span className="text-xs font-semibold text-slate-700">${displayAnnual}/yr</span>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleTogglePlanStatus(plan)}
-                        className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100"
-                        title={planActive ? 'Deactivate plan' : 'Activate plan'}
-                      >
-                        {planActive ? (
-                          <ToggleRight className="h-4 w-4 text-emerald-600" />
-                        ) : (
-                          <ToggleLeft className="h-4 w-4 text-slate-400" />
-                        )}
-                      </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {!plan.isArchived && (
+                        <button
+                          type="button"
+                          onClick={() => handleTogglePlanStatus(plan)}
+                          className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100"
+                          title={planActive ? 'Deactivate plan' : 'Activate plan'}
+                        >
+                          {planActive ? (
+                            <ToggleRight className="h-4 w-4 text-emerald-600" />
+                          ) : (
+                            <ToggleLeft className="h-4 w-4 text-slate-400" />
+                          )}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleOpenEdit(plan)}
@@ -295,6 +375,16 @@ export const SubscriptionPlansView: React.FC = () => {
                       >
                         <Edit2 className="h-3.5 w-3.5" />
                       </button>
+                      {!plan.isArchived && (
+                        <button
+                          type="button"
+                          onClick={() => void handleArchivePlan(plan)}
+                          className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
+                          title="Archive plan"
+                        >
+                          <Archive className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -304,10 +394,8 @@ export const SubscriptionPlansView: React.FC = () => {
                       <span className="font-bold text-slate-900">{followerCap} followers</span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 uppercase font-sans block">Execution Tier</span>
-                      <span className="font-bold text-slate-900">
-                        {plan.priorityExecution ? 'Priority' : 'Standard'}
-                      </span>
+                      <span className="text-[10px] text-slate-500 uppercase font-sans block">Trial Period</span>
+                      <span className="font-bold text-slate-900">{plan.trialDays || 0} days</span>
                     </div>
                   </div>
 
@@ -327,10 +415,19 @@ export const SubscriptionPlansView: React.FC = () => {
                 </div>
 
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <span className="text-slate-500">Active Subscribers</span>
-                  <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                    {subscriberCount} Account(s)
+                  <span className="font-mono font-semibold text-slate-700 tabular-nums">
+                    {subscriberCount} active subscriber(s)
                   </span>
+                  {!plan.isArchived && mentors.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenAssignModal(plan)}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-800"
+                    >
+                      <UserCheck className="h-3 w-3 text-sky-600" />
+                      <span>Assign to Mentor</span>
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -352,18 +449,18 @@ export const SubscriptionPlansView: React.FC = () => {
               </button>
             </div>
 
-            {feedback?.type === 'error' && (
+            {modalError && (
               <AdminFeedbackBanner
                 type="error"
-                message={feedback.message}
-                onDismiss={() => setFeedback(null)}
+                message={modalError}
+                onDismiss={() => setModalError(null)}
               />
             )}
 
             <form onSubmit={handleSubmit} className="space-y-3.5 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Plan Name</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Plan Name *</label>
                   <input
                     type="text"
                     required
@@ -384,6 +481,17 @@ export const SubscriptionPlansView: React.FC = () => {
                     className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono disabled:bg-slate-100 focus:border-sky-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Plan Description</label>
+                <input
+                  type="text"
+                  placeholder="Short description of target mentor cohort & guarantees"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+                />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -413,9 +521,9 @@ export const SubscriptionPlansView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Monthly Price ($)</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Monthly ($)</label>
                   <input
                     type="number"
                     min="0"
@@ -426,7 +534,7 @@ export const SubscriptionPlansView: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Annual Price ($)</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Annual ($)</label>
                   <input
                     type="number"
                     min="0"
@@ -444,6 +552,17 @@ export const SubscriptionPlansView: React.FC = () => {
                     required
                     value={maxFollowers}
                     onChange={(e) => setMaxFollowers(parseInt(e.target.value, 10) || 1)}
+                    className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">Trial Days</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="90"
+                    value={trialDays}
+                    onChange={(e) => setTrialDays(parseInt(e.target.value, 10) || 0)}
                     className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono focus:border-sky-500 focus:outline-none"
                   />
                 </div>
@@ -493,15 +612,95 @@ export const SubscriptionPlansView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
+                  disabled={isSubmitting}
                   className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 font-semibold text-white transition-colors"
+                  disabled={isSubmitting}
+                  className="rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 font-semibold text-white transition-colors disabled:opacity-50"
                 >
-                  {editingPlan ? 'Save Changes' : 'Create Plan'}
+                  {isSubmitting ? 'Saving...' : editingPlan ? 'Save Changes' : 'Create Plan'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Assign Plan to Mentor Modal */}
+      {assignModalPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-bold text-slate-900">
+                Assign &ldquo;{assignModalPlan.name}&rdquo; to Mentor
+              </h3>
+              <button type="button" onClick={() => setAssignModalPlan(null)} className="text-slate-400 hover:text-slate-700">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <form onSubmit={handleAssignSubmit} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Select Mentor</label>
+                <select
+                  value={assignMentorId}
+                  onChange={(e) => setAssignMentorId(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
+                >
+                  {mentors.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.fullName} ({m.email})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">Billing Interval</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAssignCycle('monthly')}
+                    className={`rounded-lg border p-2 font-medium ${
+                      assignCycle === 'monthly'
+                        ? 'border-sky-600 bg-sky-50 text-sky-900'
+                        : 'border-slate-200 bg-white text-slate-600'
+                    }`}
+                  >
+                    Monthly (${assignModalPlan.monthlyPrice ?? assignModalPlan.price}/mo)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAssignCycle('yearly')}
+                    className={`rounded-lg border p-2 font-medium ${
+                      assignCycle === 'yearly'
+                        ? 'border-sky-600 bg-sky-50 text-sky-900'
+                        : 'border-slate-200 bg-white text-slate-600'
+                    }`}
+                  >
+                    Annual (${assignModalPlan.yearlyPrice ?? Math.round((assignModalPlan.monthlyPrice ?? assignModalPlan.price) * 10)}/yr)
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setAssignModalPlan(null)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={assigning || !assignMentorId}
+                  className="rounded-lg bg-slate-900 hover:bg-slate-800 px-3.5 py-1.5 font-semibold text-white disabled:opacity-50"
+                >
+                  {assigning ? 'Assigning...' : 'Assign Plan'}
                 </button>
               </div>
             </form>
@@ -511,4 +710,3 @@ export const SubscriptionPlansView: React.FC = () => {
     </div>
   );
 };
-

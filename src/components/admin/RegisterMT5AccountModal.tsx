@@ -35,16 +35,22 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   onSuccess,
 }) => {
   const { isCloudMode } = useAuth();
-  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, followerAccounts, users, refreshCloudData } = useApp();
+  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, followerAccounts, users, brokers, refreshCloudData } = useApp();
 
   const isAdminCaller = currentUser.role === 'admin';
   const lockedRole: 'parent' | 'child' =
     isAdminCaller ? defaultRole : currentUser.role === 'mentor' ? 'parent' : 'child';
 
+  const activeBrokers = brokers.filter((b) => b.isActive !== false);
   const [accountRole, setAccountRole] = useState<'parent' | 'child'>(lockedRole);
-  const [brokerName, setBrokerName] = useState<string>('XM');
+  const [brokerSearch, setBrokerSearch] = useState<string>('');
+  const [selectedBrokerId, setSelectedBrokerId] = useState<string>(activeBrokers[0]?.id || '');
+  const [brokerName, setBrokerName] = useState<string>(activeBrokers[0]?.name || 'XM Global');
+  const [tradingSymbol, setTradingSymbol] = useState<string>(
+    activeBrokers[0]?.symbols?.find((s) => s.isActive)?.symbolCode || 'GOLD'
+  );
   const [brokerServer, setBrokerServer] = useState<string>(
-    lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2'
+    activeBrokers[0]?.serverPrefixes?.[0] || (lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2')
   );
   const [accountNumber, setAccountNumber] = useState<string>('');
   const [accountType, setAccountType] = useState<'demo'>('demo');
@@ -81,11 +87,50 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
     (a) => a.accountRole === 'parent'
   );
 
+  const filteredBrokers = activeBrokers.filter((b) =>
+    !brokerSearch.trim() ||
+    b.name.toLowerCase().includes(brokerSearch.trim().toLowerCase()) ||
+    b.slug.toLowerCase().includes(brokerSearch.trim().toLowerCase())
+  );
+  const selectedBroker = activeBrokers.find((b) => b.id === selectedBrokerId) || null;
+  const availableSymbols = selectedBroker ? selectedBroker.symbols.filter((s) => s.isActive !== false) : [];
+  const selectedSymbolObj = availableSymbols.find((s) => s.symbolCode === tradingSymbol);
+
+  const handleSelectBroker = (brokerId: string) => {
+    setSelectedBrokerId(brokerId);
+    if (brokerId === '__custom__') {
+      setBrokerName('');
+      setTradingSymbol('');
+      return;
+    }
+    const found = activeBrokers.find((b) => b.id === brokerId);
+    if (found) {
+      setBrokerName(found.name);
+      const activeSyms = found.symbols.filter((s) => s.isActive !== false);
+      setTradingSymbol(activeSyms[0]?.symbolCode || '');
+      if (found.serverPrefixes && found.serverPrefixes.length > 0) {
+        setBrokerServer(
+          accountRole === 'child' && found.serverPrefixes[1]
+            ? found.serverPrefixes[1]
+            : found.serverPrefixes[0]
+        );
+      }
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) return;
     setAccountRole(lockedRole);
-    setBrokerName('XM');
-    setBrokerServer(lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2');
+    setBrokerSearch('');
+    const defaultBroker = activeBrokers[0] || null;
+    setSelectedBrokerId(defaultBroker?.id || '__custom__');
+    setBrokerName(defaultBroker?.name || 'XM Global');
+    const firstSym = defaultBroker?.symbols?.find((s) => s.isActive !== false)?.symbolCode || '';
+    setTradingSymbol(firstSym);
+    setBrokerServer(
+      defaultBroker?.serverPrefixes?.[lockedRole === 'child' && defaultBroker.serverPrefixes[1] ? 1 : 0] ||
+        (lockedRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2')
+    );
     setAccountNumber('');
     setAccountType('demo');
     setBalance(lockedRole === 'parent' ? 50000 : 10000);
@@ -164,8 +209,10 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
       const effectiveOwnerId = isAdminCaller ? selectedOwnerId || undefined : currentUser.id;
       const res = await mt5AdminService.registerMT5Account({
         accountRole,
-        brokerName: brokerName.trim() || 'XM',
+        brokerId: selectedBroker && selectedBrokerId !== '__custom__' ? selectedBroker.id : undefined,
+        brokerName: brokerName.trim() || 'XM Global',
         brokerServer: brokerServer.trim(),
+        tradingSymbol: tradingSymbol.trim() || undefined,
         accountNumber: accountNumber.trim(),
         accountType: 'demo',
         balance: parsedBalance,
@@ -499,64 +546,105 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
               </div>
             )}
 
-            {/* Broker & Server Selection */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Broker Name */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-slate-300">Broker Name</label>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setBrokerName('XM')}
-                      className="text-[10px] text-cyan-400 hover:text-cyan-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700"
-                    >
-                      + XM
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setBrokerName('XM Global')}
-                      className="text-[10px] text-cyan-400 hover:text-cyan-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700"
-                    >
-                      + XM Global
-                    </button>
-                  </div>
+            {/* Searchable Broker, Broker-Filtered Gold Symbol & Server Selection */}
+            <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Search &amp; Select Broker</label>
+                  <input
+                    type="text"
+                    value={brokerSearch}
+                    onChange={(e) => setBrokerSearch(e.target.value)}
+                    placeholder="Filter brokers (e.g. XM, IC Markets)..."
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+                  />
+                  <select
+                    value={selectedBrokerId}
+                    onChange={(e) => handleSelectBroker(e.target.value)}
+                    className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                  >
+                    {filteredBrokers.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.symbols.some((s) => s.isVerified) ? 'Verified Symbols' : 'Unverified Baseline'})
+                      </option>
+                    ))}
+                    <option value="__custom__">Other / Custom Broker</option>
+                  </select>
+                  {selectedBrokerId === '__custom__' && (
+                    <input
+                      type="text"
+                      required
+                      value={brokerName}
+                      onChange={(e) => setBrokerName(e.target.value)}
+                      placeholder="Enter custom broker name"
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+                    />
+                  )}
                 </div>
-                <input
-                  type="text"
-                  required
-                  value={brokerName}
-                  onChange={(e) => setBrokerName(e.target.value)}
-                  placeholder="e.g. XM, IC Markets, Pepperstone"
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
-                />
+
+                {/* Broker-Specific Gold Symbol Picker */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-300">Gold Trading Symbol</label>
+                    {selectedSymbolObj && (
+                      <span
+                        className={`text-[10px] font-mono ${
+                          selectedSymbolObj.isVerified ? 'text-emerald-400' : 'text-amber-300'
+                        }`}
+                      >
+                        {selectedSymbolObj.isVerified ? 'Verified' : 'Unverified Baseline'}
+                      </span>
+                    )}
+                  </div>
+                  {availableSymbols.length > 0 && selectedBrokerId !== '__custom__' ? (
+                    <>
+                      <select
+                        value={tradingSymbol}
+                        onChange={(e) => setTradingSymbol(e.target.value)}
+                        required
+                        className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
+                      >
+                        {availableSymbols.map((sym) => (
+                          <option key={sym.id} value={sym.symbolCode}>
+                            {sym.symbolCode} ({sym.isVerified ? 'Verified' : 'Unverified'})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400 leading-relaxed">
+                        Showing only Gold symbols configured for <strong>{selectedBroker?.name}</strong>.
+                      </p>
+                    </>
+                  ) : (
+                    <input
+                      type="text"
+                      required
+                      value={tradingSymbol}
+                      onChange={(e) => setTradingSymbol(e.target.value)}
+                      placeholder="e.g. GOLD, XAUUSD, XAUUSDm"
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white font-mono placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
+                    />
+                  )}
+                </div>
               </div>
 
-              {/* MT5 Server Name */}
+              {/* Exact MT5 Server Name with broker prefixes */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-1">
                   <label className="text-xs font-semibold text-slate-300">Exact MT5 Server Name</label>
-                  {/* Preset chips for the client's XM servers */}
-                  <div className="flex items-center gap-1">
-                    {accountRole === 'parent' ? (
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {(selectedBroker?.serverPrefixes?.length
+                      ? selectedBroker.serverPrefixes
+                      : [accountRole === 'parent' ? 'xmglobal_mt5 7' : 'xmglobal_mt5 2']
+                    ).map((prefix) => (
                       <button
+                        key={prefix}
                         type="button"
-                        onClick={() => setBrokerServer('xmglobal_mt5 7')}
-                        className="text-[10px] text-amber-400 hover:text-amber-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 font-mono"
-                        title="Client Parent XM Server"
+                        onClick={() => setBrokerServer(prefix)}
+                        className="text-[10px] text-cyan-300 hover:text-cyan-200 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 font-mono"
                       >
-                        xmglobal_mt5 7
+                        {prefix}
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setBrokerServer('xmglobal_mt5 2')}
-                        className="text-[10px] text-cyan-400 hover:text-cyan-300 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 font-mono"
-                        title="Client Child XM Server"
-                      >
-                        xmglobal_mt5 2
-                      </button>
-                    )}
+                    ))}
                   </div>
                 </div>
                 <input
@@ -564,7 +652,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                   required
                   value={brokerServer}
                   onChange={(e) => setBrokerServer(e.target.value)}
-                  placeholder="e.g. xmglobal_mt5 7, xmglobal_mt5 2"
+                  placeholder="e.g. xmglobal_mt5 7"
                   className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white font-mono placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                 />
               </div>

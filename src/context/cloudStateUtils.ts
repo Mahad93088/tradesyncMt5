@@ -32,6 +32,9 @@ export function mapServerAccountToMT5Account(acc: any): MT5Account {
     lastStatusUpdate: acc.last_sync || acc.created_at || undefined,
     errorMessage: acc.error_message || undefined,
     isStale: Boolean(acc.is_stale),
+    brokerId: acc.broker_id || null,
+    tradingSymbol: acc.trading_symbol || undefined,
+    symbolVerified: Boolean(acc.symbol_verified),
   };
 }
 
@@ -173,6 +176,9 @@ export function mapAssignmentsToLinks(
       totalProfitUSD,
       totalProfitAvailable,
       lastSyncAt: a.assigned_at || new Date().toISOString(),
+      membershipStatus: a.membership_status || 'active',
+      membershipPriceUsd: a.membership_price_usd != null ? Number(a.membership_price_usd) : 0,
+      billingPeriod: a.billing_period || 'monthly',
     };
   });
 }

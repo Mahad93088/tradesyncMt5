@@ -14,6 +14,8 @@ interface AuthContextType {
   isCloudMode: boolean;
   isConfigured: boolean;
   isLoading: boolean;
+  isRecoveryMode: boolean;
+  demoSandboxActive: boolean;
   authError: string | null;
 
   // Auth Operations
@@ -21,6 +23,8 @@ interface AuthContextType {
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => Promise<void>;
   resetPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
+  updatePassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  clearRecoveryMode: () => void;
 
   // Mode & Demo Switcher
   switchToDemoMode: (role?: UserRole) => void;
@@ -55,7 +59,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [supabaseUser, setSupabaseUser] = useState<SupabaseUser | null>(null);
   const [profile, setProfile] = useState<DbProfile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isRecoveryMode, setIsRecoveryMode] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [demoSandboxActive, setDemoSandboxActive] = useState<boolean>(() => {
+    if (!configured) return true;
+    return localStorage.getItem('tradesync_demo_sandbox_entered') === 'true';
+  });
 
   // Mode state: 'cloud' or 'demo'
   const [isCloudMode, setIsCloudMode] = useState<boolean>(() => {
@@ -123,10 +132,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, newSession) => {
       if (!isMounted) return;
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsRecoveryMode(true);
+      }
       setSession(newSession);
       setSupabaseUser(newSession?.user ?? null);
 
       if (newSession?.user) {
+        setDemoSandboxActive(false);
+        localStorage.removeItem('tradesync_demo_sandbox_entered');
         setIsCloudMode(true);
         localStorage.setItem('tradesync_mode', 'cloud');
         const userProfile = await fetchProfile(newSession.user.id);
@@ -135,8 +149,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       } else if (event === 'SIGNED_OUT') {
         setProfile(null);
-        setIsCloudMode(false);
-        localStorage.setItem('tradesync_mode', 'demo');
+        setIsCloudMode(configured);
+        setDemoSandboxActive(false);
+        localStorage.removeItem('tradesync_demo_sandbox_entered');
+        localStorage.removeItem('tradesync_active_demo_user');
+        localStorage.removeItem('tradesync_mode');
       }
     });
 
@@ -239,7 +256,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Sign Out
+  // Sign Out — securely purge cached session/role keys and return to Login Page
   const signOut = async () => {
     if (configured) {
       await supabase.auth.signOut();
@@ -247,11 +264,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSession(null);
     setSupabaseUser(null);
     setProfile(null);
-    setIsCloudMode(false);
-    localStorage.setItem('tradesync_mode', 'demo');
+    setIsRecoveryMode(false);
+    setDemoSandboxActive(false);
+    setIsCloudMode(configured);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('tradesync_mode');
+      localStorage.removeItem('tradesync_demo_sandbox_entered');
+      localStorage.removeItem('tradesync_active_demo_user');
+      localStorage.removeItem('tradesync_users');
+      localStorage.removeItem('tradesync_mt5_accounts');
+    }
   };
 
-  // Password Reset
+  // Password Reset Request
   const resetPassword = async (email: string) => {
     setAuthError(null);
     if (!configured) {
@@ -271,17 +296,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Password Update (used after PASSWORD_RECOVERY link or authenticated password change)
+  const updatePassword = async (newPassword: string) => {
+    setAuthError(null);
+    if (!configured) {
+      return { success: false, error: 'Supabase credentials are not configured.' };
+    }
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      setIsRecoveryMode(false);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to update password' };
+    }
+  };
+
+  const clearRecoveryMode = () => setIsRecoveryMode(false);
+
   // Switch between Demo Mode and Cloud Mode
   const switchToDemoMode = (role?: UserRole) => {
+    setDemoSandboxActive(true);
     setIsCloudMode(false);
     localStorage.setItem('tradesync_mode', 'demo');
+    localStorage.setItem('tradesync_demo_sandbox_entered', 'true');
     if (role) {
       setDemoUser((prev) => ({ ...prev, role }));
     }
   };
 
   const switchToCloudMode = () => {
+    setDemoSandboxActive(false);
+    localStorage.removeItem('tradesync_demo_sandbox_entered');
     if (configured && session) {
+      setIsCloudMode(true);
+      localStorage.setItem('tradesync_mode', 'cloud');
+    } else if (configured) {
       setIsCloudMode(true);
       localStorage.setItem('tradesync_mode', 'cloud');
     }
@@ -410,16 +462,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isCloudMode: isUserAuthenticated || isCloudMode,
         isConfigured: configured,
         isLoading,
+        isRecoveryMode,
+        demoSandboxActive,
         authError,
         signUp,
         signIn,
         signOut,
         resetPassword,
-        refreshSession,
-        checkAndRefreshSession,
+        updatePassword,
+        clearRecoveryMode,
         switchToDemoMode,
         switchToCloudMode,
         setDemoUser,
+        refreshSession,
+        checkAndRefreshSession,
         promoteUser,
       }}
     >

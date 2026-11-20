@@ -671,14 +671,18 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     code: p.code,
     tier: p.tier,
     name: p.name,
+    description: p.description || '',
     billingCycle: 'monthly' as const,
     price: Number(p.monthly_price_usd ?? 0),
     monthlyPrice: Number(p.monthly_price_usd ?? 0),
     yearlyPrice: Number(p.yearly_price_usd ?? 0),
+    trialDays: Number(p.trial_days ?? 0),
     maxFollowers: Number(p.max_followers ?? 25),
     maxChildAccounts: Number(p.max_followers ?? p.max_child_accounts ?? 25),
     maxLotSize: 50,
-    isActive: p.is_active !== false,
+    isActive: p.is_active !== false && p.is_archived !== true,
+    isArchived: Boolean(p.is_archived),
+    archivedAt: p.archived_at || undefined,
     features: Array.isArray(p.features) ? p.features : [],
     priorityExecution: p.tier === 'enterprise' || Number(p.max_followers) >= 50,
     slTpSync: true,
@@ -707,7 +711,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
 
       return res.status(200).json({
         success: true,
-        plans: (data || []).map(mapPlanRow),
+        plans: (data || []).filter((p: any) => p.is_archived !== true).map(mapPlanRow),
         providerStatus: getBillingProviderStatus(),
       });
     } catch (err: any) {
@@ -753,16 +757,19 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     try {
       const b = req.body || {};
       const name = String(b.name || '').trim();
-      const code = String(b.code || name.toLowerCase().replace(/[^a-z0-9]+/g, '_')).trim();
+      const rawCode = String(b.code || name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')).trim();
+      const code = rawCode;
+      const description = typeof b.description === 'string' ? b.description.trim() : '';
       const tier = ['free_demo', 'trader_pro', 'mentor_pro', 'enterprise'].includes(String(b.tier))
         ? String(b.tier)
         : 'mentor_pro';
       const monthlyPrice = Number(b.monthlyPrice ?? b.price ?? 0);
       const yearlyPrice = Number(b.yearlyPrice ?? monthlyPrice * 10);
+      const trialDays = b.trialDays !== undefined ? Math.max(0, Math.min(365, Math.round(Number(b.trialDays)))) : 0;
       const maxFollowers = Math.max(1, Math.round(Number(b.maxFollowers ?? b.maxChildAccounts ?? 10)));
       const maxChildAccounts = Math.max(1, Math.round(Number(b.maxChildAccounts ?? maxFollowers)));
       const isActive = b.isActive !== false;
-      const features = Array.isArray(b.features) ? b.features.map(String) : [];
+      const features = Array.isArray(b.features) ? b.features.map(String).filter((s: string) => s.trim().length > 0) : [];
 
       if (!name || !code) {
         await audit(dbClient, {
@@ -786,26 +793,49 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         });
         return res.status(400).json({ success: false, error: 'Prices must be non-negative finite numbers.' });
       }
+      if (!Number.isFinite(trialDays) || trialDays < 0 || trialDays > 365) {
+        return res.status(400).json({ success: false, error: 'trialDays must be between 0 and 365.' });
+      }
 
-      const { data: inserted, error } = await dbClient
+      const corePayload = {
+        code,
+        name,
+        tier,
+        monthly_price_usd: monthlyPrice,
+        yearly_price_usd: yearlyPrice,
+        max_followers: maxFollowers,
+        max_child_accounts: maxChildAccounts,
+        is_active: isActive,
+        features,
+      };
+      const extendedPayload = {
+        ...corePayload,
+        description,
+        trial_days: trialDays,
+        is_archived: false,
+      };
+
+      let insertedRes = await dbClient
         .from('subscription_plans')
-        .insert([
-          {
-            code,
-            name,
-            tier,
-            monthly_price_usd: monthlyPrice,
-            yearly_price_usd: yearlyPrice,
-            max_followers: maxFollowers,
-            max_child_accounts: maxChildAccounts,
-            is_active: isActive,
-            features,
-          },
-        ])
+        .insert([extendedPayload])
         .select('*')
         .single();
 
+      if (insertedRes.error && isMissingRelationError(insertedRes.error)) {
+        insertedRes = await dbClient
+          .from('subscription_plans')
+          .insert([corePayload])
+          .select('*')
+          .single();
+      }
+
+      const { data: inserted, error } = insertedRes;
+
       if (error) {
+        const isDuplicate =
+          String(error.code || '') === '23505' ||
+          String(error.message || '').toLowerCase().includes('duplicate') ||
+          String(error.message || '').toLowerCase().includes('unique');
         await audit(dbClient, {
           actorId: caller.user.id,
           actorRole: 'admin',
@@ -814,7 +844,13 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           result: 'failed',
           details: `Plan creation failed for ${name} (${code}): ${error.message}`,
         });
-        return res.status(500).json({ success: false, error: error.message });
+        return res.status(isDuplicate ? 409 : 500).json({
+          success: false,
+          code: isDuplicate ? 'DUPLICATE_PLAN_CODE' : undefined,
+          error: isDuplicate
+            ? `A subscription plan with code "${code}" already exists. Use a different plan code or edit the existing plan.`
+            : error.message,
+        });
       }
 
       await audit(dbClient, {
@@ -824,7 +860,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         targetType: 'subscription_plans',
         targetId: inserted.id,
         result: 'success',
-        details: `Created subscription plan ${name} (${code}) with max_followers=${maxFollowers}, monthly=$${monthlyPrice}.`,
+        details: `Created subscription plan ${name} (${code}) with max_followers=${maxFollowers}, monthly=$${monthlyPrice}, trialDays=${trialDays}.`,
       });
 
       return res.status(201).json({ success: true, plan: mapPlanRow(inserted) });
@@ -845,7 +881,11 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
 
       const b = req.body || {};
       const patch: Record<string, any> = { updated_at: new Date().toISOString() };
-      if (b.name !== undefined) patch.name = String(b.name).trim();
+      if (b.name !== undefined) {
+        const cleanName = String(b.name).trim();
+        if (!cleanName) return res.status(400).json({ success: false, error: 'Plan name cannot be empty.' });
+        patch.name = cleanName;
+      }
       if (b.tier !== undefined && ['free_demo', 'trader_pro', 'mentor_pro', 'enterprise'].includes(String(b.tier))) {
         patch.tier = String(b.tier);
       }
@@ -868,12 +908,38 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       if (typeof b.isActive === 'boolean') patch.is_active = b.isActive;
       if (Array.isArray(b.features)) patch.features = b.features.map(String);
 
-      const { data: updated, error } = await dbClient
+      const extendedPatch: Record<string, any> = { ...patch };
+      if (b.description !== undefined) extendedPatch.description = String(b.description || '').trim();
+      if (b.trialDays !== undefined) {
+        const td = Math.round(Number(b.trialDays));
+        if (!Number.isFinite(td) || td < 0 || td > 365) {
+          return res.status(400).json({ success: false, error: 'trialDays must be between 0 and 365.' });
+        }
+        extendedPatch.trial_days = td;
+      }
+      if (typeof b.isArchived === 'boolean') {
+        extendedPatch.is_archived = b.isArchived;
+        extendedPatch.archived_at = b.isArchived ? new Date().toISOString() : null;
+        if (b.isArchived) extendedPatch.is_active = false;
+      }
+
+      let updateRes = await dbClient
         .from('subscription_plans')
-        .update(patch)
+        .update(extendedPatch)
         .eq('id', planId)
         .select('*')
         .single();
+
+      if (updateRes.error && isMissingRelationError(updateRes.error)) {
+        updateRes = await dbClient
+          .from('subscription_plans')
+          .update(patch)
+          .eq('id', planId)
+          .select('*')
+          .single();
+      }
+
+      const { data: updated, error } = updateRes;
 
       if (error) {
         await audit(dbClient, {
@@ -896,12 +962,81 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         targetId: planId,
         result: 'success',
         details: `Updated subscription plan ${updated.name} (${updated.code}).`,
-        metadata: patch,
+        metadata: extendedPatch,
       });
 
       return res.status(200).json({ success: true, plan: mapPlanRow(updated) });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to update subscription plan' });
+    }
+  });
+
+  registerRoute('delete', '/api/admin/subscription-plans/:planId', async (req: Request, res: Response) => {
+    const caller = await authenticateSupabaseCaller(req, res, { requireAdmin: true, requireServiceRole: true });
+    if (!caller) return;
+    const dbClient = requireServiceRoleClient(res);
+    if (!dbClient) return;
+
+    try {
+      const { planId } = req.params;
+      if (!isValidUUID(planId)) return res.status(400).json({ success: false, error: 'Invalid planId UUID.' });
+
+      const { data: existing, error: findErr } = await dbClient
+        .from('subscription_plans')
+        .select('*')
+        .eq('id', planId)
+        .maybeSingle();
+
+      if (findErr) return res.status(500).json({ success: false, error: findErr.message });
+      if (!existing) return res.status(404).json({ success: false, error: 'Subscription plan not found.' });
+
+      const nowIso = new Date().toISOString();
+      let archRes = await dbClient
+        .from('subscription_plans')
+        .update({
+          is_active: false,
+          is_archived: true,
+          archived_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', planId)
+        .select('*')
+        .single();
+
+      if (archRes.error && isMissingRelationError(archRes.error)) {
+        archRes = await dbClient
+          .from('subscription_plans')
+          .update({
+            is_active: false,
+            updated_at: nowIso,
+          })
+          .eq('id', planId)
+          .select('*')
+          .single();
+      }
+
+      if (archRes.error) {
+        return res.status(500).json({ success: false, error: archRes.error.message });
+      }
+
+      await audit(dbClient, {
+        actorId: caller.user.id,
+        actorRole: 'admin',
+        action: 'SUBSCRIPTION_PLAN_ARCHIVED',
+        targetType: 'subscription_plans',
+        targetId: planId,
+        result: 'success',
+        details: `Safely archived subscription plan ${existing.name} (${existing.code}) while preserving historical subscription & payment records.`,
+      });
+
+      return res.status(200).json({
+        success: true,
+        archived: true,
+        preservesSubscriptions: true,
+        plan: mapPlanRow(archRes.data),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Failed to archive subscription plan' });
     }
   });
 
@@ -1803,6 +1938,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           strategyName: existing.strategy_name,
           description: existing.description || '',
           monthlyFee: Number(existing.monthly_fee ?? 0),
+          studentMonthlyFeeUsd: Number(existing.student_monthly_fee_usd ?? existing.monthly_fee ?? 0),
+          studentBillingPeriod: existing.student_billing_period || 'monthly',
           maxFollowers: Number(existing.max_followers ?? 25),
           inviteCode: existing.invite_code,
           isPublic: existing.is_public !== false,
@@ -1838,34 +1975,50 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const strategyName = String(b.strategyName || 'Master Strategy').trim();
       const description = String(b.description || '').trim();
       const monthlyFee = Number(b.monthlyFee ?? 0);
+      const studentMonthlyFeeUsd = Number(b.studentMonthlyFeeUsd ?? monthlyFee);
+      const studentBillingPeriod = ['monthly', 'quarterly', 'yearly', 'free'].includes(String(b.studentBillingPeriod))
+        ? String(b.studentBillingPeriod)
+        : 'monthly';
       const maxFollowers = Math.max(1, Math.round(Number(b.maxFollowers ?? 25)));
       const isPublic = b.isPublic !== false;
       const inviteCode = `TS-${targetMentorId.slice(0, 8).toUpperCase()}`;
 
       if (!strategyName) return res.status(400).json({ success: false, error: 'strategyName is required.' });
-      if (!Number.isFinite(monthlyFee) || monthlyFee < 0) {
-        return res.status(400).json({ success: false, error: 'monthlyFee must be >= 0.' });
+      if (!Number.isFinite(monthlyFee) || monthlyFee < 0 || !Number.isFinite(studentMonthlyFeeUsd) || studentMonthlyFeeUsd < 0) {
+        return res.status(400).json({ success: false, error: 'Fees must be >= 0.' });
       }
 
-      const { data: saved, error } = await dbClient
+      const basePayload = {
+        user_id: targetMentorId,
+        strategy_name: strategyName,
+        description,
+        monthly_fee: monthlyFee,
+        max_followers: maxFollowers,
+        invite_code: inviteCode,
+        is_public: isPublic,
+        updated_at: new Date().toISOString(),
+      };
+      const extendedPayload = {
+        ...basePayload,
+        student_monthly_fee_usd: studentMonthlyFeeUsd,
+        student_billing_period: studentBillingPeriod,
+      };
+
+      let upsertRes = await dbClient
         .from('mentor_profiles')
-        .upsert(
-          [
-            {
-              user_id: targetMentorId,
-              strategy_name: strategyName,
-              description,
-              monthly_fee: monthlyFee,
-              max_followers: maxFollowers,
-              invite_code: inviteCode,
-              is_public: isPublic,
-              updated_at: new Date().toISOString(),
-            },
-          ],
-          { onConflict: 'user_id' }
-        )
+        .upsert([extendedPayload], { onConflict: 'user_id' })
         .select('*')
         .single();
+
+      if (upsertRes.error && isMissingRelationError(upsertRes.error)) {
+        upsertRes = await dbClient
+          .from('mentor_profiles')
+          .upsert([basePayload], { onConflict: 'user_id' })
+          .select('*')
+          .single();
+      }
+
+      const { data: saved, error } = upsertRes;
 
       if (error) {
         await audit(dbClient, {
@@ -1887,7 +2040,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         targetType: 'mentor_profiles',
         targetId: saved.id,
         result: 'success',
-        details: `Updated mentor strategy "${strategyName}" (fee=$${monthlyFee}, maxFollowers=${maxFollowers}).`,
+        details: `Updated mentor strategy "${strategyName}" (fee=$${monthlyFee}, studentFee=$${studentMonthlyFeeUsd}/${studentBillingPeriod}, maxFollowers=${maxFollowers}).`,
       });
 
       return res.status(200).json({
@@ -1898,6 +2051,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           strategyName: saved.strategy_name,
           description: saved.description || '',
           monthlyFee: Number(saved.monthly_fee ?? 0),
+          studentMonthlyFeeUsd: Number(saved.student_monthly_fee_usd ?? saved.monthly_fee ?? 0),
+          studentBillingPeriod: saved.student_billing_period || 'monthly',
           maxFollowers: Number(saved.max_followers ?? 25),
           inviteCode: saved.invite_code,
           isPublic: saved.is_public !== false,

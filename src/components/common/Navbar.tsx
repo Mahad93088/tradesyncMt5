@@ -80,6 +80,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     'child-accounts': 'MT5 Account Management',
     'admin-parent-accounts': 'MT5 Account Management',
     'admin-child-accounts': 'MT5 Account Management',
+    brokers: 'Brokers & Gold Symbols',
     plans: 'Subscription Plans',
     subscriptions: 'Subscriptions',
     'payments-revenue': 'Payments & Revenue',
@@ -394,19 +395,33 @@ export const Navbar: React.FC<NavbarProps> = ({
                         className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 px-2 py-1.5 text-[11px] font-medium text-rose-700 transition-colors"
                       >
                         <LogOut className="h-3 w-3" />
-                        Sign Out of Cloud
+                        Sign Out
                       </button>
                     ) : (
-                      <button
-                        onClick={() => {
-                          setIsAuthModalOpen(true);
-                          setShowRoleMenu(false);
-                        }}
-                        className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1220] hover:bg-slate-800 px-2 py-1.5 text-[11px] font-semibold text-white transition-colors"
-                      >
-                        <LogIn className="h-3 w-3" />
-                        Sign In / Connect Cloud
-                      </button>
+                      <>
+                        {isConfigured && (
+                          <button
+                            onClick={async () => {
+                              await signOut();
+                              setShowRoleMenu(false);
+                            }}
+                            className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2 py-1.5 text-[11px] font-medium text-slate-700 transition-colors"
+                          >
+                            <LogOut className="h-3 w-3" />
+                            Exit Sandbox to Login
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setIsAuthModalOpen(true);
+                            setShowRoleMenu(false);
+                          }}
+                          className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1220] hover:bg-slate-800 px-2 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                        >
+                          <LogIn className="h-3 w-3" />
+                          Sign In / Connect Cloud
+                        </button>
+                      </>
                     )}
 
                     {!isCloudMode && (
@@ -691,19 +706,33 @@ export const Navbar: React.FC<NavbarProps> = ({
                       className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-rose-900/60 bg-rose-950/30 hover:bg-rose-900/40 px-2 py-1.5 text-[11px] text-rose-300 transition-colors"
                     >
                       <LogOut className="h-3 w-3" />
-                      Sign Out of Cloud
+                      Sign Out
                     </button>
                   ) : (
-                    <button
-                      onClick={() => {
-                        setIsAuthModalOpen(true);
-                        setShowRoleMenu(false);
-                      }}
-                      className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-1.5 text-[11px] font-semibold text-white transition-colors"
-                    >
-                      <LogIn className="h-3 w-3" />
-                      Sign In / Connect Cloud
-                    </button>
+                    <>
+                      {isConfigured && (
+                        <button
+                          onClick={async () => {
+                            await signOut();
+                            setShowRoleMenu(false);
+                          }}
+                          className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-750 px-2 py-1.5 text-[11px] text-slate-300 transition-colors"
+                        >
+                          <LogOut className="h-3 w-3" />
+                          Exit Sandbox to Login
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setIsAuthModalOpen(true);
+                          setShowRoleMenu(false);
+                        }}
+                        className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                      >
+                        <LogIn className="h-3 w-3" />
+                        Sign In / Connect Cloud
+                      </button>
+                    </>
                   )}
 
                   {!isCloudMode && (

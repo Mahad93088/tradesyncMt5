@@ -16,6 +16,8 @@ import {
   Layers,
   Download,
   Printer,
+  UserCheck,
+  DollarSign,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -50,11 +52,13 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     subscriptions,
     subscriptionPlans,
     mentorGroups,
+    mentorInvitations,
     parentChildLinks,
     trades,
     tradeMappings,
     toggleAutoTrading,
     emergencyCloseParentTicket,
+    updateMentorStrategyProfile,
   } = useApp();
 
   const [copiedCode, setCopiedCode] = useState(false);
@@ -74,6 +78,21 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
   const activePlan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : null;
   const inviteCode = profile?.inviteCode || getDeterministicInviteCode(currentUser.id);
   const myGroups = mentorGroups.filter((g) => g.mentorId === currentUser.id);
+
+  // Pending student join requests
+  const pendingJoinRequests = mentorInvitations.filter(
+    (inv) => inv.mentorId === currentUser.id && inv.direction === 'student_request' && inv.status === 'pending'
+  );
+
+  // Student default membership pricing editor
+  const [editingPricing, setEditingPricing] = useState(false);
+  const [studentFeeInput, setStudentFeeInput] = useState(() =>
+    String(profile?.studentMonthlyFeeUsd ?? profile?.monthlyFee ?? 0)
+  );
+  const [studentBillingInput, setStudentBillingInput] = useState<'monthly' | 'quarterly' | 'yearly' | 'free'>(
+    profile?.studentBillingPeriod || 'monthly'
+  );
+  const [savingPricing, setSavingPricing] = useState(false);
 
   // Follower links
   const mentorLinks = parentChildLinks.filter((l) => l.mentorId === currentUser.id);
@@ -119,6 +138,28 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     setIsClosingTicket(false);
     setActionFeedback({ message: res.message, isError: !res.success });
     setPendingEmergencyTicket(null);
+  };
+
+  const handleSaveStudentPricing = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingPricing(true);
+    setActionFeedback(null);
+    const fee = studentBillingInput === 'free' ? 0 : Math.max(0, Number(studentFeeInput) || 0);
+    const res = await updateMentorStrategyProfile({
+      strategyName: profile?.strategyName || 'Master Strategy',
+      description: profile?.description || '',
+      monthlyFee: fee,
+      maxFollowers: maxQuota,
+      studentMonthlyFeeUsd: fee,
+      studentBillingPeriod: studentBillingInput,
+    });
+    setSavingPricing(false);
+    if (!res.success) {
+      setActionFeedback({ message: res.message || 'Failed to update student membership rate.', isError: true });
+    } else {
+      setEditingPricing(false);
+      setActionFeedback({ message: 'Default student membership fee saved.', isError: false });
+    }
   };
 
   const handleExportMasterTrades = () => {
@@ -244,12 +285,30 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
         </div>
       )}
 
+      {pendingJoinRequests.length > 0 && (
+        <div className="rounded-xl border border-amber-800/70 bg-amber-950/30 p-3.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-amber-200">
+            <UserCheck className="h-4 w-4 text-amber-400 shrink-0" />
+            <span>
+              You have <strong>{pendingJoinRequests.length}</strong> pending student join request(s) awaiting review.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('child-accounts')}
+            className="rounded-lg bg-amber-600 hover:bg-amber-500 px-3 py-1.5 text-[11px] font-semibold text-white transition-colors shrink-0"
+          >
+            Review Student Requests →
+          </button>
+        </div>
+      )}
+
       {/* KPI Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatsCard
           title="Active Followers"
           value={activeFollowers}
-          subtitle={`${activeFollowers} / ${maxQuota} plan quota (${myGroups.length} group${myGroups.length === 1 ? '' : 's'})`}
+          subtitle={`${activeFollowers} / ${maxQuota} quota • ${pendingJoinRequests.length} pending request${pendingJoinRequests.length === 1 ? '' : 's'}`}
           icon={Users}
           accentColor="teal"
           onClick={() => onNavigateTab('child-accounts')}
@@ -420,10 +479,13 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                   </span>
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-500 uppercase font-sans">Broker Server</span>
-                  <p className="font-bold text-slate-200 truncate">{parentAccount.server}</p>
+                  <span className="text-[10px] text-slate-500 uppercase font-sans">Broker Server &amp; Gold Symbol</span>
+                  <p className="font-bold text-slate-200 truncate">
+                    {parentAccount.server} • <span className="text-amber-300">{parentAccount.tradingSymbol || 'XAUUSD'}</span>
+                  </p>
                   <span className={`text-[10px] font-sans ${parentAccount.isStale ? 'text-amber-400' : 'text-emerald-400'}`}>
                     {formatHeartbeatAge(parentAccount.lastHeartbeat)}
+                    {parentAccount.symbolVerified ? ' • Symbol Verified' : ' • Unverified Baseline'}
                   </span>
                 </div>
                 <div>
@@ -711,6 +773,76 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                 Billing & Plans
               </button>
             </div>
+          </div>
+
+          {/* Student Membership Rate Card */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-400 uppercase flex items-center gap-1.5">
+                <DollarSign className="h-3.5 w-3.5 text-emerald-400" />
+                Student Fee Setting
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setStudentFeeInput(String(profile?.studentMonthlyFeeUsd ?? profile?.monthlyFee ?? 0));
+                  setStudentBillingInput(profile?.studentBillingPeriod || 'monthly');
+                  setEditingPricing((v) => !v);
+                }}
+                className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
+              >
+                {editingPricing ? 'Cancel' : 'Edit Rate'}
+              </button>
+            </div>
+
+            {editingPricing ? (
+              <form onSubmit={handleSaveStudentPricing} className="space-y-2.5 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Amount ($ USD)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="1"
+                      disabled={studentBillingInput === 'free'}
+                      value={studentBillingInput === 'free' ? '0' : studentFeeInput}
+                      onChange={(e) => setStudentFeeInput(e.target.value)}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white focus:border-cyan-500 focus:outline-none disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Billing Period</label>
+                    <select
+                      value={studentBillingInput}
+                      onChange={(e) => setStudentBillingInput(e.target.value as any)}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-white focus:border-cyan-500 focus:outline-none"
+                    >
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                      <option value="yearly">Yearly</option>
+                      <option value="free">Free</option>
+                    </select>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={savingPricing}
+                  className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 py-1.5 font-semibold text-white transition-colors"
+                >
+                  {savingPricing ? 'Saving...' : 'Save Student Pricing'}
+                </button>
+              </form>
+            ) : (
+              <div className="font-mono text-xs flex items-baseline justify-between">
+                <span className="text-lg font-bold text-white">
+                  ${Number(profile?.studentMonthlyFeeUsd ?? profile?.monthlyFee ?? 0).toFixed(2)}
+                  <span className="text-[11px] font-normal text-slate-400 ml-1">
+                    / {profile?.studentBillingPeriod || 'monthly'}
+                  </span>
+                </span>
+                <span className="text-[10px] font-sans text-slate-500">Default follower rate</span>
+              </div>
+            )}
           </div>
         </div>
       </div>

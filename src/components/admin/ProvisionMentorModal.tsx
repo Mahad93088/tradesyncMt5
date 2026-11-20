@@ -5,18 +5,14 @@ import {
   CheckCircle2,
   AlertCircle,
   Shield,
-  CreditCard,
-  AtSign,
   Mail,
   User as UserIcon,
-  Activity,
-  DollarSign,
-  Layers,
   UserCheck,
   Database,
-  Lock,
   RefreshCw,
-  AlertTriangle
+  AlertTriangle,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -32,15 +28,27 @@ interface ProvisionMentorModalProps {
 export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
   isOpen,
   onClose,
-  onSuccess
+  onSuccess,
 }) => {
   const { isCloudMode, user: currentAuthUser } = useAuth();
-  const { subscriptionPlans, createMentor, users } = useApp();
+  const { subscriptionPlans, createMentor, users, refreshCloudData } = useApp();
 
-  // Mode: 'approve' (approve existing registered user) vs 'provision' (create new user)
-  const [activeTab, setActiveTab] = useState<'approve' | 'provision'>('approve');
+  const [activeTab, setActiveTab] = useState<'create' | 'approve'>('create');
 
-  // Candidate Users for Super Admin approval
+  // Create Mentor Form Fields (Cloud + Local)
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('');
+  const [selectedPlanId, setSelectedPlanId] = useState('');
+  const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
+  const [accountStatus, setAccountStatus] = useState<AccountStatus>('active');
+  const [strategyName, setStrategyName] = useState('');
+  const [description, setDescription] = useState('');
+  const [monthlyFee, setMonthlyFee] = useState<number>(149);
+  const [maxFollowers, setMaxFollowers] = useState<number>(25);
+
+  // Approve Existing Registered User state
   const [candidates, setCandidates] = useState<Array<{
     id: string;
     fullName: string;
@@ -51,234 +59,91 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
   }>>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string>('');
   const [isLoadingCandidates, setIsLoadingCandidates] = useState<boolean>(false);
+  const [approvalMode, setApprovalMode] = useState<'status_only' | 'mentor'>('mentor');
 
-  // Quick Register & Approve fields (when database has no users)
-  const [showQuickRegister, setShowQuickRegister] = useState<boolean>(false);
-  const [regFullName, setRegFullName] = useState<string>('');
-  const [regEmail, setRegEmail] = useState<string>('');
-  const [regPassword, setRegPassword] = useState<string>('');
-
-  // Sandbox Provision Form Fields
-  const [fullName, setFullName] = useState('');
-  const [email, setEmail] = useState('');
-  const [username, setUsername] = useState('');
-  const [selectedPlanId, setSelectedPlanId] = useState('');
-  const [accountStatus, setAccountStatus] = useState<AccountStatus>('active');
-
-  // Strategy fields
-  const [strategyName, setStrategyName] = useState('');
-  const [monthlyFee, setMonthlyFee] = useState<number>(149);
-
-  // Validation & Submission States
+  // Feedback & Credential Summary
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [showSuccessToast, setShowSuccessToast] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string>('');
   const [warningMessage, setWarningMessage] = useState<string>('');
+  const [createdCredentials, setCreatedCredentials] = useState<{ email: string; password?: string; fullName: string } | null>(null);
+  const [copiedCreds, setCopiedCreds] = useState(false);
 
-  // Load candidate users from Supabase or local state
   const loadCandidates = async () => {
     setIsLoadingCandidates(true);
-    setErrors({});
     try {
-      console.log(`[ProvisionMentorModal] Loading candidates: isCloudMode=${Boolean(isCloudMode)}, currentAdminEmail=${currentAuthUser?.email}`);
       const list = await mt5AdminService.getCandidateUsersForMentor(isCloudMode, users);
       setCandidates(list);
-
-      console.log(`[ProvisionMentorModal] Candidates loaded count: ${list.length}`);
-      list.forEach((c, idx) => {
-        const isSelf = Boolean(currentAuthUser?.id && c.id === currentAuthUser.id);
-        console.log(`[ProvisionMentorModal] Dropdown candidate #${idx + 1}: id=${c.id}, email=${c.email}, role=${c.role}, status=${c.status}, isSelfPromotion=${isSelf}`);
-      });
-
-      // Default selection to first eligible candidate who is not the current admin
       const eligible = list.find((c) => c.id !== currentAuthUser?.id) || list[0];
-      if (eligible) {
-        setSelectedCandidateId(eligible.id);
-        console.log(`[ProvisionMentorModal] Default selected candidate: ${eligible.email} (${eligible.id})`);
-      } else {
-        setSelectedCandidateId('');
-        console.log('[ProvisionMentorModal] No candidate available to select.');
-      }
+      setSelectedCandidateId(eligible?.id || '');
     } catch (err: any) {
-      console.error('[ProvisionMentorModal] Failed to load candidate users:', err);
-      setErrors({ form: err.message || 'Failed to load candidate registered users from database.' });
       setCandidates([]);
       setSelectedCandidateId('');
+      setErrors((prev) => ({ ...prev, candidate: err.message || 'Failed to load candidate users.' }));
     } finally {
       setIsLoadingCandidates(false);
     }
   };
 
-  // Initialize or reset defaults when modal opens
   useEffect(() => {
     if (!isOpen) return;
-
-    setActiveTab(isCloudMode ? 'approve' : 'provision');
+    setActiveTab('create');
     setFullName('');
     setEmail('');
+    setPassword('');
     setUsername('');
-    setSelectedPlanId(subscriptionPlans[0]?.id || 'plan_starter');
+    setSelectedPlanId(subscriptionPlans.find((p) => !p.isArchived)?.id || '');
+    setBillingCycle('monthly');
     setAccountStatus('active');
     setStrategyName('');
+    setDescription('');
     setMonthlyFee(149);
-    setRegFullName('');
-    setRegEmail('');
-    setRegPassword('');
-    setShowQuickRegister(false);
+    setMaxFollowers(25);
     setErrors({});
     setIsSubmitting(false);
-    setShowSuccessToast(false);
     setSuccessMessage('');
     setWarningMessage('');
+    setCreatedCredentials(null);
+    setCopiedCreds(false);
+    void loadCandidates();
+  }, [isOpen, isCloudMode, currentAuthUser?.id]);
 
-    loadCandidates();
-  }, [isOpen, isCloudMode, subscriptionPlans, currentAuthUser?.id]);
-
-  // Handle escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        handleCancel();
-      }
+      if (e.key === 'Escape' && isOpen) onClose();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen]);
 
-  // Candidate currently selected
   const chosenCandidate = candidates.find((c) => c.id === selectedCandidateId);
   const isSelfPromotion = Boolean(
     chosenCandidate && currentAuthUser?.id && chosenCandidate.id === currentAuthUser.id
   );
 
-  // Auto-fill username recommendation
   const handleFullNameChange = (val: string) => {
     setFullName(val);
     if (!username || username === fullName.toLowerCase().replace(/[^a-z0-9]/g, '_')) {
-      const suggested = val.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
-      setUsername(suggested);
-    }
-    if (errors.fullName) {
-      setErrors((prev) => {
-        const next = { ...prev };
-        delete next.fullName;
-        return next;
-      });
+      setUsername(val.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, ''));
     }
   };
 
-  // Approval action mode: 'status_only' (updates ONLY status = 'active', preserving role per Requirement 8) or 'mentor'
-  const [approvalMode, setApprovalMode] = useState<'status_only' | 'mentor'>('status_only');
-
-  // Handler for Approving Registered User (Requirement 8)
-  const handleApproveSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrors({});
-
-    if (!selectedCandidateId) {
-      setErrors({ candidate: 'Please select a registered user to approve.' });
-      return;
-    }
-
-    // Anti-self-promotion protection (Requirement 6)
-    if (isSelfPromotion) {
-      setErrors({
-        candidate: 'Security protection violation: Administrators cannot approve or promote their own account.',
-      });
-      return;
-    }
-
-    setIsSubmitting(true);
-
-    try {
-      if (approvalMode === 'status_only') {
-        // REQUIREMENT 8: Approval updates ONLY status to 'active' without altering role or granting admin
-        const res = await mt5AdminService.approveUserStatus({
-          targetUserId: selectedCandidateId,
-          isCloudMode,
-        });
-
-        if (res.success && res.profile) {
-          const targetName = res.profile.full_name || chosenCandidate?.fullName || 'User';
-          const targetEmail = res.profile.email || chosenCandidate?.email || '';
-          const currentRole = res.profile.role || chosenCandidate?.role || 'trader';
-          const msg = `Successfully approved ${targetName} (${targetEmail})! Account status is now ACTIVE with role "${currentRole}". Database confirmed update.`;
-          setSuccessMessage(msg);
-          setShowSuccessToast(true);
-
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('tradesync:user-approved', { detail: res.profile }));
-          }
-
-          setTimeout(() => {
-            setIsSubmitting(false);
-            if (onSuccess) {
-              onSuccess(res.profile);
-            }
-            onClose();
-          }, 1200);
-        } else {
-          setErrors({ form: res.error || 'Failed to approve user status.' });
-          setIsSubmitting(false);
-        }
-      } else {
-        // Promote to mentor workflow
-        const res = await mt5AdminService.promoteUserToMentor({
-          targetUserId: selectedCandidateId,
-          isCloudMode,
-          strategyName: strategyName.trim() || undefined,
-          monthlyFee,
-        });
-
-        if (res.success && (res.profile || !isCloudMode)) {
-          const targetName = res.profile?.full_name || chosenCandidate?.fullName || 'User';
-          const targetEmail = res.profile?.email || chosenCandidate?.email || '';
-          const msg = `Successfully approved ${targetName} (${targetEmail}) as active Mentor in public.profiles! Database confirmed update.`;
-          setSuccessMessage(msg);
-          if (res.warning) {
-            setWarningMessage(res.warning);
-          }
-          setShowSuccessToast(true);
-
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile || { id: selectedCandidateId } }));
-          }
-
-          setTimeout(() => {
-            setIsSubmitting(false);
-            if (onSuccess) {
-              onSuccess(res.profile);
-            }
-            onClose();
-          }, 1200);
-        } else {
-          setErrors({ form: res.error || 'Failed to promote user as mentor.' });
-          setIsSubmitting(false);
-        }
-      }
-    } catch (err: any) {
-      setErrors({ form: err.message || 'Error occurred during user approval.' });
-      setIsSubmitting(false);
-    }
-  };
-
-  // Handler for Quick Register & Approve (Uses authenticated server-side Auth Admin in Cloud Mode)
-  const handleQuickRegisterAndApprove = async (e: React.FormEvent) => {
+  const handleCreateMentorSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors({});
     setWarningMessage('');
+    setSuccessMessage('');
 
-    if (!regFullName.trim() || regFullName.trim().length < 2) {
-      setErrors({ regFullName: 'Full Name is required (minimum 2 characters).' });
+    if (!fullName.trim() || fullName.trim().length < 2) {
+      setErrors({ fullName: 'Full Name is required (min 2 characters).' });
       return;
     }
-    if (!regEmail.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(regEmail.trim())) {
-      setErrors({ regEmail: 'A valid email address is required.' });
+    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setErrors({ email: 'A valid email address is required.' });
       return;
     }
-    if (!regPassword || regPassword.length < 6) {
-      setErrors({ regPassword: 'Password must be at least 6 characters.' });
+    if (isCloudMode && (!password || password.length < 6)) {
+      setErrors({ password: 'Initial login password must be at least 6 characters.' });
       return;
     }
 
@@ -286,132 +151,136 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
 
     try {
       if (isCloudMode) {
-        const createRes = await mt5AdminService.createAdminUser({
-          fullName: regFullName.trim(),
-          email: regEmail.trim(),
-          password: regPassword,
+        const res = await mt5AdminService.createAdminUser({
+          fullName: fullName.trim(),
+          email: email.trim(),
+          password,
           role: 'mentor',
-          status: 'active',
-          strategyName: strategyName.trim() || undefined,
-          monthlyFee,
+          status: accountStatus,
+          strategyName: strategyName.trim() || `${fullName.trim()}'s Strategy`,
+          description: description.trim() || undefined,
+          monthlyFee: monthlyFee || 0,
+          maxFollowers: maxFollowers || 25,
+          planId: selectedPlanId || undefined,
+          billingCycle,
         });
 
-        if (!createRes.success || !createRes.profile) {
-          throw new Error(createRes.error || 'Failed to create and approve new mentor.');
+        if (!res.success || !res.profile) {
+          throw new Error(res.error || 'Failed to create mentor in Supabase.');
         }
 
-        if (createRes.warning) {
-          setWarningMessage(createRes.warning);
-        }
-
+        if (res.warning) setWarningMessage(res.warning);
+        await refreshCloudData();
+        setCreatedCredentials({
+          fullName: fullName.trim(),
+          email: email.trim(),
+          password,
+        });
         setSuccessMessage(
-          `Successfully registered and approved ${regFullName.trim()} (${regEmail.trim()}) as verified Mentor in Supabase without altering your admin session.`
+          `Created Mentor "${fullName.trim()}" (${email.trim()}) in Supabase without altering your Admin session.`
         );
-        setShowSuccessToast(true);
-
         if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: createRes.profile }));
+          window.dispatchEvent(new CustomEvent('tradesync:mentor-promoted', { detail: res.profile }));
         }
-
-        setTimeout(() => {
-          setIsSubmitting(false);
-          if (onSuccess) {
-            onSuccess(createRes.profile);
-          }
-          onClose();
-        }, 1200);
+        if (onSuccess) onSuccess(res.profile);
       } else {
+        const cleanUsername = username.trim().replace(/^@/, '') || email.split('@')[0];
         const created = createMentor(
           {
-            fullName: regFullName.trim(),
-            email: regEmail.trim(),
-            status: 'active',
+            fullName: fullName.trim(),
+            email: email.trim(),
+            username: cleanUsername,
+            status: accountStatus,
           },
           {
-            strategyName: strategyName.trim() || `${regFullName.trim()}'s Alpha Flow`,
+            strategyName: strategyName.trim() || `${fullName.trim()}'s Alpha Flow`,
+            description: description.trim() || `MetaTrader 5 copy-trading strategy managed by ${fullName.trim()}.`,
             monthlyFee: monthlyFee || 0,
           },
-          selectedPlanId
+          selectedPlanId || undefined
         );
-
-        setSuccessMessage(
-          `Created local demo mentor ${regFullName.trim()} (${regEmail.trim()}).`
-        );
-        setShowSuccessToast(true);
-
-        setTimeout(() => {
-          setIsSubmitting(false);
-          if (onSuccess) {
-            onSuccess(created);
-          }
-          onClose();
-        }, 500);
+        setCreatedCredentials({
+          fullName: fullName.trim(),
+          email: email.trim(),
+        });
+        setSuccessMessage(`Created demo mentor "${fullName.trim()}"!`);
+        if (onSuccess) onSuccess(created);
       }
     } catch (err: any) {
-      setErrors({ form: err.message || 'Failed to register and approve new mentor.' });
+      setErrors({ form: err.message || 'Failed to create mentor.' });
+    } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Handler for Sandbox Demo Creation
-  const handleProvisionSubmit = (e: React.FormEvent) => {
+  const handleApproveSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors({});
+    setWarningMessage('');
+    setSuccessMessage('');
 
-    if (!fullName.trim()) {
-      setErrors({ fullName: 'Full Name is required.' });
+    if (!selectedCandidateId) {
+      setErrors({ candidate: 'Please select a registered user to approve.' });
       return;
     }
-    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-      setErrors({ email: 'A valid email address is required.' });
+    if (isSelfPromotion) {
+      setErrors({
+        candidate: 'Administrators cannot approve or elevate their own account.',
+      });
       return;
     }
 
     setIsSubmitting(true);
-
     try {
-      const cleanUsername = username.trim().replace(/^@/, '') || email.split('@')[0];
-      const finalStrategy = strategyName.trim() || `${fullName.trim()}'s Alpha Flow`;
-
-      const created = createMentor(
-        {
-          fullName: fullName.trim(),
-          email: email.trim(),
-          username: cleanUsername,
-          status: accountStatus
-        },
-        {
-          strategyName: finalStrategy,
-          description: `MetaTrader 5 institutional copy-trading strategy managed by ${fullName.trim()}.`,
-          monthlyFee: monthlyFee || 0
-        },
-        selectedPlanId
-      );
-
-      setShowSuccessToast(true);
-      setSuccessMessage(`Demo Mentor account created successfully for ${fullName.trim()}!`);
-
-      setTimeout(() => {
-        setIsSubmitting(false);
-        if (onSuccess) {
-          onSuccess(created);
+      if (approvalMode === 'status_only') {
+        const res = await mt5AdminService.approveUserStatus({
+          targetUserId: selectedCandidateId,
+          isCloudMode,
+        });
+        if (!res.success || !res.profile) {
+          throw new Error(res.error || 'Failed to approve user status.');
         }
-        onClose();
-      }, 400);
-    } catch (err) {
-      setErrors({ form: 'An unexpected error occurred while creating mentor.' });
+        await refreshCloudData();
+        setSuccessMessage(
+          `Approved ${res.profile.full_name || chosenCandidate?.fullName || 'User'} as active (${res.profile.role || chosenCandidate?.role}).`
+        );
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('tradesync:user-approved', { detail: res.profile }));
+        }
+        if (onSuccess) onSuccess(res.profile);
+        setTimeout(() => onClose(), 1000);
+      } else {
+        const res = await mt5AdminService.promoteUserToMentor({
+          targetUserId: selectedCandidateId,
+          isCloudMode,
+          strategyName: strategyName.trim() || undefined,
+          monthlyFee,
+        });
+        if (!res.success && isCloudMode) {
+          throw new Error(res.error || 'Failed to elevate user to Mentor.');
+        }
+        if (res.warning) setWarningMessage(res.warning);
+        await refreshCloudData();
+        setSuccessMessage(
+          `Elevated ${res.profile?.full_name || chosenCandidate?.fullName || 'User'} to active Mentor.`
+        );
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('tradesync:mentor-promoted', {
+              detail: res.profile || { id: selectedCandidateId },
+            })
+          );
+        }
+        if (onSuccess) onSuccess(res.profile);
+        setTimeout(() => onClose(), 1000);
+      }
+    } catch (err: any) {
+      setErrors({ form: err.message || 'Approval operation failed.' });
+    } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleCancel = () => {
-    setErrors({});
-    setWarningMessage('');
-    setIsSubmitting(false);
-    onClose();
-  };
-
-  // Early return situated immediately before JSX rendering (Rules of Hooks compliant)
   if (!isOpen) return null;
 
   return (
@@ -419,13 +288,12 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="provision-mentor-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto animate-in fade-in duration-150"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 overflow-y-auto"
     >
       <div
         className="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-5 my-8 text-slate-100"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Modal Header */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-3">
           <div className="flex items-center gap-2.5">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
@@ -433,7 +301,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
             </div>
             <div>
               <h2 id="provision-mentor-title" className="text-sm font-bold text-white flex items-center gap-2">
-                <span>Authorize & Approve Mentor</span>
+                <span>Add or Approve Mentor</span>
                 {isCloudMode && (
                   <span className="inline-flex items-center gap-1 rounded bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 text-[10px] text-emerald-400 font-mono">
                     <Database className="h-2.5 w-2.5" /> Supabase
@@ -441,13 +309,13 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                 )}
               </h2>
               <p className="text-[11px] text-slate-400">
-                Grant active Mentor privileges to enable Parent MT5 copy-trading terminal streams
+                Create a new mentor login or elevate a registered user without disrupting your admin session.
               </p>
             </div>
           </div>
           <button
             type="button"
-            onClick={handleCancel}
+            onClick={onClose}
             className="rounded-lg p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
             aria-label="Close modal"
           >
@@ -455,11 +323,31 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           </button>
         </div>
 
-        {/* Workflow Tabs (Local Demo Sandbox tab hidden in Cloud Mode) */}
+        {/* Mode Tabs */}
         <div className="flex rounded-xl border border-slate-800 bg-slate-950/60 p-1">
           <button
             type="button"
-            onClick={() => { setActiveTab('approve'); setErrors({}); }}
+            onClick={() => {
+              setActiveTab('create');
+              setErrors({});
+              setCreatedCredentials(null);
+            }}
+            className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-1.5 text-xs font-semibold transition-all ${
+              activeTab === 'create'
+                ? 'bg-sky-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <UserPlus className="h-3.5 w-3.5" />
+            <span>Create New Mentor</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('approve');
+              setErrors({});
+              setCreatedCredentials(null);
+            }}
             className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-1.5 text-xs font-semibold transition-all ${
               activeTab === 'approve'
                 ? 'bg-sky-600 text-white shadow-sm'
@@ -467,25 +355,10 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
             }`}
           >
             <UserCheck className="h-3.5 w-3.5" />
-            <span>Approve Registered User {isCloudMode && '(Supabase)'}</span>
+            <span>Approve Existing User</span>
           </button>
-          {!isCloudMode && (
-            <button
-              type="button"
-              onClick={() => { setActiveTab('provision'); setErrors({}); }}
-              className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-1.5 text-xs font-semibold transition-all ${
-                activeTab === 'provision'
-                  ? 'bg-sky-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <UserPlus className="h-3.5 w-3.5" />
-              <span>Provision Demo User</span>
-            </button>
-          )}
         </div>
 
-        {/* Error Alert */}
         {errors.form && (
           <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300 flex items-start gap-2.5">
             <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
@@ -493,15 +366,38 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           </div>
         )}
 
-        {/* Success Notice */}
-        {showSuccessToast && (
-          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 flex items-start gap-2.5">
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
-            <span>{successMessage}</span>
+        {successMessage && (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs text-emerald-300 space-y-2">
+            <div className="flex items-start gap-2">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
+              <span>{successMessage}</span>
+            </div>
+            {createdCredentials && (
+              <div className="rounded-lg border border-emerald-800/60 bg-slate-950 p-2.5 font-mono text-[11px] text-slate-200 flex items-center justify-between gap-2">
+                <div className="truncate">
+                  <div>Email: {createdCredentials.email}</div>
+                  {createdCredentials.password && <div>Password: {createdCredentials.password}</div>}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const txt = createdCredentials.password
+                      ? `Mentor Login — Email: ${createdCredentials.email} | Password: ${createdCredentials.password}`
+                      : `Mentor Email: ${createdCredentials.email}`;
+                    navigator.clipboard.writeText(txt);
+                    setCopiedCreds(true);
+                    setTimeout(() => setCopiedCreds(false), 2000);
+                  }}
+                  className="inline-flex items-center gap-1 rounded bg-slate-800 hover:bg-slate-700 px-2 py-1 text-[10px] text-slate-200 shrink-0"
+                >
+                  {copiedCreds ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                  <span>{copiedCreds ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Schema Persistence Notice / Warning */}
         {warningMessage && (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300 flex items-start gap-2.5">
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
@@ -509,400 +405,283 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           </div>
         )}
 
-        {/* TAB 1: APPROVE REGISTERED USER (PRIMARY CLOUD WORKFLOW) */}
-        {activeTab === 'approve' && (
-          <div className="space-y-4">
-            {!showQuickRegister ? (
-              <form onSubmit={handleApproveSubmit} className="space-y-4 text-xs">
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-slate-200 font-semibold flex items-center gap-1.5">
-                      <UserIcon className="h-3.5 w-3.5 text-sky-400" />
-                      Select Registered User to Elevate:
-                    </label>
-                    <button
-                      type="button"
-                      onClick={loadCandidates}
-                      disabled={isLoadingCandidates}
-                      className="text-[11px] text-sky-400 hover:text-sky-300 flex items-center gap-1"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${isLoadingCandidates ? 'animate-spin' : ''}`} />
-                      Refresh List
-                    </button>
-                  </div>
-
-                  {candidates.length > 0 ? (
-                    <div className="space-y-2">
-                      <select
-                        value={selectedCandidateId}
-                        onChange={(e) => setSelectedCandidateId(e.target.value)}
-                        className="w-full rounded-xl border border-slate-750 bg-slate-950 px-3 py-2.5 text-xs text-white focus:border-sky-500 focus:outline-none transition-colors"
-                      >
-                        {candidates.map((cand) => (
-                          <option key={cand.id} value={cand.id}>
-                            {cand.fullName} — {cand.email} (Role: {cand.role}, Status: {cand.status})
-                          </option>
-                        ))}
-                      </select>
-
-                      {/* Preview Card of Selected Candidate */}
-                      {chosenCandidate && (
-                        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-white">{chosenCandidate.fullName}</span>
-                            <div className="flex items-center gap-1.5">
-                              <span className="rounded bg-sky-950 border border-sky-800 px-2 py-0.5 text-[10px] text-sky-300 font-mono">
-                                Role: {chosenCandidate.role}
-                              </span>
-                              <span className={`rounded border px-2 py-0.5 text-[10px] font-mono ${
-                                chosenCandidate.status === 'active'
-                                  ? 'bg-emerald-950 border-emerald-800 text-emerald-300'
-                                  : 'bg-amber-950 border-amber-800 text-amber-300'
-                              }`}>
-                                Status: {chosenCandidate.status}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="font-mono text-[11px] text-slate-400 space-y-0.5">
-                            <div>Email: <span className="text-slate-200">{chosenCandidate.email}</span></div>
-                            <div className="break-all">Profile UUID: <span className="text-cyan-400">{chosenCandidate.id}</span></div>
-                          </div>
-
-                          {/* Anti-Self-Promotion Protection Notice */}
-                          {isSelfPromotion && (
-                            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-300 flex items-center gap-2">
-                              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
-                              <span>
-                                Anti-self-promotion protection: As Super Admin ({currentAuthUser?.email}), you cannot promote your own account to Mentor.
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-center space-y-3">
-                      <p className="text-slate-400 text-xs">
-                        {isLoadingCandidates
-                          ? 'Loading registered profiles from Supabase...'
-                          : 'No unregistered candidate profiles found in public.profiles.'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => setShowQuickRegister(true)}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors"
-                      >
-                        <UserPlus className="h-3.5 w-3.5" />
-                        <span>Register & Approve New User</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {errors.candidate && (
-                    <p className="mt-1 text-[11px] text-rose-400">{errors.candidate}</p>
-                  )}
-                </div>
-
-                {/* Approval Mode Selector (Requirement 8) */}
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
-                  <span className="font-semibold text-slate-300 flex items-center gap-1.5 text-[11px]">
-                    <Shield className="h-3.5 w-3.5 text-sky-400" />
-                    Approval Type & Permission Policy (Requirement 8)
-                  </span>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setApprovalMode('status_only')}
-                      className={`text-left rounded-lg p-2.5 border transition-all text-xs ${
-                        approvalMode === 'status_only'
-                          ? 'border-sky-500 bg-sky-950/40 text-white shadow-sm'
-                          : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                        <CheckCircle2 className={`h-3.5 w-3.5 ${approvalMode === 'status_only' ? 'text-sky-400' : 'text-slate-500'}`} />
-                        Approve Status Only (Active)
-                      </div>
-                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
-                        Sets status to <strong className="text-emerald-400">active</strong>. Preserves existing role ({chosenCandidate?.role || 'trader'}). Never grants admin.
-                        {chosenCandidate?.status === 'active' && (
-                          <span className="block mt-0.5 text-emerald-400 font-medium">User is already active. To grant Mentor privileges, select "Approve & Elevate to Mentor".</span>
-                        )}
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setApprovalMode('mentor')}
-                      className={`text-left rounded-lg p-2.5 border transition-all text-xs ${
-                        approvalMode === 'mentor'
-                          ? 'border-amber-500 bg-amber-950/40 text-white shadow-sm'
-                          : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                        <UserCheck className={`h-3.5 w-3.5 ${approvalMode === 'mentor' ? 'text-amber-400' : 'text-slate-500'}`} />
-                        Approve & Elevate to Mentor
-                      </div>
-                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
-                        Sets status to <strong className="text-emerald-400">active</strong> and elevates role to <strong className="text-amber-400">mentor</strong>.
-                      </p>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Strategy Defaults (Shown when elevating to Mentor) */}
-                {approvalMode === 'mentor' && (
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
-                    <span className="font-semibold text-slate-300 flex items-center gap-1.5 text-[11px]">
-                      <Activity className="h-3.5 w-3.5 text-sky-400" />
-                      Strategy Profile & Subscription Settings
-                    </span>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Strategy Name</label>
-                        <input
-                          type="text"
-                          placeholder={chosenCandidate ? `${chosenCandidate.fullName}'s Alpha Copy` : 'e.g. Institutional FX'}
-                          value={strategyName}
-                          onChange={(e) => setStrategyName(e.target.value)}
-                          className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:border-sky-500 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Monthly Fee ($)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          value={monthlyFee}
-                          onChange={(e) => setMonthlyFee(parseFloat(e.target.value) || 0)}
-                          className="w-full rounded-lg border border-slate-750 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    {isCloudMode && (
-                      <p className="text-[11px] text-amber-300/90 leading-relaxed">
-                        Note: Mentor role and active status persist immediately in <code className="font-mono text-slate-200">public.profiles</code>. Strategy name and monthly pricing metadata are not yet stored in Supabase because <code className="font-mono text-slate-200">public.mentor_profiles</code> has not been provisioned.
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* Quick Register Switcher if users exist but admin wants to add a new one */}
-                {candidates.length > 0 && (
-                  <div className="text-right">
-                    <button
-                      type="button"
-                      onClick={() => setShowQuickRegister(true)}
-                      className="text-[11px] text-slate-400 hover:text-sky-400 transition-colors"
-                    >
-                      Need to add an unlisted candidate? Register directly &rarr;
-                    </button>
-                  </div>
-                )}
-
-                {/* Submit Action */}
-                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={handleCancel}
-                    disabled={isSubmitting}
-                    className="rounded-lg px-4 py-2 text-xs font-medium text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting || isSelfPromotion || !selectedCandidateId}
-                    className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50 ${
-                      approvalMode === 'status_only' ? 'bg-sky-600 hover:bg-sky-500' : 'bg-amber-600 hover:bg-amber-500'
-                    }`}
-                  >
-                    <UserCheck className="h-4 w-4" />
-                    <span>
-                      {isSubmitting
-                        ? (approvalMode === 'status_only' ? 'Approving User...' : 'Elevating Mentor...')
-                        : (approvalMode === 'status_only' ? 'Approve Registered User (Activate)' : 'Approve User as Mentor')}
-                    </span>
-                  </button>
-                </div>
-              </form>
-            ) : (
-              /* INLINE REGISTRATION & APPROVAL FORM */
-              <form onSubmit={handleQuickRegisterAndApprove} className="space-y-4 text-xs">
-                <div className="flex items-center justify-between pb-1">
-                  <span className="font-semibold text-white text-xs flex items-center gap-1.5">
-                    <UserPlus className="h-3.5 w-3.5 text-emerald-400" />
-                    Register New User in Supabase & Approve as Mentor
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowQuickRegister(false)}
-                    className="text-[11px] text-sky-400 hover:text-sky-300"
-                  >
-                    &larr; Back to Existing Users
-                  </button>
-                </div>
-
+        {activeTab === 'create' ? (
+          createdCredentials ? (
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setCreatedCredentials(null);
+                  setSuccessMessage('');
+                  setFullName('');
+                  setEmail('');
+                  setPassword('');
+                  setStrategyName('');
+                  setDescription('');
+                }}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2 text-xs font-medium text-slate-200"
+              >
+                Add Another Mentor
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-xs font-semibold text-white"
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleCreateMentorSubmit} className="space-y-3.5 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">Full Name *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Marcus Vance"
-                    value={regFullName}
-                    onChange={(e) => setRegFullName(e.target.value)}
-                    className="w-full rounded-xl border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-white focus:border-sky-500 focus:outline-none"
-                  />
-                  {errors.regFullName && <p className="mt-1 text-[11px] text-rose-400">{errors.regFullName}</p>}
+                  <div className="relative">
+                    <UserIcon className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Marcus Vance"
+                      value={fullName}
+                      onChange={(e) => handleFullNameChange(e.target.value)}
+                      className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                    />
+                  </div>
+                  {errors.fullName && <p className="mt-1 text-[11px] text-rose-400">{errors.fullName}</p>}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-slate-300 font-medium mb-1">Email Address *</label>
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">Email Address *</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
                     <input
                       type="email"
                       required
                       placeholder="mentor@firm.com"
-                      value={regEmail}
-                      onChange={(e) => setRegEmail(e.target.value)}
-                      className="w-full rounded-xl border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-white focus:border-sky-500 focus:outline-none"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
                     />
-                    {errors.regEmail && <p className="mt-1 text-[11px] text-rose-400">{errors.regEmail}</p>}
                   </div>
+                  {errors.email && <p className="mt-1 text-[11px] text-rose-400">{errors.email}</p>}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {isCloudMode ? (
                   <div>
-                    <label className="block text-slate-300 font-medium mb-1">Temporary Password *</label>
+                    <label className="block text-slate-300 font-medium mb-1">Initial Password *</label>
                     <input
                       type="password"
                       required
                       placeholder="Min 6 characters"
-                      value={regPassword}
-                      onChange={(e) => setRegPassword(e.target.value)}
-                      className="w-full rounded-xl border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-white focus:border-sky-500 focus:outline-none"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
                     />
-                    {errors.regPassword && <p className="mt-1 text-[11px] text-rose-400">{errors.regPassword}</p>}
+                    {errors.password && <p className="mt-1 text-[11px] text-rose-400">{errors.password}</p>}
                   </div>
-                </div>
+                ) : (
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">Username</label>
+                    <input
+                      type="text"
+                      placeholder="marcus_vance"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
+                    />
+                  </div>
+                )}
 
-                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setShowQuickRegister(false)}
-                    className="rounded-lg px-4 py-2 text-xs font-medium text-slate-400 hover:text-white"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
-                  >
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span>{isSubmitting ? 'Registering...' : 'Register & Approve as Mentor'}</span>
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
-        )}
-
-        {/* TAB 2: PROVISION DEMO USER (LOCAL SANDBOX ONLY) */}
-        {!isCloudMode && activeTab === 'provision' && (
-          <form onSubmit={handleProvisionSubmit} className="space-y-4 text-xs">
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">
-                Full Name <span className="text-rose-400">*</span>
-              </label>
-              <div className="relative">
-                <UserIcon className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Liam Sterling"
-                  value={fullName}
-                  onChange={(e) => handleFullNameChange(e.target.value)}
-                  className={`w-full rounded-lg border bg-slate-950 pl-9 pr-3 py-2 text-slate-200 placeholder-slate-500 transition-colors focus:outline-none ${
-                    errors.fullName ? 'border-rose-500 focus:border-rose-400' : 'border-slate-750 focus:border-sky-500'
-                  }`}
-                />
-              </div>
-              {errors.fullName && <p className="mt-1 text-[11px] text-rose-400">{errors.fullName}</p>}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Email Address <span className="text-rose-400">*</span>
-                </label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
-                  <input
-                    type="email"
-                    required
-                    placeholder="mentor@firm.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">Username</label>
-                <div className="relative">
-                  <AtSign className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
-                  <input
-                    type="text"
-                    placeholder="liam_sterling"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">Subscription Plan</label>
-                <div className="relative">
-                  <CreditCard className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500 pointer-events-none" />
-                  <select
-                    value={selectedPlanId}
-                    onChange={(e) => setSelectedPlanId(e.target.value)}
-                    className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
-                  >
-                    {subscriptionPlans.map((plan) => (
-                      <option key={plan.id} value={plan.id}>
-                        {plan.name} (${plan.price}/{plan.billingCycle})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-medium mb-1">Status</label>
-                <div className="relative">
-                  <Shield className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500 pointer-events-none" />
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">Account Status</label>
                   <select
                     value={accountStatus}
                     onChange={(e) => setAccountStatus(e.target.value as AccountStatus)}
-                    className="w-full rounded-lg border border-slate-750 bg-slate-950 pl-9 pr-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
                   >
-                    <option value="active">Active</option>
+                    <option value="active">Active (Immediate Access)</option>
+                    <option value="pending">Pending Approval</option>
                     <option value="suspended">Suspended</option>
                   </select>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">Strategy Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. XAUUSD London Breakout"
+                    value={strategyName}
+                    onChange={(e) => setStrategyName(e.target.value)}
+                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">Follower Capacity</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="1000"
+                    value={maxFollowers}
+                    onChange={(e) => setMaxFollowers(parseInt(e.target.value, 10) || 25)}
+                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-300 font-medium mb-1">Subscription Plan</label>
+                  <select
+                    value={selectedPlanId}
+                    onChange={(e) => setSelectedPlanId(e.target.value)}
+                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="">No Initial Plan</option>
+                    {subscriptionPlans
+                      .filter((p) => !p.isArchived)
+                      .map((plan) => (
+                        <option key={plan.id} value={plan.id}>
+                          {plan.name} (${plan.price}/{plan.billingCycle === 'yearly' ? 'yr' : 'mo'})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-300 font-medium mb-1">Billing</label>
+                  <select
+                    value={billingCycle}
+                    onChange={(e) => setBillingCycle(e.target.value as 'monthly' | 'yearly')}
+                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Annual</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">Strategy Bio / Description (Optional)</label>
+                <textarea
+                  rows={2}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional Gold / FX strategy notes shown to students"
+                  className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={isSubmitting}
+                  className="rounded-lg px-4 py-2 text-xs font-medium text-slate-400 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  <span>{isSubmitting ? 'Creating Mentor...' : 'Create Mentor Account'}</span>
+                </button>
+              </div>
+            </form>
+          )
+        ) : (
+          <form onSubmit={handleApproveSubmit} className="space-y-4 text-xs">
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-slate-200 font-semibold flex items-center gap-1.5">
+                  <UserIcon className="h-3.5 w-3.5 text-sky-400" />
+                  Select Registered User
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void loadCandidates()}
+                  disabled={isLoadingCandidates}
+                  className="text-[11px] text-sky-400 hover:text-sky-300 flex items-center gap-1"
+                >
+                  <RefreshCw className={`h-3 w-3 ${isLoadingCandidates ? 'animate-spin' : ''}`} />
+                  Refresh List
+                </button>
+              </div>
+
+              {candidates.length > 0 ? (
+                <select
+                  value={selectedCandidateId}
+                  onChange={(e) => setSelectedCandidateId(e.target.value)}
+                  className="w-full rounded-xl border border-slate-750 bg-slate-950 px-3 py-2.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                >
+                  {candidates.map((cand) => (
+                    <option key={cand.id} value={cand.id}>
+                      {cand.fullName} — {cand.email} (Role: {cand.role}, Status: {cand.status})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-center text-slate-400">
+                  {isLoadingCandidates ? 'Loading registered users...' : 'No unregistered candidate profiles found.'}
+                </div>
+              )}
+
+              {errors.candidate && <p className="mt-1 text-[11px] text-rose-400">{errors.candidate}</p>}
+            </div>
+
+            {isSelfPromotion && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-300 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                <span>You cannot approve or modify your own administrator account here.</span>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2">
+              <span className="font-semibold text-slate-300 flex items-center gap-1.5 text-[11px]">
+                <Shield className="h-3.5 w-3.5 text-sky-400" />
+                Approval Action
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setApprovalMode('mentor')}
+                  className={`text-left rounded-lg p-2.5 border text-xs ${
+                    approvalMode === 'mentor'
+                      ? 'border-amber-500 bg-amber-950/40 text-white'
+                      : 'border-slate-800 bg-slate-900/40 text-slate-400'
+                  }`}
+                >
+                  <div className="font-semibold text-slate-200">Approve &amp; Elevate to Mentor</div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Sets role to mentor and status to active.
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApprovalMode('status_only')}
+                  className={`text-left rounded-lg p-2.5 border text-xs ${
+                    approvalMode === 'status_only'
+                      ? 'border-sky-500 bg-sky-950/40 text-white'
+                      : 'border-slate-800 bg-slate-900/40 text-slate-400'
+                  }`}
+                >
+                  <div className="font-semibold text-slate-200">Approve Existing Role Only</div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Activates account while keeping current role ({chosenCandidate?.role || 'trader'}).
+                  </p>
+                </button>
               </div>
             </div>
 
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
               <button
                 type="button"
-                onClick={handleCancel}
+                onClick={onClose}
                 disabled={isSubmitting}
                 className="rounded-lg px-4 py-2 text-xs font-medium text-slate-400 hover:text-white"
               >
@@ -910,11 +689,11 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isSubmitting}
-                className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:opacity-50"
+                disabled={isSubmitting || isSelfPromotion || !selectedCandidateId}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
               >
-                <UserPlus className="h-3.5 w-3.5" />
-                <span>{isSubmitting ? 'Creating...' : 'Create Demo Mentor'}</span>
+                <UserCheck className="h-4 w-4" />
+                <span>{isSubmitting ? 'Processing...' : 'Confirm Approval'}</span>
               </button>
             </div>
           </form>

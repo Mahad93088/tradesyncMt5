@@ -3,10 +3,12 @@ import {
   Ticket,
   CheckCircle2,
   AlertTriangle,
-  Server
+  Server,
+  Mail,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { ensureValidSession } from '../../lib/sessionManager';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import {
@@ -23,12 +25,17 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
     mentorDirectory,
     parentChildLinks,
     mt5Accounts,
+    mentorInvitations,
+    refreshCloudData,
     linkToMentorByCode,
     unlinkTrader
   } = useApp();
 
   const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [requestNote, setRequestNote] = useState('');
+  const [joinMode, setJoinMode] = useState<'instant' | 'request'>('instant');
   const [submitting, setSubmitting] = useState(false);
+  const [respondingInviteId, setRespondingInviteId] = useState<string | null>(null);
   const [unlinkConfirmOpen, setUnlinkConfirmOpen] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
   const [selectedChildId, setSelectedChildId] = useState<string>('');
@@ -79,6 +86,53 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
 
     setSubmitting(true);
     setFeedback(null);
+
+    if (isCloudMode && joinMode === 'request') {
+      try {
+        const sessionCheck = await ensureValidSession();
+        const token = sessionCheck.session?.access_token;
+        if (!sessionCheck.valid || !token) {
+          setFeedback({ message: 'Session expired. Please sign in again.', isError: true });
+          setSubmitting(false);
+          return;
+        }
+        const res = await fetch('/api/v1/bridge/assignments/join', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            inviteCodeOrMentorId: inviteCodeInput.trim(),
+            childAccountId: childAccount.id,
+            requestApproval: true,
+            message: requestNote.trim() || undefined,
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          setFeedback({
+            message: json?.error || `HTTP ${res.status}: Failed to submit join request.`,
+            isError: true,
+          });
+          setSubmitting(false);
+          return;
+        }
+        await refreshCloudData();
+        setInviteCodeInput('');
+        setRequestNote('');
+        setFeedback({
+          message: json.message || 'Join request sent to mentor for approval.',
+          isError: false,
+        });
+      } catch (err: any) {
+        setFeedback({ message: err.message || 'Network error submitting request.', isError: true });
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     const res = await linkToMentorByCode(
       currentUser.id,
       childAccount.id,
@@ -92,6 +146,51 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
       setInviteCodeInput('');
     } else {
       setFeedback({ message: res.message, isError: true });
+    }
+  };
+
+  const handleRespondToInvite = async (invitationId: string, decision: 'accept' | 'reject') => {
+    if (!isCloudMode) return;
+    setRespondingInviteId(invitationId);
+    setFeedback(null);
+    try {
+      const sessionCheck = await ensureValidSession();
+      const token = sessionCheck.session?.access_token;
+      if (!sessionCheck.valid || !token) {
+        setFeedback({ message: 'Session expired. Please sign in again.', isError: true });
+        return;
+      }
+      const res = await fetch(`/api/v1/bridge/trader/invitations/${encodeURIComponent(invitationId)}/respond`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          decision,
+          childAccountId: childAccount?.id,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        setFeedback({
+          message: json?.error || `HTTP ${res.status}: Failed to ${decision} invitation.`,
+          isError: true,
+        });
+        return;
+      }
+      await refreshCloudData();
+      setFeedback({
+        message:
+          decision === 'accept'
+            ? 'Mentor invitation accepted and copy link activated.'
+            : 'Mentor invitation declined.',
+        isError: false,
+      });
+    } catch (err: any) {
+      setFeedback({ message: err.message || 'Network error responding to invitation.', isError: true });
+    } finally {
+      setRespondingInviteId(null);
     }
   };
 
@@ -148,6 +247,62 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-400" />
           )}
           <span>{feedback.message}</span>
+        </div>
+      )}
+
+      {isCloudMode && mentorInvitations.length > 0 && (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 space-y-3">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-cyan-300">
+            <Mail className="h-4 w-4" />
+            <span>Mentor Invitations &amp; Join Requests ({mentorInvitations.length})</span>
+          </div>
+          <div className="space-y-2">
+            {mentorInvitations.map((inv) => {
+              const isIncomingPending = inv.direction === 'mentor_invite' && inv.status === 'pending';
+              const busy = respondingInviteId === inv.id;
+              return (
+                <div
+                  key={inv.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-white">{inv.mentorName || 'Verified Mentor'}</span>
+                      <span className="rounded bg-slate-900 border border-slate-700 px-1.5 py-0.5 text-[10px] font-mono uppercase text-slate-300">
+                        {inv.direction === 'mentor_invite' ? 'Mentor Invite' : 'Your Join Request'}
+                      </span>
+                      <StatusBadge status={inv.status === 'accepted' ? 'active' : inv.status === 'rejected' || inv.status === 'cancelled' ? 'error' : 'pending'} size="sm" />
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {new Date(inv.createdAt).toLocaleString()}
+                      {inv.message ? ` — "${inv.message}"` : ''}
+                    </p>
+                  </div>
+
+                  {isIncomingPending && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void handleRespondToInvite(inv.id, 'accept')}
+                        className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                      >
+                        {busy ? 'Working...' : 'Accept & Link'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void handleRespondToInvite(inv.id, 'reject')}
+                        className="rounded-lg border border-rose-800 bg-rose-950/50 hover:bg-rose-900/50 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-rose-300 transition-colors"
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -220,11 +375,35 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
           </div>
         </div>
       ) : (
-        /* Connect By Invite Code Card */
+        /* Connect By Invite Code / Approval Request Card */
         <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-sm space-y-4 max-w-xl">
-          <div className="flex items-center gap-2">
-            <Ticket className="h-5 w-5 text-sky-400" />
-            <h3 className="text-base font-bold text-slate-100">Enter Mentor Invite Code</h3>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Ticket className="h-5 w-5 text-sky-400" />
+              <h3 className="text-base font-bold text-slate-100">Enter Mentor Invite Code</h3>
+            </div>
+            {isCloudMode && (
+              <div className="flex rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setJoinMode('instant')}
+                  className={`rounded px-2.5 py-1 font-medium transition-colors ${
+                    joinMode === 'instant' ? 'bg-slate-800 text-sky-300' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Link Immediately
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setJoinMode('request')}
+                  className={`rounded px-2.5 py-1 font-medium transition-colors ${
+                    joinMode === 'request' ? 'bg-slate-800 text-amber-300' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Request Approval
+                </button>
+              </div>
+            )}
           </div>
           <p className="text-xs text-slate-400">
             Paste the referral code provided by your mentor (for example:{' '}
@@ -248,9 +427,22 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
                 disabled={submitting || !inviteCodeInput.trim()}
                 className="rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white transition-colors shrink-0"
               >
-                {submitting ? 'Linking...' : 'Connect to Mentor'}
+                {submitting
+                  ? 'Working...'
+                  : isCloudMode && joinMode === 'request'
+                  ? 'Send Join Request'
+                  : 'Connect to Mentor'}
               </button>
             </div>
+            {isCloudMode && joinMode === 'request' && (
+              <input
+                type="text"
+                placeholder="Optional note to mentor (e.g. Demo account ready for Gold mirroring)"
+                value={requestNote}
+                onChange={(e) => setRequestNote(e.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+              />
+            )}
           </form>
         </div>
       )}

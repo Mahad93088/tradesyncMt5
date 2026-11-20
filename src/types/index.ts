@@ -40,6 +40,45 @@ export interface MT5Account {
   errorMessage?: string;
   lastStatusUpdate?: string;
   isStale?: boolean;
+  brokerId?: string | null;
+  tradingSymbol?: string;
+  symbolVerified?: boolean;
+}
+
+export interface BrokerSymbol {
+  id: string;
+  brokerId: string;
+  symbolCode: string;
+  assetClass: string;
+  baseCurrency: string;
+  quoteCurrency: string;
+  isActive: boolean;
+  isVerified: boolean;
+  verificationNotes?: string;
+}
+
+export interface Broker {
+  id: string;
+  name: string;
+  slug: string;
+  serverPrefixes: string[];
+  isActive: boolean;
+  notes?: string;
+  symbols: BrokerSymbol[];
+}
+
+export interface MentorTraderInvitation {
+  id: string;
+  mentorId: string;
+  mentorName?: string;
+  traderId?: string;
+  traderName?: string;
+  invitedEmail: string;
+  direction: 'mentor_invite' | 'student_request';
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled';
+  message?: string;
+  createdAt: string;
+  respondedAt?: string;
 }
 
 export interface MentorProfile {
@@ -49,6 +88,8 @@ export interface MentorProfile {
   strategyName: string;
   description: string;
   monthlyFee: number;
+  studentMonthlyFeeUsd?: number;
+  studentBillingPeriod?: 'monthly' | 'quarterly' | 'yearly' | 'free';
   totalFollowers: number;
   maxFollowers: number;
   winRate: number;
@@ -77,6 +118,8 @@ export interface SubscriptionPlan {
   maxLotSize: number;
   trialDays?: number;
   isActive?: boolean;
+  isArchived?: boolean;
+  archivedAt?: string;
   description?: string;
   features: string[];
   priorityExecution: boolean;
@@ -193,6 +236,9 @@ export interface ParentChildLink {
   totalProfitAvailable?: boolean;
   lastSyncAt: string;
   errorMessage?: string;
+  membershipStatus?: 'trial' | 'active' | 'past_due' | 'paused' | 'cancelled';
+  membershipPriceUsd?: number;
+  billingPeriod?: 'monthly' | 'quarterly' | 'yearly' | 'free';
 }
 
 export interface MentorDirectoryEntry {

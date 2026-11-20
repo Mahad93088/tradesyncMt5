@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck } from 'lucide-react';
-import { AuthProvider } from './contexts/AuthContext';
+import { ShieldCheck, RefreshCw, LogOut, AlertTriangle } from 'lucide-react';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { Navbar } from './components/common/Navbar';
 import { Sidebar } from './components/common/Sidebar';
 import { SimulationToolbar } from './components/common/SimulationToolbar';
 import { ArchitectureModal } from './components/common/ArchitectureModal';
 import { AuthModal } from './components/common/AuthModal';
+import { LoginPage } from './components/common/LoginPage';
 
 // Admin Views
 import { AdminDashboard } from './components/admin/AdminDashboard';
@@ -24,6 +25,7 @@ import { GlobalLogsView } from './components/admin/GlobalLogsView';
 import { AdminNotificationsView } from './components/admin/AdminNotificationsView';
 import { PlatformSettingsView } from './components/admin/PlatformSettingsView';
 import { AdminProfileView } from './components/admin/AdminProfileView';
+import { BrokerDirectoryView } from './components/admin/BrokerDirectoryView';
 
 // Mentor Views
 import { MentorDashboard } from './components/mentor/MentorDashboard';
@@ -65,7 +67,8 @@ const ADMIN_ONLY_TABS = new Set([
   'global-logs',
   'trade-stream',
   'platform-settings',
-  'admin-profile'
+  'admin-profile',
+  'brokers'
 ]);
 
 const AppContent: React.FC = () => {
@@ -90,6 +93,15 @@ const AppContent: React.FC = () => {
   const [isInviteTraderOpen, setIsInviteTraderOpen] = useState(false);
   const [isLotSettingsOpen, setIsLotSettingsOpen] = useState(false);
 
+  const {
+    isLoading,
+    isAuthenticated,
+    isConfigured,
+    isRecoveryMode,
+    demoSandboxActive,
+    signOut,
+  } = useAuth();
+
   // Active link for lot settings modal
   const traderLink = parentChildLinks.find((l) => l.traderId === currentUser.id);
 
@@ -107,6 +119,54 @@ const AppContent: React.FC = () => {
         ? 'TradeSync MT5 — Super Admin'
         : 'TradeSync MT5 - Automated Copy Trading Platform';
   }, [role]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#0B1220] text-slate-200 flex items-center justify-center p-6">
+        <div className="flex items-center gap-3 text-sm font-medium">
+          <RefreshCw className="h-4 w-4 animate-spin text-sky-400" />
+          <span>Verifying session...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Dedicated Auth Gate: unauthenticated Cloud users & Password Recovery land on LoginPage
+  if (isRecoveryMode || (isConfigured && !isAuthenticated && !demoSandboxActive)) {
+    return <LoginPage />;
+  }
+
+  // Pending / Suspended Account Access Gate
+  if (isAuthenticated && currentUser.status !== 'active') {
+    return (
+      <div className="min-h-screen bg-[#0B1220] text-slate-100 flex items-center justify-center p-6">
+        <div className="max-w-md w-full rounded-xl border border-slate-800 bg-slate-900 p-6 space-y-4 text-center">
+          <div className="h-11 w-11 rounded-lg bg-amber-950/60 border border-amber-800 text-amber-400 mx-auto flex items-center justify-center">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-base font-bold text-white">
+              {currentUser.status === 'pending' ? 'Account Pending Approval' : 'Account Access Suspended'}
+            </h2>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              {currentUser.status === 'pending'
+                ? 'Your TradeSync MT5 account is awaiting Super Administrator approval before workspace access is enabled.'
+                : 'Your account has been suspended by an administrator. Automated copy trading is paused.'}
+            </p>
+            <p className="text-[11px] font-mono text-slate-500 pt-1">{currentUser.email}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2 text-xs font-semibold text-white transition-colors"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const isRestrictedAdminRoute =
     role !== 'admin' &&
@@ -175,6 +235,7 @@ const AppContent: React.FC = () => {
                 {(currentTab === 'child-accounts' || currentTab === 'admin-child-accounts') && (
                   <MT5AccountsManagementView key="child" initialTab="child" />
                 )}
+                {currentTab === 'brokers' && <BrokerDirectoryView />}
                 {currentTab === 'plans' && <SubscriptionPlansView />}
                 {currentTab === 'subscriptions' && <SubscriptionsView />}
                 {currentTab === 'payments-revenue' && <PaymentsRevenueView />}

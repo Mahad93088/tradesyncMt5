@@ -42,6 +42,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     toggleUserStatus,
     archiveUser,
     editMentorProfile,
+    assignUserSubscription,
     renewOrChangeSubscription,
     refreshCloudData,
   } = useApp();
@@ -180,11 +181,13 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     setEditMaxFollowers(profile.maxFollowers);
   };
 
-  const handleSaveEdit = (e: React.FormEvent) => {
+  const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingMentor) return;
+    setCloudError(null);
+    setActionSuccess(null);
 
-    editMentorProfile(editingMentor.user.id, {
+    const res = await editMentorProfile(editingMentor.user.id, {
       fullName: editFullName,
       email: editEmail,
       phone: editPhone,
@@ -194,13 +197,31 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
       maxFollowers: editMaxFollowers,
     });
 
+    if (!res.success) {
+      setCloudError(res.message || 'Failed to update mentor profile.');
+      return;
+    }
+
+    setActionSuccess(res.message || `Updated mentor profile for ${editFullName}.`);
     setEditingMentor(null);
   };
 
-  const handleSaveSubscription = (e: React.FormEvent) => {
+  const handleSaveSubscription = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSubMentorId || !editPlanId) return;
-    renewOrChangeSubscription(editingSubMentorId, editPlanId, editBillingCycle);
+    setCloudError(null);
+    setActionSuccess(null);
+
+    const res = isCloudMode
+      ? await assignUserSubscription(editingSubMentorId, editPlanId, editBillingCycle)
+      : await renewOrChangeSubscription(editingSubMentorId, editPlanId, editBillingCycle);
+
+    if (!res.success) {
+      setCloudError(res.message || 'Failed to assign subscription plan.');
+      return;
+    }
+
+    setActionSuccess(res.message || 'Subscription plan updated for mentor.');
     setEditingSubMentorId(null);
   };
 
@@ -440,30 +461,26 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                             <Eye className="h-3.5 w-3.5" />
                           </button>
 
-                          {!isCloudMode && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleOpenEdit(mentor)}
-                                className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
-                                title="Edit mentor profile (Demo)"
-                              >
-                                <Edit2 className="h-3.5 w-3.5" />
-                              </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(mentor)}
+                            className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+                            title="Edit mentor profile"
+                          >
+                            <Edit2 className="h-3.5 w-3.5" />
+                          </button>
 
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingSubMentorId(mentor.id);
-                                  setEditPlanId(sub?.planId || subscriptionPlans[0]?.id || '');
-                                  setEditBillingCycle(sub?.billingCycle || 'monthly');
-                                }}
-                                className="rounded-md px-2.5 py-1 text-[11px] font-medium border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 whitespace-nowrap transition-colors"
-                              >
-                                Plan
-                              </button>
-                            </>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingSubMentorId(mentor.id);
+                              setEditPlanId(sub?.planId || subscriptionPlans[0]?.id || '');
+                              setEditBillingCycle(sub?.billingCycle || 'monthly');
+                            }}
+                            className="rounded-md px-2.5 py-1 text-[11px] font-medium border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 whitespace-nowrap transition-colors"
+                          >
+                            Plan
+                          </button>
 
                           <button
                             type="button"
@@ -523,7 +540,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
         const profile = mentorProfiles.find((p) => p.userId === detailsMentor.id);
         const parentAccount = mt5Accounts.find((a) => a.userId === detailsMentor.id && a.accountRole === 'parent');
         const followers = parentChildLinks.filter((l) => l.mentorId === detailsMentor.id);
-        const sub = subscriptions.find((s) => s.mentorId === detailsMentor.id);
+        const sub = subscriptions.find((s) => s.mentorId === detailsMentor.id || s.userId === detailsMentor.id);
         const mentorAuditHistory = auditLogs.filter(
           (log) => log.actorId === detailsMentor.id || log.targetId === detailsMentor.id
         ).slice(0, 5);

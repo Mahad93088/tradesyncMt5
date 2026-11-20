@@ -235,14 +235,15 @@ export const CopiedTradesTable: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
-                  <th className="px-5 py-3.5">Child Ticket</th>
-                  <th className="px-4 py-3.5">Parent Ticket</th>
+                  <th className="px-5 py-3.5">Copied Order</th>
+                  <th className="px-4 py-3.5">Source Trade</th>
                   <th className="px-4 py-3.5">Symbol &amp; Type</th>
-                  <th className="px-4 py-3.5">Lots (C / P)</th>
+                  <th className="px-4 py-3.5">Req / Exec Vol</th>
+                  <th className="px-4 py-3.5">Fill / Close</th>
                   <th className="px-4 py-3.5">Latency</th>
                   <th className="px-4 py-3.5">P&amp;L</th>
                   <th className="px-4 py-3.5">Status</th>
-                  <th className="px-5 py-3.5 text-right">Time</th>
+                  <th className="px-5 py-3.5 text-right">Timestamps</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-sans">
@@ -287,7 +288,15 @@ export const CopiedTradesTable: React.FC = () => {
                           </div>
                         </td>
                         <td className="px-4 py-4 font-mono text-white">
-                          {map.childLots.toFixed(2)} <span className="text-slate-500">/ {map.parentLots.toFixed(2)}L</span>
+                          <span>{map.parentLots.toFixed(2)}L</span>
+                          <span className="text-slate-500"> → </span>
+                          <span className="text-cyan-300 font-bold">{map.childLots.toFixed(2)}L</span>
+                        </td>
+                        <td className="px-4 py-4 font-mono text-[11px] text-slate-300">
+                          <div>{matchedTrade && matchedTrade.openPrice ? matchedTrade.openPrice : '--'}</div>
+                          <div className="text-slate-500">
+                            → {map.closePrice || matchedTrade?.closePrice || '--'}
+                          </div>
                         </td>
                         <td className="px-4 py-4 font-mono text-slate-300">
                           {map.latencyMs}ms
@@ -314,14 +323,15 @@ export const CopiedTradesTable: React.FC = () => {
                           )}
                         </td>
                         <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
-                          {formatTime(map.openTime)}
+                          <div>{formatTime(map.openTime)}</div>
+                          {map.closeTime && <div className="text-slate-500">→ {formatTime(map.closeTime)}</div>}
                         </td>
                       </tr>
                     );
                   })
                 ) : (
                   <tr>
-                    <td colSpan={8} className="px-5 py-10 text-center text-xs text-slate-500">
+                    <td colSpan={9} className="px-5 py-10 text-center text-xs text-slate-500">
                       No copied trade mappings recorded for your account yet.
                     </td>
                   </tr>
@@ -332,22 +342,25 @@ export const CopiedTradesTable: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
-                  <th className="px-5 py-3.5">Child Ticket</th>
+                  <th className="px-5 py-3.5">Copied Order / Source</th>
                   <th className="px-4 py-3.5">Symbol &amp; Type</th>
-                  <th className="px-4 py-3.5">Lots</th>
-                  <th className="px-4 py-3.5">Open / Close</th>
+                  <th className="px-4 py-3.5">Req / Exec Vol</th>
+                  <th className="px-4 py-3.5">Fill / Close</th>
                   <th className="px-4 py-3.5">SL / TP</th>
                   <th className="px-4 py-3.5">Comm / Swap / Pips</th>
                   <th className="px-4 py-3.5">Profit ($)</th>
                   <th className="px-4 py-3.5">Status</th>
-                  <th className="px-5 py-3.5 text-right">Time</th>
+                  <th className="px-5 py-3.5 text-right">Timestamps</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-sans">
                 {filteredTrades.length > 0 ? (
                   filteredTrades.map((trade) => {
-                    const mapping = tradeMappings.find((m) => m.childTradeTicket === trade.ticket);
+                    const mapping = tradeMappings.find(
+                      (m) => String(m.childTradeTicket) === String(trade.ticket)
+                    );
                     const pnl = formatTradeProfitDisplay(trade, isCloudMode);
+                    const reqVol = trade.requestedVolume ?? mapping?.parentLots;
 
                     return (
                       <tr key={trade.id} className="hover:bg-slate-800/40 transition-colors">
@@ -356,9 +369,10 @@ export const CopiedTradesTable: React.FC = () => {
                             <span className="font-mono font-bold text-white text-xs">
                               #{trade.ticket}
                             </span>
-                            {mapping && (
+                            {(mapping || trade.parentTicket) && (
                               <div className="text-[10px] text-slate-400 font-mono">
-                                Parent: #{mapping.parentTradeTicket} ({mapping.latencyMs}ms)
+                                Source: #{mapping?.parentTradeTicket || trade.parentTicket}
+                                {mapping ? ` (${mapping.latencyMs}ms)` : ''}
                               </div>
                             )}
                           </div>
@@ -379,8 +393,11 @@ export const CopiedTradesTable: React.FC = () => {
                           </div>
                         </td>
 
-                        <td className="px-4 py-4 font-mono font-bold text-white">
-                          {trade.lots.toFixed(2)}
+                        <td className="px-4 py-4 font-mono text-white">
+                          {reqVol != null && (
+                            <span className="text-slate-400">{Number(reqVol).toFixed(2)}L → </span>
+                          )}
+                          <span className="font-bold">{trade.lots.toFixed(2)}L</span>
                         </td>
 
                         <td className="px-4 py-4 font-mono text-[11px] text-slate-300">
@@ -419,15 +436,16 @@ export const CopiedTradesTable: React.FC = () => {
 
                         <td className="px-4 py-4">
                           <StatusBadge status={trade.status} size="sm" />
-                          {trade.executionStatus && (
-                            <div className="text-[10px] font-mono text-slate-400 mt-0.5">
-                              {trade.executionStatus}
+                          {(trade.executionStatus || trade.rejectionReason) && (
+                            <div className="text-[10px] font-mono text-slate-400 mt-0.5 max-w-[160px] truncate" title={trade.rejectionReason || trade.executionStatus}>
+                              {trade.rejectionReason || trade.executionStatus}
                             </div>
                           )}
                         </td>
 
                         <td className="px-5 py-4 text-right font-mono text-[11px] text-slate-400">
-                          {formatTime(trade.openTime)}
+                          <div>{formatTime(trade.openTime)}</div>
+                          {trade.closeTime && <div className="text-slate-500">→ {formatTime(trade.closeTime)}</div>}
                         </td>
                       </tr>
                     );

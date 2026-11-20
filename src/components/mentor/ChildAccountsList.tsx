@@ -10,9 +10,13 @@ import {
   Layers,
   Plus,
   Trash2,
+  UserCheck,
+  XCircle,
+  DollarSign,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { ensureValidSession } from '../../lib/sessionManager';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import {
@@ -29,6 +33,8 @@ export const ChildAccountsList: React.FC = () => {
     mt5Accounts,
     followerAccounts,
     mentorGroups,
+    mentorInvitations,
+    refreshCloudData,
     toggleLinkStatus,
     unlinkTrader,
     createMentorGroup,
@@ -47,10 +53,19 @@ export const ChildAccountsList: React.FC = () => {
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const [decidingInvId, setDecidingInvId] = useState<string | null>(null);
 
-  // Filter links & groups strictly for this mentor
+  const [editingMembershipId, setEditingMembershipId] = useState<string | null>(null);
+  const [memStatus, setMemStatus] = useState<'trial' | 'active' | 'past_due' | 'paused' | 'cancelled'>('active');
+  const [memPrice, setMemPrice] = useState('0');
+  const [memPeriod, setMemPeriod] = useState<'monthly' | 'quarterly' | 'yearly' | 'free'>('monthly');
+  const [savingMembership, setSavingMembership] = useState(false);
+
+  // Filter links, invitations & groups strictly for this mentor
   const mentorLinks = parentChildLinks.filter((l) => l.mentorId === currentUser.id);
   const myGroups = mentorGroups.filter((g) => g.mentorId === currentUser.id);
+  const myInvitations = mentorInvitations.filter((inv) => inv.mentorId === currentUser.id);
+  const pendingInvitations = myInvitations.filter((inv) => inv.status === 'pending');
 
   const resolveChildAccount = (childAccountId: string) =>
     followerAccounts.find((a) => a.id === childAccountId) ||
@@ -131,18 +146,121 @@ export const ChildAccountsList: React.FC = () => {
     }
   };
 
+  const handleDecideInvitation = async (invitationId: string, decision: 'approve' | 'reject' | 'cancel') => {
+    if (!isCloudMode) return;
+    setDecidingInvId(invitationId);
+    setActionFeedback(null);
+    try {
+      const sessionCheck = await ensureValidSession();
+      const token = sessionCheck.session?.access_token;
+      if (!sessionCheck.valid || !token) {
+        setActionFeedback({ message: 'Session expired. Please sign in again.', isError: true });
+        return;
+      }
+      const res = await fetch(`/api/v1/bridge/mentor/requests/${encodeURIComponent(invitationId)}/decide`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ decision }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        setActionFeedback({
+          message: json?.error || `HTTP ${res.status}: Failed to ${decision} request.`,
+          isError: true,
+        });
+        return;
+      }
+      await refreshCloudData();
+      setActionFeedback({
+        message:
+          decision === 'approve'
+            ? 'Student join request approved and copy assignment activated.'
+            : decision === 'cancel'
+            ? 'Pending invitation cancelled.'
+            : 'Student join request rejected.',
+        isError: false,
+      });
+    } catch (err: any) {
+      setActionFeedback({ message: err.message || 'Network error processing request.', isError: true });
+    } finally {
+      setDecidingInvId(null);
+    }
+  };
+
+  const openMembershipEditor = (link: (typeof mentorLinks)[number]) => {
+    if (editingMembershipId === link.id) {
+      setEditingMembershipId(null);
+      return;
+    }
+    setEditingMembershipId(link.id);
+    setMemStatus(link.membershipStatus || 'active');
+    setMemPrice(String(link.membershipPriceUsd ?? 0));
+    setMemPeriod(link.billingPeriod || 'monthly');
+  };
+
+  const handleSaveMembership = async (assignmentId: string) => {
+    if (!isCloudMode) {
+      setActionFeedback({
+        message: 'Membership billing updated for local preview. Connect Supabase Cloud for persistent billing.',
+        isError: false,
+      });
+      setEditingMembershipId(null);
+      return;
+    }
+    setSavingMembership(true);
+    setActionFeedback(null);
+    try {
+      const sessionCheck = await ensureValidSession();
+      const token = sessionCheck.session?.access_token;
+      if (!sessionCheck.valid || !token) {
+        setActionFeedback({ message: 'Session expired. Please sign in again.', isError: true });
+        return;
+      }
+      const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(assignmentId)}/membership`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          membershipStatus: memStatus,
+          membershipPriceUsd: Math.max(0, Number(memPrice) || 0),
+          billingPeriod: memPeriod,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        setActionFeedback({
+          message: json?.error || `HTTP ${res.status}: Failed to update membership billing.`,
+          isError: true,
+        });
+        return;
+      }
+      await refreshCloudData();
+      setEditingMembershipId(null);
+      setActionFeedback({ message: 'Student membership billing updated.', isError: false });
+    } catch (err: any) {
+      setActionFeedback({ message: err.message || 'Network error updating membership.', isError: true });
+    } finally {
+      setSavingMembership(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             Connected Students &amp; Child Terminals
-            <span className="rounded-full bg-cyan-950 border border-cyan-800 px-2 py-0.5 text-xs text-cyan-400 font-mono">
+            <span className="rounded bg-cyan-950 border border-cyan-800 px-2 py-0.5 text-xs text-cyan-400 font-mono">
               {mentorLinks.length} Total Traders
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Organize followers into strategy cohorts, monitor child terminal health, and pause or unlink accounts.
+            Approve join requests, organize followers into strategy cohorts, manage student billing, and monitor terminal health.
           </p>
         </div>
       </div>
@@ -164,11 +282,90 @@ export const ChildAccountsList: React.FC = () => {
             <span>{actionFeedback.message}</span>
           </div>
           <button
+            type="button"
             onClick={() => setActionFeedback(null)}
             className="text-[11px] text-slate-400 hover:text-white"
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {/* Pending Join Requests & Sent Invitations */}
+      {isCloudMode && pendingInvitations.length > 0 && (
+        <div className="rounded-2xl border border-amber-800/60 bg-amber-950/20 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-amber-300 flex items-center gap-2">
+              <UserCheck className="h-4 w-4" />
+              Pending Student Requests &amp; Invitations ({pendingInvitations.length})
+            </h3>
+          </div>
+          <div className="space-y-2">
+            {pendingInvitations.map((inv) => {
+              const isJoinRequest = inv.direction === 'student_request';
+              const busy = decidingInvId === inv.id;
+              return (
+                <div
+                  key={inv.id}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/80 p-3 text-xs"
+                >
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-white">
+                        {inv.traderName || inv.invitedEmail}
+                      </span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-mono font-semibold border ${
+                          isJoinRequest
+                            ? 'bg-amber-950/70 border-amber-800 text-amber-300'
+                            : 'bg-cyan-950/70 border-cyan-800 text-cyan-300'
+                        }`}
+                      >
+                        {isJoinRequest ? 'Join Approval Request' : 'Mentor Invite Sent'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {inv.invitedEmail} • {new Date(inv.createdAt).toLocaleString()}
+                      {inv.message ? ` — "${inv.message}"` : ''}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isJoinRequest ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void handleDecideInvitation(inv.id, 'approve')}
+                          className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                        >
+                          {busy ? 'Working...' : 'Approve'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void handleDecideInvitation(inv.id, 'reject')}
+                          className="rounded-lg border border-rose-800 bg-rose-950/50 hover:bg-rose-900/50 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-rose-300 transition-colors"
+                        >
+                          Reject
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void handleDecideInvitation(inv.id, 'cancel')}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition-colors"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>{busy ? 'Cancelling...' : 'Cancel Invite'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -348,6 +545,7 @@ export const ChildAccountsList: React.FC = () => {
                       <p className="font-mono font-bold text-white">#{childAccount.accountNumber}</p>
                       <span className="text-[10px] text-slate-400">
                         {childAccount.broker} • {childAccount.server}
+                        {childAccount.tradingSymbol ? ` • ${childAccount.tradingSymbol}` : ''}
                       </span>
                     </div>
                     <div>
@@ -424,6 +622,85 @@ export const ChildAccountsList: React.FC = () => {
                       {profitInfo.text}
                     </span>
                   </div>
+                </div>
+
+                {/* Per-Student Membership Billing Row */}
+                <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3 text-[11px] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-mono">
+                      <DollarSign className="h-3.5 w-3.5 text-emerald-400" />
+                      <span className="text-slate-300">
+                        Student Fee:{' '}
+                        <strong className="text-white">
+                          ${Number(link.membershipPriceUsd ?? 0).toFixed(2)}
+                        </strong>
+                        /{link.billingPeriod || 'monthly'}
+                      </span>
+                      <span className="rounded bg-slate-900 border border-slate-700 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">
+                        {link.membershipStatus || 'active'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => openMembershipEditor(link)}
+                      className="text-cyan-400 hover:text-cyan-300 font-semibold"
+                    >
+                      {editingMembershipId === link.id ? 'Close' : 'Edit Billing'}
+                    </button>
+                  </div>
+
+                  {editingMembershipId === link.id && (
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80">
+                      <div>
+                        <label className="block text-[10px] text-slate-500 mb-0.5">Status</label>
+                        <select
+                          value={memStatus}
+                          onChange={(e) => setMemStatus(e.target.value as any)}
+                          className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-white focus:border-cyan-500 focus:outline-none"
+                        >
+                          <option value="active">Active</option>
+                          <option value="trial">Trial</option>
+                          <option value="past_due">Past Due</option>
+                          <option value="paused">Paused</option>
+                          <option value="cancelled">Cancelled</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-500 mb-0.5">Fee ($ USD)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="1"
+                          value={memPrice}
+                          onChange={(e) => setMemPrice(e.target.value)}
+                          className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-white focus:border-cyan-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-500 mb-0.5">Period</label>
+                        <select
+                          value={memPeriod}
+                          onChange={(e) => setMemPeriod(e.target.value as any)}
+                          className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-white focus:border-cyan-500 focus:outline-none"
+                        >
+                          <option value="monthly">Monthly</option>
+                          <option value="quarterly">Quarterly</option>
+                          <option value="yearly">Yearly</option>
+                          <option value="free">Free</option>
+                        </select>
+                      </div>
+                      <div className="col-span-3 flex justify-end pt-1">
+                        <button
+                          type="button"
+                          disabled={savingMembership}
+                          onClick={() => void handleSaveMembership(link.id)}
+                          className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1 text-[11px] font-semibold text-white"
+                        >
+                          {savingMembership ? 'Saving...' : 'Save Billing'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             );

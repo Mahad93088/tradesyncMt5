@@ -5,12 +5,11 @@ import {
   CheckCircle2,
   AlertCircle,
   Shield,
-  CreditCard,
   AtSign,
   Mail,
   User as UserIcon,
   Phone,
-  Link
+  Link,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AccountStatus, User } from '../../types';
@@ -26,7 +25,7 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
   isOpen,
   onClose,
   trader,
-  onSuccess
+  onSuccess,
 }) => {
   const { users, parentChildLinks, editTrader } = useApp();
 
@@ -58,7 +57,6 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
     }
   }, [isOpen, trader, parentChildLinks]);
 
-  // Handle escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
@@ -74,52 +72,47 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
 
-    if (!fullName.trim()) {
-      newErrors.fullName = 'Full Name is required.';
-    } else if (fullName.trim().length < 2) {
+    if (!fullName.trim() || fullName.trim().length < 2) {
       newErrors.fullName = 'Full Name must be at least 2 characters.';
     }
-
-    if (!email.trim()) {
-      newErrors.email = 'Email address is required.';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       newErrors.email = 'Please provide a valid email address.';
-    }
-
-    if (!username.trim()) {
-      newErrors.username = 'Username is required.';
     }
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
     if (!validate()) return;
 
     setIsSubmitting(true);
+    setErrors({});
 
     try {
-      editTrader(trader.id, {
+      const res = await editTrader(trader.id, {
         fullName: fullName.trim(),
         email: email.trim(),
-        username: username.trim().replace(/^@/, ''),
+        username: username.trim().replace(/^@/, '') || undefined,
         phone: phone.trim() || undefined,
         mentorId: assignedMentorId,
-        status: accountStatus
+        status: accountStatus,
       });
 
-      setShowSuccessToast(true);
+      if (!res.success) {
+        setErrors({ form: res.message || 'Failed to update trader account.' });
+        setIsSubmitting(false);
+        return;
+      }
 
+      setShowSuccessToast(true);
       setTimeout(() => {
         setIsSubmitting(false);
         onClose();
         if (onSuccess) onSuccess();
-      }, 500);
+      }, 400);
     } catch (err: any) {
-      console.error('Failed to update trader account:', err);
       setErrors({ form: err.message || 'Failed to update trader account.' });
       setIsSubmitting(false);
     }
@@ -138,12 +131,8 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
               <Edit2 className="h-4 w-4" />
             </div>
             <div>
-              <h2 className="text-base font-semibold text-slate-100">
-                Edit Trader Account
-              </h2>
-              <p className="text-xs text-slate-400">
-                Update account profile, assigned mentor, and status.
-              </p>
+              <h2 className="text-base font-semibold text-slate-100">Edit Trader Account</h2>
+              <p className="text-xs text-slate-400">Update account profile, assigned mentor, and status.</p>
             </div>
           </div>
           <button
@@ -183,9 +172,7 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
                 onChange={(e) => setFullName(e.target.value)}
                 className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
               />
-              {errors.fullName && (
-                <p className="mt-1 text-[11px] text-rose-400">{errors.fullName}</p>
-              )}
+              {errors.fullName && <p className="mt-1 text-[11px] text-rose-400">{errors.fullName}</p>}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -201,9 +188,7 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
                   onChange={(e) => setEmail(e.target.value)}
                   className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
                 />
-                {errors.email && (
-                  <p className="mt-1 text-[11px] text-rose-400">{errors.email}</p>
-                )}
+                {errors.email && <p className="mt-1 text-[11px] text-rose-400">{errors.email}</p>}
               </div>
 
               <div>
@@ -237,7 +222,7 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
                   <option value="">Unassigned (None)</option>
                   {mentors.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.fullName} (@{m.username || 'mentor'})
+                      {m.fullName} ({m.email})
                     </option>
                   ))}
                 </select>
@@ -254,6 +239,7 @@ export const EditTraderModal: React.FC<EditTraderModalProps> = ({
                   className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
                 >
                   <option value="active">Active</option>
+                  <option value="pending">Pending</option>
                   <option value="suspended">Suspended</option>
                 </select>
               </div>

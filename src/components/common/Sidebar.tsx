@@ -17,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   Bell,
+  Globe,
   X
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
@@ -161,6 +162,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   >
                     <Server className="h-4 w-4 shrink-0" />
                     <span className="truncate">MT5 Account Management</span>
+                  </button>
+                  <button
+                    onClick={() => handleNavClick('brokers')}
+                    className={adminNavClass(currentTab === 'brokers')}
+                  >
+                    <Globe className="h-4 w-4 shrink-0" />
+                    <span className="truncate">Brokers &amp; Gold Symbols</span>
                   </button>
                 </div>
               </div>

@@ -15,9 +15,11 @@ import {
   Power,
   Download,
   Printer,
+  Mail,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { ensureValidSession } from '../../lib/sessionManager';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -53,6 +55,8 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     subscriptions,
     trades,
     tradeMappings,
+    mentorInvitations,
+    refreshCloudData,
     toggleLinkStatus,
     unlinkTrader,
     disconnectMT5Account,
@@ -62,8 +66,13 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
 
   const [unlinkConfirmOpen, setUnlinkConfirmOpen] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [respondingInviteId, setRespondingInviteId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; isError: boolean } | null>(null);
   const [selectedChildId, setSelectedChildId] = useState<string>('');
+
+  const pendingMentorInvites = mentorInvitations.filter(
+    (inv) => inv.direction === 'mentor_invite' && inv.status === 'pending'
+  );
 
   // Support multiple child MT5 accounts belonging to this trader
   const childAccounts = mt5Accounts.filter(
@@ -164,6 +173,51 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
       });
     } else if (res.message) {
       setFeedback({ message: res.message, isError: false });
+    }
+  };
+
+  const handleRespondToInvite = async (invitationId: string, decision: 'accept' | 'reject') => {
+    if (!isCloudMode) return;
+    setRespondingInviteId(invitationId);
+    setFeedback(null);
+    try {
+      const sessionCheck = await ensureValidSession();
+      const token = sessionCheck.session?.access_token;
+      if (!sessionCheck.valid || !token) {
+        setFeedback({ message: 'Session expired. Please sign in again.', isError: true });
+        return;
+      }
+      const res = await fetch(`/api/v1/bridge/trader/invitations/${encodeURIComponent(invitationId)}/respond`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          decision,
+          childAccountId: childAccount?.id,
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        setFeedback({
+          message: json?.error || `HTTP ${res.status}: Failed to ${decision} invitation.`,
+          isError: true,
+        });
+        return;
+      }
+      await refreshCloudData();
+      setFeedback({
+        message:
+          decision === 'accept'
+            ? 'Mentor invitation accepted and trade copying activated.'
+            : 'Mentor invitation declined.',
+        isError: false,
+      });
+    } catch (err: any) {
+      setFeedback({ message: err.message || 'Network error responding to invitation.', isError: true });
+    } finally {
+      setRespondingInviteId(null);
     }
   };
 
@@ -339,6 +393,49 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         </div>
       )}
 
+      {isCloudMode && pendingMentorInvites.length > 0 && (
+        <div className="rounded-xl border border-cyan-800/60 bg-cyan-950/20 p-4 space-y-2.5 text-xs">
+          <div className="flex items-center gap-2 font-bold uppercase tracking-wider text-cyan-300">
+            <Mail className="h-4 w-4" />
+            <span>Pending Mentor Invitations ({pendingMentorInvites.length})</span>
+          </div>
+          {pendingMentorInvites.map((inv) => {
+            const busy = respondingInviteId === inv.id;
+            return (
+              <div
+                key={inv.id}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/80 p-3"
+              >
+                <div>
+                  <span className="font-semibold text-white">{inv.mentorName || 'Verified Mentor'}</span>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    {inv.message || 'Invited you to link your Child MT5 Demo account.'}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleRespondToInvite(inv.id, 'accept')}
+                    className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-white transition-colors"
+                  >
+                    {busy ? 'Working...' : 'Accept & Link'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleRespondToInvite(inv.id, 'reject')}
+                    className="rounded-lg border border-rose-800 bg-rose-950/50 hover:bg-rose-900/50 disabled:opacity-50 px-3 py-1.5 text-[11px] font-semibold text-rose-300 transition-colors"
+                  >
+                    Decline
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatsCard
@@ -441,15 +538,19 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                   <span className="text-[10px] text-slate-400 font-sans">{childAccount.broker}</span>
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-500 uppercase font-sans">Broker Server</span>
-                  <p className="font-bold text-slate-200">{childAccount.server}</p>
+                  <span className="text-[10px] text-slate-500 uppercase font-sans">Broker Server &amp; Symbol</span>
+                  <p className="font-bold text-slate-200 truncate">
+                    {childAccount.server} • <span className="text-amber-300">{childAccount.tradingSymbol || 'XAUUSD'}</span>
+                  </p>
                   <span
                     className={`text-[10px] font-sans ${
                       childAccount.isStale ? 'text-amber-400' : 'text-emerald-400'
                     }`}
                   >
                     {isCloudMode
-                      ? `Heartbeat: ${formatHeartbeatAge(childAccount.lastHeartbeat)}`
+                      ? `${formatHeartbeatAge(childAccount.lastHeartbeat)} • ${
+                          childAccount.symbolVerified ? 'Verified' : 'Unverified Baseline'
+                        }`
                       : `${childAccount.pingMs}ms Latency`}
                   </span>
                 </div>
@@ -779,7 +880,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
           </span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs font-mono">
           <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
             <span className="text-[10px] text-slate-500 uppercase font-sans">Realized P&amp;L</span>
             <p
@@ -793,7 +894,24 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
             >
               {reporting.realizedPnlAvailable
                 ? `${reporting.realizedPnlUSD >= 0 ? '+' : '-'}$${Math.abs(reporting.realizedPnlUSD).toFixed(2)}`
-                : 'Awaiting closed deal data'}
+                : 'Awaiting EA sync'}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+            <span className="text-[10px] text-slate-500 uppercase font-sans">Floating / Open P&amp;L</span>
+            <p
+              className={`font-bold text-sm mt-0.5 ${
+                !reporting.floatingPnlAvailable
+                  ? 'text-slate-400 font-normal text-xs'
+                  : reporting.floatingPnlUSD >= 0
+                  ? 'text-emerald-400'
+                  : 'text-rose-400'
+              }`}
+            >
+              {reporting.floatingPnlAvailable
+                ? `${reporting.floatingPnlUSD >= 0 ? '+' : '-'}$${Math.abs(reporting.floatingPnlUSD).toFixed(2)}`
+                : 'Awaiting EA sync'}
             </p>
           </div>
 
