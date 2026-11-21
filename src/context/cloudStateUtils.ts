@@ -35,6 +35,13 @@ export function mapServerAccountToMT5Account(acc: any): MT5Account {
     brokerId: acc.broker_id || null,
     tradingSymbol: acc.trading_symbol || undefined,
     symbolVerified: Boolean(acc.symbol_verified),
+    verifiedBalance: acc.verified_balance != null ? Number(acc.verified_balance) : null,
+    verifiedEquity: acc.verified_equity != null ? Number(acc.verified_equity) : null,
+    balanceVerifiedAt: acc.balance_verified_at || null,
+    verifiedSymbolSpecs:
+      acc.verified_symbol_specs && typeof acc.verified_symbol_specs === 'object'
+        ? acc.verified_symbol_specs
+        : undefined,
   };
 }
 
@@ -146,7 +153,12 @@ export function mapAssignmentsToLinks(
       parentAccountId: parentAccId,
       childAccountId: childAccId,
       groupId: a.group_id || null,
-      status: a.status === 'active' ? 'active' : 'paused',
+      status:
+        a.status === 'active'
+          ? 'active'
+          : a.status === 'suspended'
+          ? 'suspended'
+          : 'paused',
       lotSettings: {
         mode:
           isFixed || isMult || lotMode === 'equity_ratio' || lotMode === 'risk_percent'
@@ -165,7 +177,7 @@ export function mapAssignmentsToLinks(
         maxLotCap: Number(a.max_lot_cap ?? 50),
         minLotClamp: Number(a.min_lot_clamp ?? 0.01),
         maxDrawdownProtectionPercent: Number(a.max_drawdown_percent ?? 20),
-        copyPendingOrders: a.copy_pending_orders !== undefined ? Boolean(a.copy_pending_orders) : true,
+        copyPendingOrders: a.copy_pending_orders !== undefined ? Boolean(a.copy_pending_orders) : false,
         syncSlTp: a.sync_sl_tp !== undefined ? Boolean(a.sync_sl_tp) : true,
         slippageMaxPips: Number(a.slippage_max_pips ?? 30),
         symbolPrefix: a.symbol_prefix ? String(a.symbol_prefix) : '',
@@ -179,6 +191,15 @@ export function mapAssignmentsToLinks(
       membershipStatus: a.membership_status || 'active',
       membershipPriceUsd: a.membership_price_usd != null ? Number(a.membership_price_usd) : 0,
       billingPeriod: a.billing_period || 'monthly',
+      suspendedBy: a.suspended_by || null,
+      suspendedAt: a.suspended_at || null,
+      suspensionReason: a.suspension_reason || null,
+      balancePauseActive: Boolean(a.balance_pause_active),
+      pauseReason: a.pause_reason || null,
+      pausedAt: a.paused_at || null,
+      resumedAt: a.resumed_at || null,
+      activatedAt: a.activated_at || null,
+      activationEpoch: a.activation_epoch != null ? Number(a.activation_epoch) : 1,
     };
   });
 }

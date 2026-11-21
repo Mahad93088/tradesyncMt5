@@ -372,10 +372,18 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                     (a) => a.userId === mentor.id && a.accountRole === 'parent'
                   );
                   const sub = subscriptions.find((s) => s.mentorId === mentor.id || s.userId === mentor.id);
-                  const followersCount = parentChildLinks.filter(
-                    (l) => l.mentorId === mentor.id && l.status === 'active'
-                  ).length;
-                  const maxFollowersQuota = sub?.maxFollowers ?? profile?.maxFollowers ?? 25;
+                  const subPlan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : undefined;
+                  const followersCount = new Set(
+                    parentChildLinks
+                      .filter((l) => l.mentorId === mentor.id && l.status === 'active')
+                      .map((l) => l.traderId)
+                  ).size;
+                  const maxFollowersQuota =
+                    sub?.maxFollowers ??
+                    subPlan?.maxFollowers ??
+                    subPlan?.maxChildAccounts ??
+                    profile?.maxFollowers ??
+                    2;
                   const deterministicInvite = `TS-${mentor.id.slice(0, 8).toUpperCase()}`;
 
                   return (
@@ -593,7 +601,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
                   <span className="text-slate-500 text-[10px] uppercase font-mono">Plan Limit</span>
                   <p className="font-mono font-bold text-slate-900 text-sm mt-0.5 tabular-nums">
-                    {followers.length} / {sub?.maxFollowers ?? profile?.maxFollowers ?? 25}
+                    {new Set(followers.filter((l) => l.status === 'active').map((l) => l.traderId)).size} /{' '}
+                    {sub?.maxFollowers ??
+                      (sub ? subscriptionPlans.find((p) => p.id === sub.planId)?.maxFollowers : undefined) ??
+                      profile?.maxFollowers ??
+                      2}
                   </p>
                 </div>
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">

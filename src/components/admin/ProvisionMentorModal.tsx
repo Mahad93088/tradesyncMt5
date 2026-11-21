@@ -92,13 +92,14 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setEmail('');
     setPassword('');
     setUsername('');
-    setSelectedPlanId(subscriptionPlans.find((p) => !p.isArchived)?.id || '');
+    const defaultPlan = subscriptionPlans.find((p) => !p.isArchived && p.isActive !== false) || subscriptionPlans.find((p) => !p.isArchived);
+    setSelectedPlanId(defaultPlan?.id || '');
     setBillingCycle('monthly');
     setAccountStatus('active');
     setStrategyName('');
     setDescription('');
     setMonthlyFee(149);
-    setMaxFollowers(25);
+    setMaxFollowers(defaultPlan ? Number(defaultPlan.maxFollowers ?? defaultPlan.maxChildAccounts ?? 2) : 2);
     setErrors({});
     setIsSubmitting(false);
     setSuccessMessage('');
@@ -107,6 +108,23 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
     setCopiedCreds(false);
     void loadCandidates();
   }, [isOpen, isCloudMode, currentAuthUser?.id]);
+
+  // Synchronize selected plan and plan-derived follower capacity when plans load asynchronously
+  useEffect(() => {
+    if (!isOpen) return;
+    const activePlans = subscriptionPlans.filter((p) => !p.isArchived && p.isActive !== false);
+    const pool = activePlans.length > 0 ? activePlans : subscriptionPlans.filter((p) => !p.isArchived);
+    if (pool.length === 0) return;
+
+    const currentPlan = pool.find((p) => p.id === selectedPlanId);
+    if (!currentPlan) {
+      const nextPlan = pool[0];
+      setSelectedPlanId(nextPlan.id);
+      setMaxFollowers(Number(nextPlan.maxFollowers ?? nextPlan.maxChildAccounts ?? 2));
+    } else {
+      setMaxFollowers(Number(currentPlan.maxFollowers ?? currentPlan.maxChildAccounts ?? 2));
+    }
+  }, [isOpen, subscriptionPlans, selectedPlanId]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -147,6 +165,16 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
       return;
     }
 
+    if (!selectedPlanId && subscriptionPlans.some((p) => !p.isArchived)) {
+      setErrors({ plan: 'Please wait for subscription plans to finish loading or select a valid plan.' });
+      return;
+    }
+
+    const selectedPlan = subscriptionPlans.find((p) => p.id === selectedPlanId);
+    const derivedMaxFollowers = selectedPlan
+      ? Number(selectedPlan.maxFollowers ?? selectedPlan.maxChildAccounts ?? 2)
+      : maxFollowers;
+
     setIsSubmitting(true);
 
     try {
@@ -160,13 +188,13 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           strategyName: strategyName.trim() || `${fullName.trim()}'s Strategy`,
           description: description.trim() || undefined,
           monthlyFee: monthlyFee || 0,
-          maxFollowers: maxFollowers || 25,
+          maxFollowers: derivedMaxFollowers,
           planId: selectedPlanId || undefined,
           billingCycle,
         });
 
-        if (!res.success || !res.profile) {
-          throw new Error(res.error || 'Failed to create mentor in Supabase.');
+        if (!res || !res.success || !res.profile?.id) {
+          throw new Error(res?.error || 'Failed to create mentor in Supabase (missing profile ID).');
         }
 
         if (res.warning) setWarningMessage(res.warning);
@@ -199,6 +227,9 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
           },
           selectedPlanId || undefined
         );
+        if (!created?.id) {
+          throw new Error('Failed to create mentor profile: invalid user response.');
+        }
         setCreatedCredentials({
           fullName: fullName.trim(),
           email: email.trim(),
@@ -207,7 +238,7 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
         if (onSuccess) onSuccess(created);
       }
     } catch (err: any) {
-      setErrors({ form: err.message || 'Failed to create mentor.' });
+      setErrors({ form: err?.message || 'Failed to create mentor.' });
     } finally {
       setIsSubmitting(false);
     }
@@ -305,6 +336,11 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                 {isCloudMode && (
                   <span className="inline-flex items-center gap-1 rounded bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 text-[10px] text-emerald-400 font-mono">
                     <Database className="h-2.5 w-2.5" /> Supabase
+                  </span>
+                )}
+                {!isCloudMode && (
+                  <span className="inline-flex items-center gap-1 rounded bg-slate-800 border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300 font-mono">
+                    Sandbox Mode
                   </span>
                 )}
               </h2>
@@ -520,14 +556,12 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-300 font-medium mb-1">Follower Capacity</label>
+                  <label className="block text-slate-300 font-medium mb-1">Student Capacity (Plan Enforced)</label>
                   <input
                     type="number"
-                    min="1"
-                    max="1000"
+                    readOnly
                     value={maxFollowers}
-                    onChange={(e) => setMaxFollowers(parseInt(e.target.value, 10) || 25)}
-                    className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 font-mono focus:border-sky-500 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-slate-300 font-mono cursor-not-allowed"
                   />
                 </div>
               </div>
@@ -537,18 +571,28 @@ export const ProvisionMentorModal: React.FC<ProvisionMentorModalProps> = ({
                   <label className="block text-slate-300 font-medium mb-1">Subscription Plan</label>
                   <select
                     value={selectedPlanId}
-                    onChange={(e) => setSelectedPlanId(e.target.value)}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setSelectedPlanId(nextId);
+                      const matched = subscriptionPlans.find((p) => p.id === nextId);
+                      if (matched) {
+                        setMaxFollowers(Number(matched.maxFollowers ?? matched.maxChildAccounts ?? 2));
+                      }
+                    }}
                     className="w-full rounded-lg border border-slate-750 bg-slate-950 px-3 py-2 text-slate-200 focus:border-sky-500 focus:outline-none"
                   >
-                    <option value="">No Initial Plan</option>
+                    {subscriptionPlans.filter((p) => !p.isArchived).length === 0 ? (
+                      <option value="">Loading subscription plans...</option>
+                    ) : null}
                     {subscriptionPlans
                       .filter((p) => !p.isArchived)
                       .map((plan) => (
                         <option key={plan.id} value={plan.id}>
-                          {plan.name} (${plan.price}/{plan.billingCycle === 'yearly' ? 'yr' : 'mo'})
+                          {plan.name} (Max {plan.maxFollowers ?? plan.maxChildAccounts ?? 2} traders · ${plan.price}/{plan.billingCycle === 'yearly' ? 'yr' : 'mo'})
                         </option>
                       ))}
                   </select>
+                  {errors.plan && <p className="mt-1 text-[11px] text-rose-400">{errors.plan}</p>}
                 </div>
                 <div>
                   <label className="block text-slate-300 font-medium mb-1">Billing</label>

@@ -3,7 +3,7 @@ export type UserRole = 'admin' | 'mentor' | 'trader';
 export type AccountStatus = 'active' | 'suspended' | 'pending';
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
 export type SubscriptionStatus = 'active' | 'expired' | 'trial' | 'cancelled' | 'pending' | 'suspended';
-export type CopyLinkStatus = 'active' | 'paused' | 'unlinked' | 'error';
+export type CopyLinkStatus = 'active' | 'paused' | 'suspended' | 'unlinked' | 'error';
 
 export interface User {
   id: string;
@@ -43,6 +43,10 @@ export interface MT5Account {
   brokerId?: string | null;
   tradingSymbol?: string;
   symbolVerified?: boolean;
+  verifiedBalance?: number | null;
+  verifiedEquity?: number | null;
+  balanceVerifiedAt?: string | null;
+  verifiedSymbolSpecs?: Record<string, { minLot?: number; maxLot?: number; lotStep?: number }>;
 }
 
 export interface BrokerSymbol {
@@ -239,6 +243,15 @@ export interface ParentChildLink {
   membershipStatus?: 'trial' | 'active' | 'past_due' | 'paused' | 'cancelled';
   membershipPriceUsd?: number;
   billingPeriod?: 'monthly' | 'quarterly' | 'yearly' | 'free';
+  suspendedBy?: string | null;
+  suspendedAt?: string | null;
+  suspensionReason?: string | null;
+  balancePauseActive?: boolean;
+  pauseReason?: string | null;
+  pausedAt?: string | null;
+  resumedAt?: string | null;
+  activatedAt?: string | null;
+  activationEpoch?: number;
 }
 
 export interface MentorDirectoryEntry {
@@ -321,6 +334,9 @@ export interface TradeMapping {
   retryCount: number;
   parentProfitUSD?: number;
   childProfitUSD?: number;
+  childRemainingLots?: number | null;
+  partialCloseCount?: number;
+  activationEpoch?: number | null;
 }
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'success';

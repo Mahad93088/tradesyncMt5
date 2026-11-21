@@ -52,6 +52,7 @@ import {
   INITIAL_NOTIFICATIONS
 } from '../data/mockData';
 import { STANDARD_DEMO_ACCOUNTS, mt5AdminService } from '../services/mt5AdminService';
+import { ALLOW_MENTOR_EMERGENCY_CLOSE } from '../config/policy';
 
 export interface CloudBridgeTelemetry {
   bridgePersistenceReady: boolean;
@@ -185,7 +186,11 @@ interface AppContextType {
     linkId: string,
     settings: LotSettings
   ) => Promise<{ success: boolean; message?: string; persistedFields?: string[]; unpersistedSchemaFields?: string[] }>;
-  toggleLinkStatus: (linkId: string) => Promise<{ success: boolean; message?: string }>;
+  toggleLinkStatus: (
+    linkId: string,
+    actionOverride?: 'active' | 'paused' | 'suspended',
+    reason?: string
+  ) => Promise<{ success: boolean; message?: string }>;
   unlinkTrader: (linkId: string) => Promise<{ success: boolean; message?: string }>;
   linkToMentorByCode: (
     traderId: string,
@@ -388,13 +393,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCloudRefreshNonce((n) => n + 1);
   };
 
+  const wasCloudModeRef = React.useRef(isCloudMode);
+
   // Authoritative Cloud Mode synchronization from Supabase + Bridge APIs (Zero mock data leakage)
   useEffect(() => {
     if (!isCloudMode || !isConfigured) {
+      if (wasCloudModeRef.current) {
+        setUsers(INITIAL_USERS);
+        setCurrentUser(INITIAL_USERS[0]);
+        setMt5Accounts(INITIAL_MT5_ACCOUNTS);
+        setMentorProfiles(INITIAL_MENTOR_PROFILES);
+        setSubscriptionPlans(INITIAL_PLANS);
+        setSubscriptions(INITIAL_SUBSCRIPTIONS);
+        setParentChildLinks(INITIAL_PARENT_CHILD_LINKS);
+        setTrades(INITIAL_OPEN_TRADES);
+        setTradeMappings(INITIAL_TRADE_MAPPINGS);
+        setSyncLogs(INITIAL_SYNC_LOGS);
+        setAuditLogs(INITIAL_AUDIT_LOGS);
+        setSystemHealth(INITIAL_SYSTEM_HEALTH);
+        setNotifications(INITIAL_NOTIFICATIONS);
+      } else if (subscriptionPlans.length === 0) {
+        setSubscriptionPlans(INITIAL_PLANS);
+      }
+      wasCloudModeRef.current = false;
       setFollowerAccounts([]);
       setMentorDirectory([]);
       return;
     }
+    wasCloudModeRef.current = true;
 
     // Immediately purge ALL mock initial state when entering Cloud Mode
     setMt5Accounts([]);
@@ -1323,8 +1349,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       lastLoginAt: new Date().toISOString()
     };
 
-    const targetPlanId = planId || subscriptionPlans[0]?.id || 'plan_starter';
-    const plan = subscriptionPlans.find((p) => p.id === targetPlanId) || subscriptionPlans[0];
+    const availablePlans = subscriptionPlans.filter((p) => !p.isArchived);
+    const plan =
+      (planId ? subscriptionPlans.find((p) => p.id === planId) : undefined) ||
+      availablePlans[0] ||
+      subscriptionPlans[0];
+    if (!plan || !plan.id) {
+      throw new Error('No active subscription plan available. Please ensure subscription plans are loaded before creating a mentor.');
+    }
+
+    const targetPlanId = plan.id;
+    const planCapacity = Number(plan.maxFollowers ?? plan.maxChildAccounts ?? 2);
     const stratName = profile?.strategyName?.trim() || `${user.fullName}'s Institutional Strategy`;
     const codeSlug = cleanUsername.toUpperCase().replace(/[^A-Z0-9]/g, '-');
 
@@ -1336,7 +1371,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       description: profile?.description?.trim() || 'Custom automated MetaTrader 5 execution strategy.',
       monthlyFee: typeof profile?.monthlyFee === 'number' ? profile.monthlyFee : 149,
       totalFollowers: 0,
-      maxFollowers: plan?.maxChildAccounts || 25,
+      maxFollowers: planCapacity,
       winRate: 64.5,
       profitFactor: 2.1,
       totalTrades: 0,
@@ -1357,6 +1392,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: initialStatus === 'suspended' ? 'expired' : 'active',
       billingCycle: plan.billingCycle,
       price: plan.price,
+      maxFollowers: planCapacity,
       startedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + (plan.billingCycle === 'yearly' ? 365 : 30) * 24 * 60 * 60 * 1000).toISOString(),
       autoRenew: initialStatus !== 'suspended'
@@ -1566,7 +1602,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           maxLotCap: 5.0,
           minLotClamp: 0.01,
           maxDrawdownProtectionPercent: 15,
-          copyPendingOrders: true,
+          copyPendingOrders: false,
           syncSlTp: true,
           slippageMaxPips: 3
         },
@@ -1721,7 +1757,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               maxLotCap: 5.0,
               minLotClamp: 0.01,
               maxDrawdownProtectionPercent: 15,
-              copyPendingOrders: true,
+              copyPendingOrders: false,
               syncSlTp: true,
               slippageMaxPips: 3
             },
@@ -2083,9 +2119,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true };
   };
 
-  const toggleLinkStatus = async (linkId: string): Promise<{ success: boolean; message?: string }> => {
+  const toggleLinkStatus = async (
+    linkId: string,
+    actionOverride?: 'active' | 'paused' | 'suspended',
+    reason?: string
+  ): Promise<{ success: boolean; message?: string }> => {
     const existing = parentChildLinks.find((l) => l.id === linkId);
-    const nextStatus = existing?.status === 'active' ? 'paused' : 'active';
+    const nextStatus: 'active' | 'paused' | 'suspended' =
+      actionOverride || (existing?.status === 'active' ? 'paused' : 'active');
 
     setParentChildLinks((prev) =>
       prev.map((l) => (l.id === linkId ? { ...l, status: nextStatus } : l))
@@ -2099,13 +2140,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await refreshCloudData();
           return { success: false, message: 'Session expired.' };
         }
+        const backendStatus =
+          nextStatus === 'suspended' ? 'suspended' : nextStatus === 'paused' ? 'inactive' : 'active';
         const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(linkId)}/status`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ status: nextStatus === 'active' ? 'active' : 'inactive' }),
+          body: JSON.stringify({ status: backendStatus, ...(reason ? { reason } : {}) }),
         });
         const json = await res.json().catch(() => null);
         if (!res.ok || !json?.success) {
@@ -2113,7 +2156,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return { success: false, message: json?.error || `HTTP ${res.status}: Failed to update link status.` };
         }
         await refreshCloudData();
-        return { success: true };
+        return { success: true, message: json.message };
       } catch (err: any) {
         await refreshCloudData();
         return { success: false, message: err.message || 'Network error updating link status.' };
@@ -2296,6 +2339,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const emergencyCloseParentTicket = async (
     parentTicket: number | string
   ): Promise<{ success: boolean; message: string }> => {
+    if (!ALLOW_MENTOR_EMERGENCY_CLOSE) {
+      return {
+        success: false,
+        message:
+          'Web Emergency Close is disabled by policy. Close trades directly in your MetaTrader 5 terminal so the Broadcaster EA propagates closes automatically.',
+      };
+    }
+
     if (isCloudMode && isConfigured) {
       try {
         const sessionCheck = await ensureValidSession();
