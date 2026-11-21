@@ -197,7 +197,7 @@ export class BridgeStore {
       try {
         const { data: acc, error } = await supabaseClient
           .from('mt5_accounts')
-          .select('id, user_id, account_role, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms')
+          .select('id, user_id, account_role, account_type, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms')
           .eq('terminal_token_hash', hash)
           .maybeSingle();
 
@@ -207,6 +207,15 @@ export class BridgeStore {
         }
 
         if (acc) {
+          if (acc.account_type !== 'demo') {
+            console.warn(
+              `[BridgeStore] Terminal rejected by Demo-only safeguard: account ${acc.id} (#${acc.account_number}) has account_type=${String(acc.account_type)}.`
+            );
+            this.terminalsByHash.delete(hash);
+            this.accountToHash.delete(acc.id);
+            return null;
+          }
+
           // Verify user profile is active and not suspended
           const { data: profile, error: profErr } = await supabaseClient
             .from('profiles')

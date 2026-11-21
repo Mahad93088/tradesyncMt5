@@ -2086,7 +2086,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       const { data: dbAcc, error: accErr } = await dbClient
         .from('mt5_accounts')
-        .select('id, user_id, account_role, account_number, broker_server, broker_name')
+        .select('id, user_id, account_role, account_type, account_number, broker_server, broker_name')
         .eq('id', accountId)
         .maybeSingle();
 
@@ -2112,6 +2112,31 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(403).json({
           success: false,
           error: 'Forbidden: Only an administrator or the owning account holder may provision or rotate terminal tokens.',
+        });
+      }
+
+      if (dbAcc.account_type !== 'demo') {
+        await bridgeStore.addSyncLog(
+          {
+            eventType: 'DEMO_ONLY_SAFETY_BLOCK',
+            level: 'error',
+            details: `Blocked terminal token provisioning/rotation for non-DEMO MT5 account #${dbAcc.account_number} (account_type=${String(dbAcc.account_type)}).`,
+          },
+          dbClient
+        );
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'TERMINAL_TOKEN_ROTATED',
+          targetType: 'mt5_accounts',
+          targetId: dbAcc.id,
+          result: 'denied',
+          details: `Blocked terminal token provisioning/rotation on non-DEMO account #${dbAcc.account_number} (account_type=${String(dbAcc.account_type)}).`,
+        });
+        return res.status(403).json({
+          success: false,
+          code: 'DEMO_ONLY_SAFETY_BLOCK',
+          error: 'Safety block: Terminal tokens can only be provisioned or rotated for Demo MT5 accounts (account_type = demo).',
         });
       }
 
@@ -2244,6 +2269,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      const normalizedAccountType = 'demo' as const;
       const role: 'parent' | 'child' = accountRole === 'parent' ? 'parent' : 'child';
       const cleanAccNumber = String(accountNumber).trim();
       const cleanBrokerServer = String(brokerServer).trim();
@@ -2379,7 +2405,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           });
         }
 
-        if (parentAcc.account_type && parentAcc.account_type !== 'demo') {
+        if (parentAcc.account_type !== 'demo') {
           await bridgeStore.addSyncLog(
             {
               eventType: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -2502,7 +2528,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         broker_server: cleanBrokerServer,
         broker_name: resolvedBrokerName,
         account_role: role,
-        account_type: accountType,
+        account_type: normalizedAccountType,
         balance: Number(balance) || 10000,
         equity: Number(equity || balance) || 10000,
         margin: 0,
@@ -2525,7 +2551,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           user_id: targetUserId,
           broker_name: resolvedBrokerName,
           account_role: role,
-          account_type: accountType,
+          account_type: normalizedAccountType,
           balance: Number(balance) || 10000,
           equity: Number(equity || balance) || 10000,
           currency: currency || 'USD',
@@ -2650,7 +2676,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           brokerName: cleanBrokerName,
           brokerServer: cleanBrokerServer,
           accountRole: role,
-          accountType,
+          accountType: normalizedAccountType,
           balance: Number(balance) || 10000,
           equity: Number(equity || balance) || 10000,
           currency,
@@ -2735,6 +2761,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
           error: 'Safety block: TradeSync MT5 currently operates in Demo-Only mode. Only demo MT5 accounts can be registered.',
         });
       }
+
+      const normalizedAccountType = 'demo' as const;
 
       if (!caller.isVerifiedAdmin && userId && String(userId).trim() !== caller.user.id) {
         await writeAuditLog(dbClient, {
@@ -2835,7 +2863,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         if (parentAcc.account_role !== 'parent') {
           return res.status(400).json({ success: false, error: 'Target account is not a parent account.' });
         }
-        if (parentAcc.account_type && parentAcc.account_type !== 'demo') {
+        if (parentAcc.account_type !== 'demo') {
           await bridgeStore.addSyncLog(
             {
               eventType: 'DEMO_ONLY_SAFETY_BLOCK',
@@ -2955,7 +2983,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           user_id: targetUserId,
           broker_name: resolvedBrokerName,
           account_role: role,
-          account_type: accountType,
+          account_type: normalizedAccountType,
           balance: Number(balance) || 10000,
           equity: Number(equity || balance) || 10000,
           currency: currency || 'USD',
@@ -2981,7 +3009,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           broker_server: cleanBrokerServer,
           broker_name: resolvedBrokerName,
           account_role: role,
-          account_type: accountType,
+          account_type: normalizedAccountType,
           balance: Number(balance) || 10000,
           equity: Number(equity || balance) || 10000,
           margin: 0,
@@ -3084,7 +3112,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           brokerName: cleanBrokerName,
           brokerServer: cleanBrokerServer,
           accountRole: role,
-          accountType,
+          accountType: normalizedAccountType,
           balance: Number(balance) || 10000,
           equity: Number(equity || balance) || 10000,
           currency,
