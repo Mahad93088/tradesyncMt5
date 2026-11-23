@@ -328,7 +328,7 @@ ALTER TABLE public.mentor_assignments
     CHECK (activation_epoch >= 1);
 
 UPDATE public.mentor_assignments
-SET activated_at = COALESCE(activated_at, assigned_at, timezone('utc'::text, now()))
+SET activated_at = COALESCE(activated_at, assigned_at, now())
 WHERE status = 'active'
   AND activated_at IS NULL;
 
@@ -352,7 +352,7 @@ DECLARE
     v_claims_raw TEXT := '';
     v_is_privileged BOOLEAN := FALSE;
     v_is_fk_cleanup BOOLEAN := FALSE;
-    v_now TIMESTAMPTZ := timezone('utc'::text, now());
+    v_now TIMESTAMPTZ := now();
     v_mentor_role TEXT;
     v_mentor_status TEXT;
     v_trader_role TEXT;
@@ -629,7 +629,12 @@ BEGIN
        AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'active') THEN
         PERFORM pg_advisory_xact_lock(hashtext('mentor_quota_' || NEW.mentor_id::text));
 
-        SELECT COALESCE(sp.max_followers, sp.max_child_accounts)
+        SELECT CASE lower(btrim(COALESCE(sp.code, '')))
+                   WHEN 'trial' THEN 2
+                   WHEN 'silver' THEN 50
+                   WHEN 'gold' THEN 100
+                   ELSE COALESCE(sp.max_followers, sp.max_child_accounts)
+               END
         INTO v_max_followers
         FROM public.subscriptions s
         JOIN public.subscription_plans sp ON sp.id = s.plan_id
@@ -758,7 +763,7 @@ BEGIN
             AND ma.child_account_id = bi.child_account_id
             AND ma.status = 'active'
             AND COALESCE(ma.balance_pause_active, FALSE) = FALSE
-            AND (ma.activated_at IS NULL OR bi.created_at >= ma.activated_at)
+            AND (ma.activated_at IS NULL OR COALESCE(bi.parent_event_timestamp, bi.created_at) >= ma.activated_at)
             AND (
                 bi.activation_epoch IS NULL
                 OR ma.activation_epoch IS NULL
@@ -809,7 +814,7 @@ BEGIN
                     AND ma.child_account_id = q.child_account_id
                     AND ma.status = 'active'
                     AND COALESCE(ma.balance_pause_active, FALSE) = FALSE
-                    AND (ma.activated_at IS NULL OR q.created_at >= ma.activated_at)
+                    AND (ma.activated_at IS NULL OR COALESCE(q.parent_event_timestamp, q.created_at) >= ma.activated_at)
                     AND (
                         q.activation_epoch IS NULL
                         OR ma.activation_epoch IS NULL
@@ -937,14 +942,14 @@ SET
     is_archived = FALSE,
     archived_at = NULL,
     features = EXCLUDED.features,
-    updated_at = timezone('utc'::text, now());
+    updated_at = now();
 
 -- Archive legacy seeded plan codes without deleting any rows referenced by existing subscriptions
 UPDATE public.subscription_plans
 SET is_active = FALSE,
     is_archived = TRUE,
-    archived_at = COALESCE(archived_at, timezone('utc'::text, now())),
-    updated_at = timezone('utc'::text, now())
+    archived_at = COALESCE(archived_at, now()),
+    updated_at = now()
 WHERE code IN ('starter_10', 'pro_50', 'business_200');
 
 -- ------------------------------------------------------------------------------

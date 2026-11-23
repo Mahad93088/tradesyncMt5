@@ -26,11 +26,12 @@ input string   InpComment           = "TradeSync Copy";                // Order 
 input bool     InpVerboseLogs       = true;                            // Output detailed execution logs
 
 //--- Reliability & Duplicate Protection Constants
-#define MAX_PROCESSED_CACHE           256
-#define MAX_PENDING_ACKS              64
-#define MAX_ACK_RETRIES               30
-#define ACK_RETRY_DELAY_SEC           2
-#define RECEIVER_HEARTBEAT_INTERVAL_SEC 60
+#define MAX_PROCESSED_CACHE             256
+#define MAX_PENDING_ACKS                64
+#define MAX_ACK_RETRIES                 30
+#define ACK_RETRY_DELAY_SEC             2
+#define RECEIVER_HEARTBEAT_INTERVAL_SEC 30
+#define MAX_SYMBOL_SPECS                24
 
 struct ProcessedInstructionRecord
 {
@@ -143,6 +144,9 @@ int OnInit()
    g_Trade.SetDeviationInPoints(InpMaxSlippagePoints);
    g_Trade.SetTypeFilling(ORDER_FILLING_FOK);
 
+   // Load persisted processed-instruction cache before polling (survives restart/reconnect)
+   LoadProcessedCacheFromDisk();
+
    // Configure millisecond polling timer
    if(!EventSetMillisecondTimer(InpPollingIntervalMs))
    {
@@ -187,7 +191,7 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| Throttled 60s child terminal health & telemetry heartbeat        |
+//| Throttled child terminal health, balance & symbolSpecs heartbeat |
 //+------------------------------------------------------------------+
 void SendReceiverHeartbeat()
 {
@@ -196,14 +200,19 @@ void SendReceiverHeartbeat()
    g_LastHeartbeat = TimeLocal();
    string url = InpServerUrl + "/api/v1/bridge/heartbeat";
    string autoTradingStr = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0) ? "true" : "false";
+   string eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+   string symbolSpecsJson = BuildSymbolSpecsJson();
+
    string payload = StringFormat(
-      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s}",
+      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s,\"eventTimestamp\":\"%s\",\"symbolSpecs\":%s}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
       AccountInfoDouble(ACCOUNT_MARGIN_FREE),
-      autoTradingStr
+      autoTradingStr,
+      EscapeJsonString(eventTimestampUtc),
+      symbolSpecsJson
    );
 
    char postData[];
@@ -277,7 +286,14 @@ void PollAndExecuteInstructions()
       return;
    }
 
+   bool reconnectedAfterError = (g_LastPollErrorCode != 0);
    g_LastPollErrorCode = 0;
+   if(reconnectedAfterError)
+   {
+      Print("[TradeSync Receiver] Connection restored — refreshing verified balance & symbolSpecs heartbeat.");
+      SendReceiverHeartbeat();
+   }
+
    datetime now = TimeLocal();
    if(g_LastPollSuccessLog == 0 || (now - g_LastPollSuccessLog) >= 30)
    {
@@ -705,6 +721,8 @@ void RecordProcessedInstruction(string instructionId, string status, ulong child
    g_ProcessedCache[targetIdx].commission        = commission;
    g_ProcessedCache[targetIdx].swap              = swap;
    g_ProcessedCache[targetIdx].recordedAt        = TimeLocal();
+
+   PersistProcessedCacheToDisk();
 }
 
 //+------------------------------------------------------------------+
@@ -823,11 +841,19 @@ void ExecuteSingleInstruction(string instJson)
       double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
       double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
 
+      if(minLot <= 0.0 || maxLot < minLot || lotStep <= 0.0)
+      {
+         SendAck(instructionId, "FAILED", 0, 0.0, 10014,
+                 StringFormat("Invalid broker volume specs for %s (min=%.4f, max=%.4f, step=%.4f)", symbol, minLot, maxLot, lotStep),
+                 GetTickCount() - startTicks);
+         return;
+      }
+
       if(lots > maxLot) lots = maxLot;
       if(lotStep > 0) lots = MathFloor((lots + 1e-9) / lotStep) * lotStep;
       if(lots < minLot - 1e-9)
       {
-         SendAck(instructionId, "FAILED", 0, 0.0, 10014,
+         SendAck(instructionId, "SKIPPED_LOT_LIMIT", 0, 0.0, 10014,
                  StringFormat("Requested volume %.2f below broker minimum %.2f for %s", lots, minLot, symbol),
                  GetTickCount() - startTicks);
          return;
@@ -885,8 +911,9 @@ void ExecuteSingleInstruction(string instJson)
       else
       {
          string errDesc = g_Trade.ResultComment();
-         PrintFormat("[TradeSync Receiver] EXECUTION FAILED: %s (retcode: %u)", errDesc, retcode);
-         SendAck(instructionId, "FAILED", 0, 0.0, (int)retcode, errDesc, latency);
+         string rejectStatus = MapBrokerRejectStatus(retcode);
+         PrintFormat("[TradeSync Receiver] EXECUTION REJECTED (%s): %s (retcode: %u)", rejectStatus, errDesc, retcode);
+         SendAck(instructionId, rejectStatus, 0, 0.0, (int)retcode, errDesc, latency);
       }
    }
    // =================================================================
@@ -945,15 +972,70 @@ void ExecuteSingleInstruction(string instJson)
       }
 
       double posVolume = PositionGetDouble(POSITION_VOLUME);
+      string posSymbol = PositionGetString(POSITION_SYMBOL);
       long posIdentifier = PositionGetInteger(POSITION_IDENTIFIER);
 
-      bool closed = g_Trade.PositionClose(childTicket, maxSlipPoints);
+      if(!SymbolSelect(posSymbol, true) || !ApplyBrokerFillingMode(posSymbol))
+      {
+         SendAck(instructionId, "FAILED", childTicket, 0.0, 10030,
+                 "Unsupported broker filling mode for symbol " + posSymbol + ". Close aborted safely.",
+                 GetTickCount() - startTicks);
+         return;
+      }
+
+      double minLot = SymbolInfoDouble(posSymbol, SYMBOL_VOLUME_MIN);
+      double maxLot = SymbolInfoDouble(posSymbol, SYMBOL_VOLUME_MAX);
+      double lotStep = SymbolInfoDouble(posSymbol, SYMBOL_VOLUME_STEP);
+      bool isPartialCloseRequest = (lots > 0.0 && lots < posVolume - 1e-6);
+      bool closed = false;
+      double targetCloseVolume = posVolume;
+
+      if(isPartialCloseRequest)
+      {
+         if(minLot <= 0.0 || maxLot < minLot || lotStep <= 0.0)
+         {
+            SendAck(instructionId, "FAILED", childTicket, 0.0, 10014,
+                    StringFormat("Invalid broker symbol specs for %s partial close (min=%.4f, max=%.4f, step=%.4f)", posSymbol, minLot, maxLot, lotStep),
+                    GetTickCount() - startTicks);
+            return;
+         }
+
+         double closeVol = NormalizeDouble(MathFloor((lots + 1e-9) / lotStep) * lotStep, 4);
+         if(closeVol < minLot - 1e-9 || closeVol > maxLot + 1e-9 || closeVol > posVolume + 1e-9)
+         {
+            SendAck(instructionId, "SKIPPED_LOT_LIMIT", childTicket, 0.0, 10014,
+                    StringFormat("Partial close volume %.2f invalid against broker bounds [%.2f..%.2f] or open volume %.2f", closeVol, minLot, maxLot, posVolume),
+                    GetTickCount() - startTicks);
+            return;
+         }
+
+         double remVol = NormalizeDouble(posVolume - closeVol, 4);
+         if(remVol > 1e-6 && remVol < minLot - 1e-9)
+         {
+            SendAck(instructionId, "SKIPPED_LOT_LIMIT", childTicket, 0.0, 10014,
+                    StringFormat("Partial close %.2f would leave remainder %.2f below broker minLot %.2f; refusing silent full close.", closeVol, remVol, minLot),
+                    GetTickCount() - startTicks);
+            return;
+         }
+
+         targetCloseVolume = closeVol;
+         g_Trade.SetDeviationInPoints(maxSlipPoints);
+         closed = g_Trade.PositionClosePartial(childTicket, closeVol, maxSlipPoints);
+         g_Trade.SetDeviationInPoints(InpMaxSlippagePoints);
+      }
+      else
+      {
+         g_Trade.SetDeviationInPoints(maxSlipPoints);
+         closed = g_Trade.PositionClose(childTicket, maxSlipPoints);
+         g_Trade.SetDeviationInPoints(InpMaxSlippagePoints);
+      }
+
       latency = GetTickCount() - startTicks;
       uint retcode = g_Trade.ResultRetcode();
 
       if(closed || retcode == TRADE_RETCODE_DONE)
       {
-         double execLots = posVolume;
+         double execLots = targetCloseVolume;
          double closePx = g_Trade.ResultPrice();
          double dealProfit = 0.0, dealComm = 0.0, dealSwap = 0.0;
          bool hasDealProfit = false;
@@ -995,16 +1077,19 @@ void ExecuteSingleInstruction(string instJson)
 
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Receiver] CLOSED child position #%I64u (Parent #%I64u, Profit: %.2f, Latency: %u ms)",
-                        childTicket, parentTicket, dealProfit, latency);
+            PrintFormat("[TradeSync Receiver] %s child position #%I64u %.2f lots (Parent #%I64u, Profit: %.2f, Latency: %u ms)",
+                        isPartialCloseRequest ? "PARTIAL CLOSED" : "CLOSED",
+                        childTicket, execLots, parentTicket, dealProfit, latency);
          }
-         SendAck(instructionId, "EXECUTED", childTicket, closePx, (int)retcode, "Closed successfully", latency,
+         SendAck(instructionId, "EXECUTED", childTicket, closePx, (int)retcode,
+                 isPartialCloseRequest ? "Partial close executed" : "Closed successfully", latency,
                  execLots, closePx, hasDealProfit, dealProfit, dealComm, dealSwap);
       }
       else
       {
          string errDesc = g_Trade.ResultComment();
-         SendAck(instructionId, "FAILED", childTicket, 0.0, (int)retcode, errDesc, latency);
+         string rejectStatus = MapBrokerRejectStatus(retcode);
+         SendAck(instructionId, rejectStatus, childTicket, 0.0, (int)retcode, errDesc, latency);
       }
    }
    // =================================================================
@@ -1367,5 +1452,194 @@ bool EnsureDemoAccount(string context)
    }
    return true;
 }
+
+//+------------------------------------------------------------------+
+//| Helper: Map MT5 broker retcodes to valid TradeSync ACK statuses  |
+//+------------------------------------------------------------------+
+string MapBrokerRejectStatus(uint retcode)
+{
+   if(retcode == TRADE_RETCODE_NO_MONEY) return "REJECTED_MARGIN";
+   if(retcode == TRADE_RETCODE_PRICE_OFF || retcode == TRADE_RETCODE_REQUOTE) return "REJECTED_OFF_QUOTES";
+   if(retcode == TRADE_RETCODE_INVALID_VOLUME) return "SKIPPED_LOT_LIMIT";
+   return "FAILED";
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Format UTC datetime as strict ISO-8601 string            |
+//+------------------------------------------------------------------+
+string FormatUtcIso8601(datetime utcTime)
+{
+   if(utcTime <= 0) utcTime = TimeGMT();
+   MqlDateTime dt;
+   TimeToStruct(utcTime, dt);
+   return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
+                       dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Build verified broker symbolSpecs JSON for heartbeat     |
+//+------------------------------------------------------------------+
+bool AppendSymbolSpecEntry(string sym, string &seen[], int &seenCount, string &entriesJson)
+{
+   if(StringLen(sym) == 0 || seenCount >= MAX_SYMBOL_SPECS) return false;
+
+   for(int i = 0; i < seenCount; i++)
+   {
+      if(seen[i] == sym) return false;
+   }
+
+   double minLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   if(minLot <= 0.0 || maxLot < minLot || lotStep <= 0.0)
+   {
+      return false;
+   }
+
+   double contractSize = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+   long digits = SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+   ArrayResize(seen, seenCount + 1);
+   seen[seenCount++] = sym;
+
+   string entry = StringFormat(
+      "\"%s\":{\"minLot\":%.4f,\"maxLot\":%.4f,\"lotStep\":%.4f,\"contractSize\":%.2f,\"digits\":%I64d}",
+      EscapeJsonString(sym),
+      minLot,
+      maxLot,
+      lotStep,
+      contractSize > 0.0 ? contractSize : 100000.0,
+      digits >= 0 ? digits : 5
+   );
+
+   if(StringLen(entriesJson) > 0) entriesJson += ",";
+   entriesJson += entry;
+   return true;
+}
+
+string BuildSymbolSpecsJson()
+{
+   string seen[];
+   int seenCount = 0;
+   string entriesJson = "";
+
+   // 1. Prioritize active chart symbol
+   AppendSymbolSpecEntry(_Symbol, seen, seenCount, entriesJson);
+
+   // 2. Include all open child position symbols
+   int posTotal = PositionsTotal();
+   for(int p = 0; p < posTotal && seenCount < MAX_SYMBOL_SPECS; p++)
+   {
+      ulong ticket = PositionGetTicket(p);
+      if(ticket == 0) continue;
+      AppendSymbolSpecEntry(PositionGetString(POSITION_SYMBOL), seen, seenCount, entriesJson);
+   }
+
+   // 3. Include selected Market Watch symbols up to MAX_SYMBOL_SPECS
+   int mwTotal = SymbolsTotal(true);
+   for(int m = 0; m < mwTotal && seenCount < MAX_SYMBOL_SPECS; m++)
+   {
+      AppendSymbolSpecEntry(SymbolName(m, true), seen, seenCount, entriesJson);
+   }
+
+   return "{" + entriesJson + "}";
+}
+
+//+------------------------------------------------------------------+
+//| Helpers: Persist processed instruction cache across reconnects   |
+//+------------------------------------------------------------------+
+string GetProcessedCacheFilename()
+{
+   return StringFormat("tradesync_processed_%I64u.txt", AccountInfoInteger(ACCOUNT_LOGIN));
+}
+
+string SanitizeCacheField(string s)
+{
+   StringReplace(s, "\t", " ");
+   StringReplace(s, "\r", " ");
+   StringReplace(s, "\n", " ");
+   return s;
+}
+
+void PersistProcessedCacheToDisk()
+{
+   int size = ArraySize(g_ProcessedCache);
+   if(size <= 0) return;
+
+   string filename = GetProcessedCacheFilename();
+   int handle = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return;
+
+   for(int i = 0; i < size; i++)
+   {
+      if(StringLen(g_ProcessedCache[i].instructionId) == 0) continue;
+      string line = StringFormat(
+         "%s\t%s\t%I64u\t%.5f\t%d\t%u\t%.4f\t%.5f\t%d\t%.2f\t%.2f\t%.2f\t%I64d\t%s",
+         SanitizeCacheField(g_ProcessedCache[i].instructionId),
+         SanitizeCacheField(g_ProcessedCache[i].status),
+         g_ProcessedCache[i].childTicket,
+         g_ProcessedCache[i].fillPrice,
+         g_ProcessedCache[i].errCode,
+         g_ProcessedCache[i].latencyMs,
+         g_ProcessedCache[i].executedLots,
+         g_ProcessedCache[i].closePrice,
+         g_ProcessedCache[i].hasRealizedProfit ? 1 : 0,
+         g_ProcessedCache[i].realizedProfit,
+         g_ProcessedCache[i].commission,
+         g_ProcessedCache[i].swap,
+         (long)g_ProcessedCache[i].recordedAt,
+         SanitizeCacheField(g_ProcessedCache[i].errMsg)
+      );
+      FileWriteString(handle, line + "\n");
+   }
+   FileClose(handle);
+}
+
+void LoadProcessedCacheFromDisk()
+{
+   string filename = GetProcessedCacheFilename();
+   if(!FileIsExist(filename)) return;
+
+   int handle = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return;
+
+   ArrayResize(g_ProcessedCache, 0);
+   ushort delim = StringGetCharacter("\t", 0);
+
+   while(!FileIsEnding(handle) && ArraySize(g_ProcessedCache) < MAX_PROCESSED_CACHE)
+   {
+      string line = FileReadString(handle);
+      if(StringLen(line) == 0) continue;
+
+      string parts[];
+      int count = StringSplit(line, delim, parts);
+      if(count < 13 || StringLen(parts[0]) == 0) continue;
+
+      int idx = ArraySize(g_ProcessedCache);
+      ArrayResize(g_ProcessedCache, idx + 1);
+      g_ProcessedCache[idx].instructionId     = parts[0];
+      g_ProcessedCache[idx].status            = parts[1];
+      g_ProcessedCache[idx].childTicket       = (ulong)StringToInteger(parts[2]);
+      g_ProcessedCache[idx].fillPrice         = StringToDouble(parts[3]);
+      g_ProcessedCache[idx].errCode           = (int)StringToInteger(parts[4]);
+      g_ProcessedCache[idx].latencyMs         = (uint)StringToInteger(parts[5]);
+      g_ProcessedCache[idx].executedLots      = StringToDouble(parts[6]);
+      g_ProcessedCache[idx].closePrice        = StringToDouble(parts[7]);
+      g_ProcessedCache[idx].hasRealizedProfit = (StringToInteger(parts[8]) != 0);
+      g_ProcessedCache[idx].realizedProfit    = StringToDouble(parts[9]);
+      g_ProcessedCache[idx].commission        = StringToDouble(parts[10]);
+      g_ProcessedCache[idx].swap              = StringToDouble(parts[11]);
+      g_ProcessedCache[idx].recordedAt        = (datetime)StringToInteger(parts[12]);
+      g_ProcessedCache[idx].errMsg            = (count >= 14) ? parts[13] : "";
+   }
+
+   FileClose(handle);
+   if(ArraySize(g_ProcessedCache) > 0)
+   {
+      PrintFormat("[TradeSync Receiver] Loaded %d processed instruction IDs from disk cache for reconnect idempotency.",
+                  ArraySize(g_ProcessedCache));
+   }
+}
+
 
 

@@ -25,6 +25,8 @@ input bool     InpVerboseLogs     = true;                                    // 
 #define MAX_EVENT_RETRIES      20
 #define EVENT_RETRY_DELAY_SEC  2
 #define HEARTBEAT_INTERVAL_SEC 30
+#define MAX_SYMBOL_SPECS       24
+#define MAX_SLTP_TRACKED       128
 
 struct PendingEventRecord
 {
@@ -35,11 +37,21 @@ struct PendingEventRecord
    datetime nextRetryAt;
 };
 
+struct TrackedPositionSlTp
+{
+   ulong  positionTicket;
+   double sl;
+   double tp;
+};
+
 //--- Internal State
-ulong              g_ProcessedDeals[];
-int                g_ProcessedDealsCount = 0;
-datetime           g_LastHeartbeat = 0;
-PendingEventRecord g_PendingEvents[];
+ulong                g_ProcessedDeals[];
+int                  g_ProcessedDealsCount = 0;
+datetime             g_LastHeartbeat = 0;
+datetime             g_InitUtcTime = 0;
+ulong                g_EventSeq = 0;
+PendingEventRecord   g_PendingEvents[];
+TrackedPositionSlTp  g_TrackedSlTp[];
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -100,8 +112,13 @@ int OnInit()
 
    ArrayResize(g_ProcessedDeals, 1024);
    g_ProcessedDealsCount = 0;
+   ArrayResize(g_TrackedSlTp, 0);
 
-   // Send initial connection ping to backend
+   // Anchor monotonic event sequence and UTC start boundary (no historical trade backfill)
+   g_InitUtcTime = TimeGMT();
+   InitializeEventSequence();
+
+   // Send initial connection ping & verified symbol specs to backend
    SendHeartbeat();
 
    ResetLastError();
@@ -153,6 +170,8 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
+   if(!EnsureDemoAccount("OnTradeTransaction")) return;
+
    // Filter only DEAL additions (executed fills)
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
@@ -184,10 +203,12 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       if(IsDealProcessed(dealTicket)) return;
       MarkDealProcessed(dealTicket);
 
+      string eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+      ulong  eventSeq = NextEventSeq();
+
       // 1. POSITION OPEN (DEAL_ENTRY_IN)
       if(dealEntry == DEAL_ENTRY_IN)
       {
-
          string orderType = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
          double sl = 0.0;
          double tp = 0.0;
@@ -198,14 +219,15 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
             sl = PositionGetDouble(POSITION_SL);
             tp = PositionGetDouble(POSITION_TP);
          }
+         UpdateTrackedPositionSlTp(position, sl, tp);
 
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Broadcaster] Parent OPEN detected: Deal #%I64u Pos #%I64u %s %s %.2f lots @ %.5f (SL: %.5f, TP: %.5f)",
-                        dealTicket, position, orderType, symbol, volume, price, sl, tp);
+            PrintFormat("[TradeSync Broadcaster] Parent OPEN detected: Deal #%I64u Pos #%I64u %s %s %.2f lots @ %.5f (SL: %.5f, TP: %.5f, seq=%I64u, ts=%s)",
+                        dealTicket, position, orderType, symbol, volume, price, sl, tp, eventSeq, eventTimestampUtc);
          }
 
-         BroadcastTradeOpen(position, symbol, orderType, volume, price, sl, tp, (int)magic);
+         BroadcastTradeOpen(position, symbol, orderType, volume, price, sl, tp, (int)magic, eventTimestampUtc, eventSeq);
       }
       // 2. POSITION CLOSE (DEAL_ENTRY_OUT)
       else if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_OUT_BY)
@@ -220,6 +242,11 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                closeType = "PARTIAL";
             }
          }
+         double totalLots = volume + remainingLots;
+         if(closeType == "FULL")
+         {
+            RemoveTrackedPositionSlTp(position);
+         }
 
          double dealProfit     = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
          double dealCommission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
@@ -227,11 +254,11 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
          if(InpVerboseLogs)
          {
-            PrintFormat("[TradeSync Broadcaster] Parent %s CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f (Remaining: %.2f, Profit: %.2f)",
-                        closeType, dealTicket, position, symbol, volume, price, remainingLots, dealProfit);
+            PrintFormat("[TradeSync Broadcaster] Parent %s CLOSE detected: Deal #%I64u Pos #%I64u %s %.2f lots closed @ %.5f (Remaining: %.2f, Profit: %.2f, seq=%I64u)",
+                        closeType, dealTicket, position, symbol, volume, price, remainingLots, dealProfit, eventSeq);
          }
 
-         BroadcastTradeClose(position, price, closeType, volume, remainingLots, dealTicket, dealProfit, dealCommission, dealSwap);
+         BroadcastTradeClose(position, price, closeType, volume, remainingLots, dealTicket, dealProfit, dealCommission, dealSwap, totalLots, eventTimestampUtc, eventSeq);
       }
    }
    // 3. PENDING ORDER PLACEMENT NOTICE (Fill-Based Copy Protocol)
@@ -264,9 +291,15 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
       if(PositionSelectByTicket(posTicket))
       {
+         ulong posMagic = (ulong)PositionGetInteger(POSITION_MAGIC);
+         if(InpMagicFilter > 0 && posMagic != InpMagicFilter) return;
+
          double sl = PositionGetDouble(POSITION_SL);
          double tp = PositionGetDouble(POSITION_TP);
-         BroadcastTradeModify(posTicket, sl, tp);
+         if(!HasPositionSlTpChanged(posTicket, sl, tp)) return;
+
+         UpdateTrackedPositionSlTp(posTicket, sl, tp);
+         BroadcastTradeModify(posTicket, sl, tp, FormatUtcIso8601(TimeGMT()), NextEventSeq());
       }
    }
 }
@@ -275,11 +308,15 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 //| HTTP POST: Broadcast Trade Open                                  |
 //+------------------------------------------------------------------+
 void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
-                        double lots, double price, double sl, double tp, int magic)
+                        double lots, double price, double sl, double tp, int magic,
+                        string eventTimestampUtc = "", ulong eventSeq = 0)
 {
+   if(StringLen(eventTimestampUtc) == 0) eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+   if(eventSeq == 0) eventSeq = NextEventSeq();
+
    string url = InpServerUrl + "/api/v1/bridge/events/trade-open";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":\"%s\",\"lots\":%.2f,\"openPrice\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"magicNumber\":\"%d\",\"comment\":\"TradeSync Broadcaster\"}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":\"%s\",\"lots\":%.2f,\"openPrice\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"magicNumber\":\"%d\",\"comment\":\"TradeSync Broadcaster\",\"eventTimestamp\":\"%s\",\"eventSeq\":%I64u}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       EscapeJsonString(symbol),
@@ -288,7 +325,9 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
       price,
       sl,
       tp,
-      magic
+      magic,
+      EscapeJsonString(eventTimestampUtc),
+      eventSeq
    );
 
    DispatchOrQueueEvent(url, json, StringFormat("OPEN#%I64u", parentTicket));
@@ -300,11 +339,16 @@ void BroadcastTradeOpen(ulong parentTicket, string symbol, string orderType,
 void BroadcastTradeClose(ulong parentTicket, double closePrice,
                          string closeType = "FULL", double closedLots = 0.0,
                          double remainingLots = 0.0, ulong dealTicket = 0,
-                         double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0)
+                         double realizedProfit = 0.0, double commission = 0.0, double swap = 0.0,
+                         double totalLots = 0.0, string eventTimestampUtc = "", ulong eventSeq = 0)
 {
+   if(StringLen(eventTimestampUtc) == 0) eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+   if(eventSeq == 0) eventSeq = NextEventSeq();
+   if(totalLots <= 0.0) totalLots = closedLots + remainingLots;
+
    string url = InpServerUrl + "/api/v1/bridge/events/trade-close";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"closePrice\":%.5f,\"closeType\":\"%s\",\"closedLots\":%.2f,\"remainingLots\":%.2f,\"realizedProfit\":%.2f,\"commission\":%.2f,\"swap\":%.2f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"closePrice\":%.5f,\"closeType\":\"%s\",\"closedLots\":%.2f,\"remainingLots\":%.2f,\"totalLots\":%.2f,\"realizedProfit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"eventTimestamp\":\"%s\",\"eventSeq\":%I64u}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       dealTicket,
@@ -312,9 +356,12 @@ void BroadcastTradeClose(ulong parentTicket, double closePrice,
       EscapeJsonString(closeType),
       closedLots,
       remainingLots,
+      totalLots,
       realizedProfit,
       commission,
-      swap
+      swap,
+      EscapeJsonString(eventTimestampUtc),
+      eventSeq
    );
 
    DispatchOrQueueEvent(url, json, StringFormat("%s_CLOSE#%I64u", closeType, parentTicket));
@@ -323,15 +370,21 @@ void BroadcastTradeClose(ulong parentTicket, double closePrice,
 //+------------------------------------------------------------------+
 //| HTTP POST: Broadcast Trade Modification                          |
 //+------------------------------------------------------------------+
-void BroadcastTradeModify(ulong parentTicket, double sl, double tp)
+void BroadcastTradeModify(ulong parentTicket, double sl, double tp,
+                          string eventTimestampUtc = "", ulong eventSeq = 0)
 {
+   if(StringLen(eventTimestampUtc) == 0) eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+   if(eventSeq == 0) eventSeq = NextEventSeq();
+
    string url = InpServerUrl + "/api/v1/bridge/events/trade-modify";
    string json = StringFormat(
-      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"sl\":%.5f,\"tp\":%.5f}",
+      "{\"account_number\":\"%I64u\",\"ticket\":\"%I64u\",\"sl\":%.5f,\"tp\":%.5f,\"eventTimestamp\":\"%s\",\"eventSeq\":%I64u}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       parentTicket,
       sl,
-      tp
+      tp,
+      EscapeJsonString(eventTimestampUtc),
+      eventSeq
    );
 
    DispatchOrQueueEvent(url, json, StringFormat("MODIFY#%I64u", parentTicket));
@@ -442,17 +495,27 @@ void SendHeartbeat()
 
    g_LastHeartbeat = TimeLocal();
    string url = InpServerUrl + "/api/v1/bridge/heartbeat";
-   PrintFormat("[TradeSync Broadcaster] Sending heartbeat: POST %s", url);
+   if(InpVerboseLogs)
+   {
+      PrintFormat("[TradeSync Broadcaster] Sending heartbeat: POST %s", url);
+   }
 
    string autoTradingStr = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0) ? "true" : "false";
+   string symbolSpecsJson = BuildSymbolSpecsJson();
+   string eventTimestampUtc = FormatUtcIso8601(TimeGMT());
+   ulong  eventSeq = NextEventSeq();
+
    string payload = StringFormat(
-      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s}",
+      "{\"account_number\":\"%I64u\",\"tradeMode\":\"DEMO\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"autoTradingEnabled\":%s,\"eventTimestamp\":\"%s\",\"eventSeq\":%I64u,\"symbolSpecs\":%s}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
       AccountInfoDouble(ACCOUNT_MARGIN_FREE),
-      autoTradingStr
+      autoTradingStr,
+      EscapeJsonString(eventTimestampUtc),
+      eventSeq,
+      symbolSpecsJson
    );
    char postData[];
    char resultData[];
@@ -616,3 +679,171 @@ bool EnsureDemoAccount(string context)
    }
    return true;
 }
+
+//+------------------------------------------------------------------+
+//| Helper: Monotonic eventSeq persisted per login across restarts   |
+//+------------------------------------------------------------------+
+string GetSequenceGlobalVarName()
+{
+   return StringFormat("TS_BCAST_SEQ_%I64u", AccountInfoInteger(ACCOUNT_LOGIN));
+}
+
+void InitializeEventSequence()
+{
+   ulong baseMs = (ulong)TimeGMT() * 1000;
+   string varName = GetSequenceGlobalVarName();
+   if(GlobalVariableCheck(varName))
+   {
+      ulong saved = (ulong)GlobalVariableGet(varName);
+      g_EventSeq = (saved > baseMs) ? saved : baseMs;
+   }
+   else
+   {
+      g_EventSeq = baseMs;
+   }
+}
+
+ulong NextEventSeq()
+{
+   g_EventSeq++;
+   string varName = GetSequenceGlobalVarName();
+   GlobalVariableSet(varName, (double)g_EventSeq);
+   return g_EventSeq;
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Format UTC datetime as strict ISO-8601 string            |
+//+------------------------------------------------------------------+
+string FormatUtcIso8601(datetime utcTime)
+{
+   if(utcTime <= 0) utcTime = TimeGMT();
+   MqlDateTime dt;
+   TimeToStruct(utcTime, dt);
+   return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
+                       dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Build verified broker symbolSpecs JSON for heartbeat     |
+//+------------------------------------------------------------------+
+bool AppendSymbolSpecEntry(string sym, string &seen[], int &seenCount, string &entriesJson)
+{
+   if(StringLen(sym) == 0 || seenCount >= MAX_SYMBOL_SPECS) return false;
+
+   for(int i = 0; i < seenCount; i++)
+   {
+      if(seen[i] == sym) return false;
+   }
+
+   double minLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   if(minLot <= 0.0 || maxLot < minLot || lotStep <= 0.0)
+   {
+      return false;
+   }
+
+   double contractSize = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+   long digits = SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+   ArrayResize(seen, seenCount + 1);
+   seen[seenCount++] = sym;
+
+   string entry = StringFormat(
+      "\"%s\":{\"minLot\":%.4f,\"maxLot\":%.4f,\"lotStep\":%.4f,\"contractSize\":%.2f,\"digits\":%I64d}",
+      EscapeJsonString(sym),
+      minLot,
+      maxLot,
+      lotStep,
+      contractSize > 0.0 ? contractSize : 100000.0,
+      digits >= 0 ? digits : 5
+   );
+
+   if(StringLen(entriesJson) > 0) entriesJson += ",";
+   entriesJson += entry;
+   return true;
+}
+
+string BuildSymbolSpecsJson()
+{
+   string seen[];
+   int seenCount = 0;
+   string entriesJson = "";
+
+   // 1. Prioritize active chart symbol
+   AppendSymbolSpecEntry(_Symbol, seen, seenCount, entriesJson);
+
+   // 2. Include all open parent position symbols
+   int posTotal = PositionsTotal();
+   for(int p = 0; p < posTotal && seenCount < MAX_SYMBOL_SPECS; p++)
+   {
+      ulong ticket = PositionGetTicket(p);
+      if(ticket == 0) continue;
+      AppendSymbolSpecEntry(PositionGetString(POSITION_SYMBOL), seen, seenCount, entriesJson);
+   }
+
+   // 3. Include selected Market Watch symbols up to MAX_SYMBOL_SPECS
+   int mwTotal = SymbolsTotal(true);
+   for(int m = 0; m < mwTotal && seenCount < MAX_SYMBOL_SPECS; m++)
+   {
+      AppendSymbolSpecEntry(SymbolName(m, true), seen, seenCount, entriesJson);
+   }
+
+   return "{" + entriesJson + "}";
+}
+
+//+------------------------------------------------------------------+
+//| Helpers: Deduplicate SL/TP updates per position ticket           |
+//+------------------------------------------------------------------+
+bool HasPositionSlTpChanged(ulong posTicket, double sl, double tp)
+{
+   int count = ArraySize(g_TrackedSlTp);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_TrackedSlTp[i].positionTicket == posTicket)
+      {
+         return (MathAbs(g_TrackedSlTp[i].sl - sl) > 1e-7 || MathAbs(g_TrackedSlTp[i].tp - tp) > 1e-7);
+      }
+   }
+   return true;
+}
+
+void UpdateTrackedPositionSlTp(ulong posTicket, double sl, double tp)
+{
+   int count = ArraySize(g_TrackedSlTp);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_TrackedSlTp[i].positionTicket == posTicket)
+      {
+         g_TrackedSlTp[i].sl = sl;
+         g_TrackedSlTp[i].tp = tp;
+         return;
+      }
+   }
+   if(count >= MAX_SLTP_TRACKED)
+   {
+      for(int k = 1; k < count; k++) g_TrackedSlTp[k - 1] = g_TrackedSlTp[k];
+      count = MAX_SLTP_TRACKED - 1;
+      ArrayResize(g_TrackedSlTp, count);
+   }
+   ArrayResize(g_TrackedSlTp, count + 1);
+   g_TrackedSlTp[count].positionTicket = posTicket;
+   g_TrackedSlTp[count].sl = sl;
+   g_TrackedSlTp[count].tp = tp;
+}
+
+void RemoveTrackedPositionSlTp(ulong posTicket)
+{
+   int count = ArraySize(g_TrackedSlTp);
+   for(int i = 0; i < count; i++)
+   {
+      if(g_TrackedSlTp[i].positionTicket == posTicket)
+      {
+         int last = count - 1;
+         if(i != last) g_TrackedSlTp[i] = g_TrackedSlTp[last];
+         ArrayResize(g_TrackedSlTp, last);
+         return;
+      }
+   }
+}
+
