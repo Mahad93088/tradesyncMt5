@@ -13,6 +13,8 @@ interface DbState {
   trade_mappings: Record<string, any>[];
   bridge_sync_logs: Record<string, any>[];
   trades: Record<string, any>[];
+  subscription_plans: Record<string, any>[];
+  subscriptions: Record<string, any>[];
 }
 
 const ACCEPTED_LOT_MODES = new Set([
@@ -561,6 +563,19 @@ async function runTests() {
     trade_mappings: [],
     bridge_sync_logs: [],
     trades: [],
+    subscription_plans: [
+      { id: 'plan-silver', code: 'silver', name: 'Silver', max_followers: 50, max_child_accounts: 50, is_active: true },
+    ],
+    subscriptions: [
+      {
+        id: crypto.randomUUID(),
+        mentor_id: mentorId,
+        plan_id: 'plan-silver',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 86400_000).toISOString(),
+        created_at: new Date().toISOString(),
+      },
+    ],
   };
 
   // (a) Active assignment missing parent_account_id or child_account_id MUST fail
@@ -855,7 +870,7 @@ async function runTests() {
     assert.strictEqual(suspendRes.status, 200);
     const suspendJson = await suspendRes.json();
     assert.strictEqual(suspendJson.pausedAssignments, 1);
-    assert.strictEqual(activeAssign.status, 'inactive');
+    assert.strictEqual(activeAssign.status, 'suspended');
 
     // Reactivating assignment while trader is suspended MUST fail
     const reactivateWhileSuspended = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/status`, {
@@ -886,9 +901,16 @@ async function runTests() {
     });
     assert.strictEqual(restoreTrader.status, 200);
 
-    const reactivateOk = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/status`, {
+    const traderUnsuspendBlocked = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
+      body: JSON.stringify({ status: 'active' }),
+    });
+    assert.strictEqual(traderUnsuspendBlocked.status, 403);
+
+    const reactivateOk = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-admin' },
       body: JSON.stringify({ status: 'active' }),
     });
     assert.strictEqual(reactivateOk.status, 200);

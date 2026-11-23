@@ -99,7 +99,7 @@ export class RiskEngine {
       maxLotCap: numOr(row?.max_lot_cap, 50.0),
       minLotClamp: numOr(row?.min_lot_clamp, 0.01),
       maxDrawdownProtectionPercent: numOr(row?.max_drawdown_percent, 20.0),
-      copyPendingOrders: boolOr(row?.copy_pending_orders, true),
+      copyPendingOrders: boolOr(row?.copy_pending_orders, false),
       syncSlTp: boolOr(row?.sync_sl_tp, true),
       slippageMaxPips: numOr(row?.slippage_max_pips, 3.0),
       symbolPrefix: typeof row?.symbol_prefix === 'string' ? row.symbol_prefix : '',
@@ -383,6 +383,164 @@ export class RiskEngine {
       valid: true,
       childLots: Number(stepped.toFixed(2)),
       childSymbol,
+    };
+  }
+
+  /**
+   * Calculate proportional child close volume for a parent partial close
+   * strictly respecting verified broker minLot, maxLot, and lotStep without
+   * ever rounding upward or silently increasing volume.
+   */
+  public static calculatePartialChildCloseLots(input: {
+    symbol: string;
+    closedParentLots: number;
+    remainingParentLots?: number | null;
+    initialParentLots: number;
+    currentChildRemainingLots: number;
+    partialCloseCount?: number;
+    brokerLimits?: {
+      minLot?: number;
+      maxLot?: number;
+      lotStep?: number;
+    } | null;
+  }): {
+    valid: boolean;
+    childCloseLots: number;
+    childRemainingLotsAfter: number;
+    closeRatio?: number;
+    reason?: string;
+  } {
+    const {
+      symbol,
+      closedParentLots,
+      remainingParentLots,
+      initialParentLots,
+      currentChildRemainingLots,
+      partialCloseCount = 0,
+      brokerLimits,
+    } = input;
+
+    if (!brokerLimits) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        reason: `Verified broker symbol specifications missing for ${symbol}. Cannot execute safe partial close.`,
+      };
+    }
+
+    const minLot = Number(brokerLimits.minLot);
+    const maxLot = Number(brokerLimits.maxLot);
+    const lotStep = Number(brokerLimits.lotStep);
+
+    if (
+      !Number.isFinite(minLot) ||
+      minLot <= 0 ||
+      !Number.isFinite(lotStep) ||
+      lotStep <= 0 ||
+      !Number.isFinite(maxLot) ||
+      maxLot < minLot
+    ) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        reason: `Invalid broker symbol specs for ${symbol} (minLot=${String(brokerLimits.minLot)}, maxLot=${String(brokerLimits.maxLot)}, lotStep=${String(brokerLimits.lotStep)}).`,
+      };
+    }
+
+    if (!Number.isFinite(closedParentLots) || closedParentLots <= 0) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        reason: `Invalid parent closedLots value (${String(closedParentLots)}) for partial close.`,
+      };
+    }
+
+    if (!Number.isFinite(currentChildRemainingLots) || currentChildRemainingLots <= 0) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: 0,
+        reason: `Child position has no remaining open lots (${String(currentChildRemainingLots)}).`,
+      };
+    }
+
+    let parentBeforeLots = NaN;
+    if (remainingParentLots != null && Number.isFinite(remainingParentLots) && remainingParentLots > 0) {
+      parentBeforeLots = closedParentLots + remainingParentLots;
+    } else if (partialCloseCount === 0 && Number.isFinite(initialParentLots) && initialParentLots > closedParentLots) {
+      parentBeforeLots = initialParentLots;
+    }
+
+    if (!Number.isFinite(parentBeforeLots) || parentBeforeLots <= 0) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        reason: 'Ambiguous parent partial-close volume telemetry: positive remainingLots or valid initial parent volume required.',
+      };
+    }
+
+    const closeRatio = closedParentLots / parentBeforeLots;
+    if (!Number.isFinite(closeRatio) || closeRatio <= 0 || closeRatio >= 1) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        reason: `Invalid partial close ratio (${closeRatio.toFixed(6)}); expected strictly between 0 and 1.`,
+      };
+    }
+
+    const rawChildClose = currentChildRemainingLots * closeRatio;
+    let flooredClose = this.floorToStep(rawChildClose, lotStep);
+
+    if (flooredClose > maxLot) {
+      flooredClose = this.floorToStep(maxLot, lotStep);
+    }
+
+    if (flooredClose > currentChildRemainingLots) {
+      flooredClose = this.floorToStep(currentChildRemainingLots, lotStep);
+    }
+
+    // Never silently round upward to minLot
+    if (!Number.isFinite(flooredClose) || flooredClose <= 0 || flooredClose + 1e-9 < minLot) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        closeRatio,
+        reason: `Proportional partial close volume (${flooredClose}) is below broker minLot (${minLot}) for ${symbol} and will not be silently increased.`,
+      };
+    }
+
+    const remainingAfter = Number((currentChildRemainingLots - flooredClose).toFixed(4));
+    if (remainingAfter <= 1e-9) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        closeRatio,
+        reason: `Proportional partial close (${flooredClose}) would close 100% of child volume while parent remains partially open.`,
+      };
+    }
+
+    if (remainingAfter + 1e-9 < minLot) {
+      return {
+        valid: false,
+        childCloseLots: 0,
+        childRemainingLotsAfter: currentChildRemainingLots,
+        closeRatio,
+        reason: `Partial close would leave child remainder (${remainingAfter}) below broker minLot (${minLot}) for ${symbol}.`,
+      };
+    }
+
+    return {
+      valid: true,
+      childCloseLots: Number(flooredClose.toFixed(2)),
+      childRemainingLotsAfter: Number(remainingAfter.toFixed(2)),
+      closeRatio,
     };
   }
 }

@@ -1,5 +1,12 @@
 import type { Request, Response } from 'express';
-import { checkMentorFollowerQuota, isMissingRelationError, writeAuditLog } from './billingService.ts';
+import {
+  checkMentorFollowerQuota,
+  isMissingRelationError,
+  resolveMentorPlanLimit,
+  writeAuditLog,
+} from './billingService.ts';
+import { CLIENT_PLAN_LIMITS } from '../config/policy.ts';
+import { BridgeStore } from './bridgeStore.ts';
 import type { Day2RouteContext } from './day2Routes.ts';
 
 export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
@@ -63,12 +70,14 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
         b.studentMonthlyFeeUsd !== undefined ||
         b.studentBillingPeriod !== undefined
       ) {
+        const resolvedPlan = await resolveMentorPlanLimit(dbClient, mentorId);
+        const authoritativeMaxFollowers = resolvedPlan.maxFollowers ?? CLIENT_PLAN_LIMITS.trial;
         const mpBase: Record<string, any> = {
           user_id: mentorId,
           strategy_name: String(b.strategyName || 'Master Strategy').trim() || 'Master Strategy',
           description: String(b.description || '').trim(),
           monthly_fee: Math.max(0, Number(b.monthlyFee ?? 0) || 0),
-          max_followers: Math.max(1, Math.round(Number(b.maxFollowers ?? 25) || 25)),
+          max_followers: authoritativeMaxFollowers,
           invite_code: `TS-${mentorId.slice(0, 8).toUpperCase()}`,
           updated_at: nowIso,
         };
@@ -152,10 +161,20 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
       if (b.mentorId !== undefined) {
         const cleanMentorId = String(b.mentorId || '').trim();
         if (!cleanMentorId) {
-          await dbClient
+          const { data: deactivated } = await dbClient
             .from('mentor_assignments')
             .update({ status: 'inactive' })
-            .eq('trader_id', traderId);
+            .eq('trader_id', traderId)
+            .select('child_account_id, parent_account_id');
+          for (const row of deactivated || []) {
+            if (row?.child_account_id) {
+              await BridgeStore.getInstance().cancelQueuedOpenInstructions(dbClient, {
+                childAccountId: row.child_account_id,
+                parentAccountId: row.parent_account_id || undefined,
+                reason: 'Mentor assignment cleared by admin',
+              });
+            }
+          }
         } else if (isValidUUID(cleanMentorId)) {
           const [{ data: parentAcc }, { data: childAcc }] = await Promise.all([
             dbClient
@@ -175,7 +194,7 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
           ]);
 
           if (parentAcc?.id && childAcc?.id) {
-            const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, childAcc.id);
+            const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, childAcc.id, traderId);
             if (!quotaCheck.allowed) {
               return res.status(403).json({
                 success: false,
@@ -186,18 +205,32 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
 
             const { data: existingAssign } = await dbClient
               .from('mentor_assignments')
-              .select('id')
+              .select('id, status, activation_epoch')
               .eq('child_account_id', childAcc.id)
               .maybeSingle();
 
+            const nextStatus = updatedProfile.status === 'active' ? 'active' : 'inactive';
             if (existingAssign?.id) {
+              if (nextStatus !== 'active') {
+                await BridgeStore.getInstance().cancelQueuedOpenInstructions(dbClient, {
+                  childAccountId: childAcc.id,
+                  reason: 'Trader assignment set inactive by admin',
+                });
+              }
               await dbClient
                 .from('mentor_assignments')
                 .update({
                   mentor_id: cleanMentorId,
                   parent_account_id: parentAcc.id,
-                  status: updatedProfile.status === 'active' ? 'active' : 'inactive',
+                  status: nextStatus,
                   assigned_at: nowIso,
+                  ...(nextStatus === 'active'
+                    ? {
+                        activated_at: nowIso,
+                        activation_epoch: (Number(existingAssign.activation_epoch) || 1) + 1,
+                        resumed_at: nowIso,
+                      }
+                    : { paused_at: nowIso }),
                 })
                 .eq('id', existingAssign.id);
             } else {
@@ -207,11 +240,14 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
                   trader_id: traderId,
                   parent_account_id: parentAcc.id,
                   child_account_id: childAcc.id,
-                  status: updatedProfile.status === 'active' ? 'active' : 'inactive',
+                  status: nextStatus,
                   lot_mode: 'parent_lot',
                   lot_multiplier: 1.0,
                   fixed_lot: 0.1,
+                  copy_pending_orders: false,
                   assigned_at: nowIso,
+                  activated_at: nextStatus === 'active' ? nowIso : null,
+                  activation_epoch: 1,
                 },
               ]);
             }
@@ -609,7 +645,7 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
           return res.status(400).json({ success: false, error: 'Student has not connected a Child MT5 Demo account yet.' });
         }
 
-        const quotaCheck = await checkMentorFollowerQuota(dbClient, inv.mentor_id, childAcc.id);
+        const quotaCheck = await checkMentorFollowerQuota(dbClient, inv.mentor_id, childAcc.id, inv.trader_id);
         if (!quotaCheck.allowed) {
           return res.status(403).json({
             success: false,
@@ -620,7 +656,7 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
 
         const { data: existingAssign } = await dbClient
           .from('mentor_assignments')
-          .select('id')
+          .select('id, activation_epoch')
           .eq('child_account_id', childAcc.id)
           .maybeSingle();
 
@@ -633,6 +669,12 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
               parent_account_id: parentAcc.id,
               status: 'active',
               assigned_at: nowIso,
+              activated_at: nowIso,
+              activation_epoch: (Number(existingAssign.activation_epoch) || 1) + 1,
+              resumed_at: nowIso,
+              suspended_by: null,
+              suspended_at: null,
+              suspension_reason: null,
             })
             .eq('id', existingAssign.id)
             .select('*')
@@ -652,7 +694,10 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
                 lot_mode: 'parent_lot',
                 lot_multiplier: 1.0,
                 fixed_lot: 0.1,
+                copy_pending_orders: false,
                 assigned_at: nowIso,
+                activated_at: nowIso,
+                activation_epoch: 1,
               },
             ])
             .select('*')
@@ -887,7 +932,7 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
           return res.status(400).json({ success: false, error: 'Connect your Child MT5 Demo account before accepting this invitation.' });
         }
 
-        const quotaCheck = await checkMentorFollowerQuota(dbClient, inv.mentor_id, childAcc.id);
+        const quotaCheck = await checkMentorFollowerQuota(dbClient, inv.mentor_id, childAcc.id, caller.user.id);
         if (!quotaCheck.allowed) {
           return res.status(403).json({
             success: false,
@@ -898,7 +943,7 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
 
         const { data: existingAssign } = await dbClient
           .from('mentor_assignments')
-          .select('id')
+          .select('id, activation_epoch')
           .eq('child_account_id', childAcc.id)
           .maybeSingle();
 
@@ -911,6 +956,12 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
               parent_account_id: parentAcc.id,
               status: 'active',
               assigned_at: nowIso,
+              activated_at: nowIso,
+              activation_epoch: (Number(existingAssign.activation_epoch) || 1) + 1,
+              resumed_at: nowIso,
+              suspended_by: null,
+              suspended_at: null,
+              suspension_reason: null,
             })
             .eq('id', existingAssign.id)
             .select('*')
@@ -930,7 +981,10 @@ export function registerMentorStudentRoutes(ctx: Day2RouteContext): void {
                 lot_mode: 'parent_lot',
                 lot_multiplier: 1.0,
                 fixed_lot: 0.1,
+                copy_pending_orders: false,
                 assigned_at: nowIso,
+                activated_at: nowIso,
+                activation_epoch: 1,
               },
             ])
             .select('*')

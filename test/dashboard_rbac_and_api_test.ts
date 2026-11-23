@@ -11,6 +11,8 @@ interface DbState {
   trade_mappings: Record<string, any>[];
   bridge_sync_logs: Record<string, any>[];
   trades: Record<string, any>[];
+  subscription_plans: Record<string, any>[];
+  subscriptions: Record<string, any>[];
 }
 
 function createStage1RbacMockSupabase(state: DbState) {
@@ -346,6 +348,20 @@ async function runTests() {
       { id: 'log-2', event_type: 'ADMIN_AUDIT', level: 'warn', details: 'Secret admin event', ticket: null, created_at: nowIso },
       { id: 'log-3', event_type: 'BRIDGE_OPEN_QUEUED', level: 'info', details: 'Other tenant ticket', ticket: '9999', created_at: nowIso },
     ],
+    subscription_plans: [
+      { id: 'plan-silver-rbac', code: 'silver', name: 'Silver', max_followers: 50, max_child_accounts: 50, is_active: true },
+    ],
+    subscriptions: [
+      {
+        id: 'sub-rbac-m1',
+        user_id: mentorId,
+        mentor_id: mentorId,
+        plan_id: 'plan-silver-rbac',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: nowIso,
+      },
+    ],
     trades: [
       {
         id: 'trade-parent-1',
@@ -528,14 +544,14 @@ async function runTests() {
       'symbol_suffix',
     ]);
 
-    // Pause ('paused' -> normalized to DB 'inactive')
+    // Pause ('paused' stays distinct from 'inactive')
     const pauseRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/status`, {
       method: 'POST',
       headers: { Authorization: 'Bearer jwt-mentor', 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'paused' }),
     });
     assert.strictEqual(pauseRes.status, 200);
-    assert.strictEqual(state.mentor_assignments.find((a) => a.id === assignId1)?.status, 'inactive');
+    assert.strictEqual(state.mentor_assignments.find((a) => a.id === assignId1)?.status, 'paused');
 
     // Resume back to active
     const resumeRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/status`, {
@@ -545,7 +561,7 @@ async function runTests() {
     });
     assert.strictEqual(resumeRes.status, 200);
     assert.strictEqual(state.mentor_assignments.find((a) => a.id === assignId1)?.status, 'active');
-    console.log('[PASS] 4. Lot settings & pause/resume assignment endpoints normalize statuses to active/inactive cleanly.');
+    console.log('[PASS] 4. Lot settings & pause/resume assignment endpoints preserve paused/active status cleanly.');
 
     // 5. Mentor directory & Join via invite code
     const dirRes = await fetch(`${baseUrl}/api/v1/bridge/mentors/directory`, {
@@ -565,23 +581,16 @@ async function runTests() {
     assert.strictEqual(state.mentor_assignments.find((a) => a.id === assignId2)?.status, 'active');
     console.log('[PASS] 5. Verified Mentor Directory & Invite Code joining work end-to-end.');
 
-    // 6. Emergency close requires confirmation and queues CLOSE instruction
-    const unconfirmedClose = await fetch(`${baseUrl}/api/v1/bridge/mentor/emergency-close`, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer jwt-mentor', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parentTicket: '1001', confirm: false }),
-    });
-    assert.strictEqual(unconfirmedClose.status, 400);
-
-    const confirmedClose = await fetch(`${baseUrl}/api/v1/bridge/mentor/emergency-close`, {
+    // 6. Remote mentor emergency close is strictly disabled by policy (403 EMERGENCY_CLOSE_DISABLED)
+    const blockedEmergencyClose = await fetch(`${baseUrl}/api/v1/bridge/mentor/emergency-close`, {
       method: 'POST',
       headers: { Authorization: 'Bearer jwt-mentor', 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentTicket: '1001', confirm: true }),
     });
-    assert.strictEqual(confirmedClose.status, 200);
-    const confirmedCloseJson: any = await confirmedClose.json();
-    assert.strictEqual(confirmedCloseJson.closeInstructionsQueued, 1);
-    console.log('[PASS] 6. Emergency close queues idempotent CLOSE instruction with explicit confirmation.');
+    assert.strictEqual(blockedEmergencyClose.status, 403);
+    const blockedEmergencyJson: any = await blockedEmergencyClose.json();
+    assert.strictEqual(blockedEmergencyJson.code, 'EMERGENCY_CLOSE_DISABLED');
+    console.log('[PASS] 6. Emergency close endpoint enforces ALLOW_MENTOR_EMERGENCY_CLOSE = false (403).');
 
     // 7. Admin user-status control
     const nonAdminStatusRes = await fetch(`${baseUrl}/api/admin/user-status`, {

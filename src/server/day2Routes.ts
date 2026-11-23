@@ -5,11 +5,13 @@ import {
   checkMentorFollowerQuota,
   getBillingProviderStatus,
   isMissingRelationError,
+  resolveMentorPlanLimit,
   verifyPayPalWebhookSignature,
   verifyStripeWebhookSignature,
   writeAuditLog,
   type AuditLogInput,
 } from './billingService.ts';
+import { CLIENT_PLAN_LIMITS, LEGACY_PLAN_CODE_COMPAT } from '../config/policy.ts';
 
 export interface Day2RouteContext {
   registerRoute: (
@@ -677,8 +679,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     monthlyPrice: Number(p.monthly_price_usd ?? 0),
     yearlyPrice: Number(p.yearly_price_usd ?? 0),
     trialDays: Number(p.trial_days ?? 0),
-    maxFollowers: Number(p.max_followers ?? 25),
-    maxChildAccounts: Number(p.max_followers ?? p.max_child_accounts ?? 25),
+    maxFollowers: Number(p.max_followers ?? CLIENT_PLAN_LIMITS.trial),
+    maxChildAccounts: Number(p.max_followers ?? p.max_child_accounts ?? CLIENT_PLAN_LIMITS.trial),
     maxLotSize: 50,
     isActive: p.is_active !== false && p.is_archived !== true,
     isArchived: Boolean(p.is_archived),
@@ -686,7 +688,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
     features: Array.isArray(p.features) ? p.features : [],
     priorityExecution: p.tier === 'enterprise' || Number(p.max_followers) >= 50,
     slTpSync: true,
-    isPopular: p.code === 'pro_50',
+    isPopular: p.code === 'silver' || (LEGACY_PLAN_CODE_COMPAT && p.code === 'pro_50'),
   });
 
   registerRoute('get', '/api/v1/billing/plans', async (req: Request, res: Response) => {
@@ -1051,7 +1053,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         dbClient.from('subscriptions').select('*').order('created_at', { ascending: false }),
         dbClient.from('subscription_plans').select('*'),
         dbClient.from('profiles').select('id, full_name, email, role'),
-        dbClient.from('mentor_assignments').select('mentor_id, status').eq('status', 'active'),
+        dbClient.from('mentor_assignments').select('mentor_id, trader_id, status').eq('status', 'active'),
       ]);
 
       if (subRes.error) {
@@ -1063,9 +1065,15 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       for (const p of planRes.data || []) planMap.set(p.id, p);
       const profMap = new Map<string, any>();
       for (const p of profRes.data || []) profMap.set(p.id, p);
-      const followerCount = new Map<string, number>();
+      const followerTraderSets = new Map<string, Set<string>>();
       for (const a of assignRes.data || []) {
-        followerCount.set(a.mentor_id, (followerCount.get(a.mentor_id) || 0) + 1);
+        if (!a?.mentor_id) continue;
+        if (!followerTraderSets.has(a.mentor_id)) followerTraderSets.set(a.mentor_id, new Set<string>());
+        if (a.trader_id) followerTraderSets.get(a.mentor_id)!.add(String(a.trader_id));
+      }
+      const followerCount = new Map<string, number>();
+      for (const [mId, tSet] of followerTraderSets.entries()) {
+        followerCount.set(mId, tSet.size);
       }
 
       const subscriptions = (subRes.data || []).map((s: any) => {
@@ -1891,11 +1899,12 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           ? String(req.query.mentorId).trim()
           : caller.user.id;
 
-      const { data: existing, error } = await dbClient
-        .from('mentor_profiles')
-        .select('*')
-        .eq('user_id', targetMentorId)
-        .maybeSingle();
+      const [mpRes, resolvedPlan] = await Promise.all([
+        dbClient.from('mentor_profiles').select('*').eq('user_id', targetMentorId).maybeSingle(),
+        resolveMentorPlanLimit(dbClient, targetMentorId),
+      ]);
+      const { data: existing, error } = mpRes;
+      const authoritativeMaxFollowers = resolvedPlan.maxFollowers ?? CLIENT_PLAN_LIMITS.trial;
 
       if (error) {
         if (isMissingRelationError(error)) {
@@ -1906,7 +1915,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
               strategyName: 'Master Strategy',
               description: '',
               monthlyFee: 0,
-              maxFollowers: 25,
+              maxFollowers: authoritativeMaxFollowers,
+              planName: resolvedPlan.planName || 'Trial',
               inviteCode: `TS-${targetMentorId.slice(0, 8).toUpperCase()}`,
               isPublic: true,
             },
@@ -1923,7 +1933,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
             strategyName: 'Master Strategy',
             description: '',
             monthlyFee: 0,
-            maxFollowers: 25,
+            maxFollowers: authoritativeMaxFollowers,
+            planName: resolvedPlan.planName || 'Trial',
             inviteCode: `TS-${targetMentorId.slice(0, 8).toUpperCase()}`,
             isPublic: true,
           },
@@ -1940,7 +1951,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           monthlyFee: Number(existing.monthly_fee ?? 0),
           studentMonthlyFeeUsd: Number(existing.student_monthly_fee_usd ?? existing.monthly_fee ?? 0),
           studentBillingPeriod: existing.student_billing_period || 'monthly',
-          maxFollowers: Number(existing.max_followers ?? 25),
+          maxFollowers: authoritativeMaxFollowers,
+          planName: resolvedPlan.planName || 'Trial',
           inviteCode: existing.invite_code,
           isPublic: existing.is_public !== false,
         },
@@ -1979,7 +1991,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
       const studentBillingPeriod = ['monthly', 'quarterly', 'yearly', 'free'].includes(String(b.studentBillingPeriod))
         ? String(b.studentBillingPeriod)
         : 'monthly';
-      const maxFollowers = Math.max(1, Math.round(Number(b.maxFollowers ?? 25)));
+      const resolvedPlan = await resolveMentorPlanLimit(dbClient, targetMentorId);
+      const maxFollowers = resolvedPlan.maxFollowers ?? CLIENT_PLAN_LIMITS.trial;
       const isPublic = b.isPublic !== false;
       const inviteCode = `TS-${targetMentorId.slice(0, 8).toUpperCase()}`;
 
@@ -2040,7 +2053,7 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
         targetType: 'mentor_profiles',
         targetId: saved.id,
         result: 'success',
-        details: `Updated mentor strategy "${strategyName}" (fee=$${monthlyFee}, studentFee=$${studentMonthlyFeeUsd}/${studentBillingPeriod}, maxFollowers=${maxFollowers}).`,
+        details: `Updated mentor strategy "${strategyName}" (fee=$${monthlyFee}, studentFee=$${studentMonthlyFeeUsd}/${studentBillingPeriod}, planMaxFollowers=${maxFollowers}).`,
       });
 
       return res.status(200).json({
@@ -2053,7 +2066,8 @@ export function registerDay2Routes(ctx: Day2RouteContext): void {
           monthlyFee: Number(saved.monthly_fee ?? 0),
           studentMonthlyFeeUsd: Number(saved.student_monthly_fee_usd ?? saved.monthly_fee ?? 0),
           studentBillingPeriod: saved.student_billing_period || 'monthly',
-          maxFollowers: Number(saved.max_followers ?? 25),
+          maxFollowers,
+          planName: resolvedPlan.planName || 'Trial',
           inviteCode: saved.invite_code,
           isPublic: saved.is_public !== false,
         },

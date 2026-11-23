@@ -14,6 +14,8 @@ interface DbState {
   bridge_sync_logs: Record<string, any>[];
   trades: Record<string, any>[];
   auth_users: Record<string, any>[];
+  subscription_plans: Record<string, any>[];
+  subscriptions: Record<string, any>[];
 }
 
 function createPriority1MockSupabase(state: DbState) {
@@ -405,6 +407,29 @@ async function runTests() {
     trade_mappings: [],
     bridge_sync_logs: [],
     trades: [],
+    subscription_plans: [
+      { id: 'plan-silver-p1', code: 'silver', name: 'Silver', max_followers: 50, max_child_accounts: 50, is_active: true },
+    ],
+    subscriptions: [
+      {
+        id: 'sub-p1-m1',
+        user_id: mentorId,
+        mentor_id: mentorId,
+        plan_id: 'plan-silver-p1',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: nowIso,
+      },
+      {
+        id: 'sub-p1-m2',
+        user_id: mentor2Id,
+        mentor_id: mentor2Id,
+        plan_id: 'plan-silver-p1',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: nowIso,
+      },
+    ],
   };
 
   const mockSupabase = createPriority1MockSupabase(state);

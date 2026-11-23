@@ -627,11 +627,11 @@ async function runStage1Tests() {
           equity: 50000,
           terminal_token_hash: hash(parentToken),
         },
-        { id: cFixed, user_id: traderFixed, account_role: 'child', account_number: '80001', balance: 10000, equity: 10000 },
-        { id: cFixedAlias, user_id: traderFixedAlias, account_role: 'child', account_number: '80002', balance: 10000, equity: 10000 },
-        { id: cMultOne, user_id: traderMultOne, account_role: 'child', account_number: '80003', balance: 10000, equity: 10000 },
-        { id: cEqRatio, user_id: traderEqRatio, account_role: 'child', account_number: '80004', balance: 10000, equity: 10000 },
-        { id: cDrawdown, user_id: traderDrawdown, account_role: 'child', account_number: '80005', balance: 10000, equity: 7000 }, // 30% DD > 20%
+        { id: cFixed, user_id: traderFixed, account_role: 'child', account_number: '80001', balance: 10000, equity: 10000, verified_balance: 10000, verified_equity: 10000, balance_verified_at: new Date().toISOString() },
+        { id: cFixedAlias, user_id: traderFixedAlias, account_role: 'child', account_number: '80002', balance: 10000, equity: 10000, verified_balance: 10000, verified_equity: 10000, balance_verified_at: new Date().toISOString() },
+        { id: cMultOne, user_id: traderMultOne, account_role: 'child', account_number: '80003', balance: 10000, equity: 10000, verified_balance: 10000, verified_equity: 10000, balance_verified_at: new Date().toISOString() },
+        { id: cEqRatio, user_id: traderEqRatio, account_role: 'child', account_number: '80004', balance: 10000, equity: 10000, verified_balance: 10000, verified_equity: 10000, balance_verified_at: new Date().toISOString() },
+        { id: cDrawdown, user_id: traderDrawdown, account_role: 'child', account_number: '80005', balance: 10000, equity: 7000, verified_balance: 10000, verified_equity: 7000, balance_verified_at: new Date().toISOString() }, // 30% DD > 20%
       ],
       mentor_assignments: [
         { id: '1', mentor_id: mentorId, trader_id: traderFixed, parent_account_id: parentAccId, child_account_id: cFixed, status: 'active', lot_mode: 'fixed', lot_multiplier: 1.0, fixed_lot: 0.07 },

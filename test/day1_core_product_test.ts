@@ -20,6 +20,8 @@ interface DbState {
   trade_mappings: Record<string, any>[];
   bridge_sync_logs: Record<string, any>[];
   trades: Record<string, any>[];
+  subscription_plans: Record<string, any>[];
+  subscriptions: Record<string, any>[];
 }
 
 function createDay1MockSupabase(state: DbState) {
@@ -284,6 +286,12 @@ async function runTests() {
         account_type: 'demo',
         balance: 10000,
         equity: 10000,
+        verified_balance: 10000,
+        verified_equity: 10000,
+        balance_verified_at: nowIso,
+        verified_symbol_specs: {
+          'EURUSD.pro': { minLot: 0.01, maxLot: 100, lotStep: 0.01 },
+        },
         margin: 0,
         free_margin: 10000,
         currency: 'USD',
@@ -305,6 +313,12 @@ async function runTests() {
         account_type: 'demo',
         balance: 10000,
         equity: 10000,
+        verified_balance: 10000,
+        verified_equity: 10000,
+        balance_verified_at: nowIso,
+        verified_symbol_specs: {
+          EURUSD: { minLot: 0.01, maxLot: 100, lotStep: 0.01 },
+        },
         margin: 0,
         free_margin: 10000,
         currency: 'USD',
@@ -322,6 +336,29 @@ async function runTests() {
     trade_mappings: [],
     bridge_sync_logs: [],
     trades: [],
+    subscription_plans: [
+      { id: 'plan-silver', code: 'silver', name: 'Silver', max_followers: 50, max_child_accounts: 50, is_active: true },
+    ],
+    subscriptions: [
+      {
+        id: 'sub-m1',
+        user_id: mentor1Id,
+        mentor_id: mentor1Id,
+        plan_id: 'plan-silver',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: nowIso,
+      },
+      {
+        id: 'sub-m2',
+        user_id: mentor2Id,
+        mentor_id: mentor2Id,
+        plan_id: 'plan-silver',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: nowIso,
+      },
+    ],
   };
 
   const mockSupabase = createDay1MockSupabase(state);
@@ -708,7 +745,7 @@ async function runTests() {
     assert.strictEqual(childOpenTradeRow.status, 'OPEN');
     assert.strictEqual(childOpenTradeRow.is_realized, false);
 
-    // Partial close safety check: partial close on parent skips child CLOSE
+    // Proportional partial close on parent queues proportional partial CLOSE on child (0.25/1.0 * 0.5 = 0.12)
     const partialCloseRes = await fetch(`${baseUrl}/api/v1/bridge/events/trade-close`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Terminal-Token': parent1Token },
@@ -723,8 +760,34 @@ async function runTests() {
     });
     assert.strictEqual(partialCloseRes.status, 200);
     const partialCloseJson: any = await partialCloseRes.json();
-    assert.strictEqual(partialCloseJson.closeInstructionsQueued, 0);
-    assert.ok(state.bridge_sync_logs.some((l) => l.event_type === 'PARTIAL_CLOSE_SKIPPED'));
+    assert.strictEqual(partialCloseJson.partialCloseHandled, 'queued');
+    assert.strictEqual(partialCloseJson.closeInstructionsQueued, 1);
+    assert.strictEqual(partialCloseJson.instructions[0].lots, 0.12);
+    assert.ok(state.bridge_sync_logs.some((l) => l.event_type === 'BRIDGE_PARENT_TRADE_PARTIAL_CLOSE'));
+
+    // Child polls and ACKs partial close while keeping position OPEN at 0.38 lots remaining
+    const pollPartialRes = await fetch(`${baseUrl}/api/v1/bridge/instructions/pending`, {
+      headers: { 'X-Terminal-Token': child1Token },
+    });
+    const pollPartialJson: any = await pollPartialRes.json();
+    assert.strictEqual(pollPartialJson.instructions.length, 1);
+    const partialInst = pollPartialJson.instructions[0];
+    assert.strictEqual(partialInst.lots, 0.12);
+
+    const ackPartialRes = await fetch(`${baseUrl}/api/v1/bridge/instructions/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Terminal-Token': child1Token },
+      body: JSON.stringify({
+        instructionId: partialInst.instructionId,
+        status: 'EXECUTED',
+        childTicket: '9001003',
+        executedLots: 0.12,
+        executionLatencyMs: 25,
+      }),
+    });
+    assert.strictEqual(ackPartialRes.status, 200);
+    assert.strictEqual(childOpenTradeRow.status, 'OPEN');
+    assert.strictEqual(childOpenTradeRow.volume, 0.38);
 
     // Full close on parent with broker deal profit/commission/swap
     const fullCloseRes = await fetch(`${baseUrl}/api/v1/bridge/events/trade-close`, {

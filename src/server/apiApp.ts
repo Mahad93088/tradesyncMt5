@@ -11,9 +11,21 @@ import {
   RegisteredTerminal,
   type AuthenticateTerminalOptions,
   type TerminalHeartbeatTelemetry,
+  type VerifiedSymbolSpec,
 } from './bridgeStore.ts';
 import { createCorsAndSecurityMiddleware, SlidingWindowRateLimiter } from './securityMiddleware.ts';
-import { checkMentorFollowerQuota, isMissingRelationError, writeAuditLog } from './billingService.ts';
+import {
+  checkMentorFollowerQuota,
+  isMissingRelationError,
+  resolveMentorPlanLimit,
+  resolvePlanFollowerLimit,
+  writeAuditLog,
+} from './billingService.ts';
+import {
+  ALLOW_MENTOR_EMERGENCY_CLOSE,
+  BALANCE_PAUSE_THRESHOLD_USD,
+  CLIENT_PLAN_LIMITS,
+} from '../config/policy.ts';
 import { registerDay2Routes } from './day2Routes.ts';
 import { registerBrokerRoutes } from './brokerRoutes.ts';
 import { registerMentorStudentRoutes } from './mentorStudentRoutes.ts';
@@ -875,6 +887,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (dbClient && hasStrategyMetadata && newRole === 'mentor') {
         try {
           const inviteCode = `TS-${String(targetUserId).slice(0, 8).toUpperCase()}`;
+          const resolvedPlan = await resolveMentorPlanLimit(dbClient, targetUserId);
+          const authoritativeMaxFollowers = resolvedPlan.maxFollowers ?? CLIENT_PLAN_LIMITS.trial;
           const { error: mpErr } = await dbClient
             .from('mentor_profiles')
             .upsert(
@@ -883,6 +897,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
                   user_id: targetUserId,
                   strategy_name: String(strategyName || 'Master Strategy').trim() || 'Master Strategy',
                   monthly_fee: monthlyFee != null && Number.isFinite(Number(monthlyFee)) ? Math.max(0, Number(monthlyFee)) : 0,
+                  max_followers: authoritativeMaxFollowers,
                   invite_code: inviteCode,
                   updated_at: new Date().toISOString(),
                 },
@@ -1070,15 +1085,51 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       // When suspending or moving to pending, deactivate active copy-trading assignments for safety
+      // and cancel queued OPEN instructions without touching existing open positions.
       let pausedAssignments = 0;
       if (normalizedStatus !== 'active') {
-        const { data: affected } = await dbClient
+        const targetAssignStatus = normalizedStatus === 'suspended' ? 'suspended' : 'paused';
+        const nowIso = new Date().toISOString();
+        let { data: affected, error: affErr } = await dbClient
           .from('mentor_assignments')
-          .update({ status: 'inactive' })
+          .update({
+            status: targetAssignStatus,
+            ...(targetAssignStatus === 'suspended'
+              ? {
+                  suspended_by: caller.user.id,
+                  suspended_at: nowIso,
+                  suspension_reason: `Account status changed to suspended by admin ${caller.profile?.email || caller.user.id}`,
+                }
+              : {
+                  paused_at: nowIso,
+                  pause_reason: 'ADMIN_USER_STATUS_PENDING',
+                }),
+          })
           .or(`mentor_id.eq.${targetUserId},trader_id.eq.${targetUserId}`)
           .eq('status', 'active')
-          .select('id');
-        pausedAssignments = Array.isArray(affected) ? affected.length : 0;
+          .select('id, child_account_id, parent_account_id');
+
+        if (affErr && (isMissingRiskColumnError(affErr) || String(affErr.message || '').includes('check constraint'))) {
+          const fallbackRes = await dbClient
+            .from('mentor_assignments')
+            .update({ status: 'inactive' })
+            .or(`mentor_id.eq.${targetUserId},trader_id.eq.${targetUserId}`)
+            .eq('status', 'active')
+            .select('id, child_account_id, parent_account_id');
+          affected = fallbackRes.data;
+        }
+
+        const affectedRows = Array.isArray(affected) ? affected : [];
+        pausedAssignments = affectedRows.length;
+        for (const row of affectedRows) {
+          if (row?.child_account_id) {
+            await bridgeStore.cancelQueuedOpenInstructions(dbClient, {
+              childAccountId: row.child_account_id,
+              parentAccountId: row.parent_account_id || undefined,
+              reason: `User ${targetUserId} status changed to ${normalizedStatus}`,
+            });
+          }
+        }
       }
 
       await bridgeStore.addSyncLog(
@@ -1366,12 +1417,11 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (requestedRole === 'mentor') {
         try {
           const inviteCode = `TS-${String(newUserId).slice(0, 8).toUpperCase()}`;
+          const resolvedPlan = selectedPlan ? resolvePlanFollowerLimit(selectedPlan) : null;
           const computedMaxFollowers =
-            maxFollowers != null && Number.isFinite(Number(maxFollowers))
-              ? Math.max(1, Math.round(Number(maxFollowers)))
-              : selectedPlan?.max_followers != null
-              ? Number(selectedPlan.max_followers)
-              : 25;
+            resolvedPlan?.valid && resolvedPlan.limit !== null && resolvedPlan.limit > 0
+              ? resolvedPlan.limit
+              : CLIENT_PLAN_LIMITS.trial;
           const { error: mpErr } = await dbClient
             .from('mentor_profiles')
             .upsert(
@@ -1559,7 +1609,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         ? rawLotSettings.copyPendingOrders
         : typeof existingRow?.copy_pending_orders === 'boolean'
         ? existingRow.copy_pending_orders
-        : true;
+        : false;
     const symbolPrefix =
       rawLotSettings?.symbolPrefix !== undefined
         ? String(rawLotSettings.symbolPrefix ?? '').trim()
@@ -1692,9 +1742,30 @@ export function createApiApp(deps?: ApiAppDependencies) {
     };
 
     if (targetExisting?.id) {
+      if (targetExisting.parent_account_id && targetExisting.parent_account_id !== params.parentAccountId) {
+        await bridgeStore.cancelQueuedOpenInstructions(dbClient, {
+          childAccountId: params.childAccountId,
+          parentAccountId: targetExisting.parent_account_id,
+          reason: 'Reassigned child account to a different mentor parent account',
+        });
+      }
+
+      const nextEpoch = (Number(targetExisting.activation_epoch) || 1) + 1;
+      const boundaryPayload = {
+        ...fullPayload,
+        activated_at: nowIso,
+        activation_epoch: nextEpoch,
+        resumed_at: nowIso,
+        suspended_by: null,
+        suspended_at: null,
+        suspension_reason: null,
+        paused_at: null,
+        pause_reason: null,
+      };
+
       const { data: updated, error: updErr } = await dbClient
         .from('mentor_assignments')
-        .update(fullPayload)
+        .update(boundaryPayload)
         .eq('id', targetExisting.id)
         .select('*')
         .single();
@@ -1703,19 +1774,36 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return { assignment: updated, persistedFields: Object.keys(params.dbFields) };
       }
       if (isMissingRiskColumnError(updErr)) {
-        const { data: fallbackUpd, error: fallbackErr } = await dbClient
+        const { data: riskOnlyUpd, error: riskOnlyErr } = await dbClient
           .from('mentor_assignments')
-          .update(corePayload)
+          .update(fullPayload)
           .eq('id', targetExisting.id)
           .select('*')
           .single();
-        if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
-        return { assignment: fallbackUpd, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+        if (!riskOnlyErr) {
+          return { assignment: riskOnlyUpd, persistedFields: Object.keys(params.dbFields) };
+        }
+        if (isMissingRiskColumnError(riskOnlyErr)) {
+          const { data: fallbackUpd, error: fallbackErr } = await dbClient
+            .from('mentor_assignments')
+            .update(corePayload)
+            .eq('id', targetExisting.id)
+            .select('*')
+            .single();
+          if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
+          return { assignment: fallbackUpd, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+        }
+        return { assignment: null, persistedFields: [], error: riskOnlyErr.message };
       }
       return { assignment: null, persistedFields: [], error: updErr.message };
     }
 
-    const insertRow = { id: crypto.randomUUID(), ...fullPayload };
+    const insertRow = {
+      id: crypto.randomUUID(),
+      ...fullPayload,
+      activated_at: nowIso,
+      activation_epoch: 1,
+    };
     const { data: inserted, error: insErr } = await dbClient
       .from('mentor_assignments')
       .insert([insertRow])
@@ -1726,14 +1814,26 @@ export function createApiApp(deps?: ApiAppDependencies) {
       return { assignment: inserted, persistedFields: Object.keys(params.dbFields) };
     }
     if (isMissingRiskColumnError(insErr)) {
-      const fallbackRow = { id: crypto.randomUUID(), ...corePayload };
-      const { data: fallbackIns, error: fallbackErr } = await dbClient
+      const riskOnlyInsertRow = { id: crypto.randomUUID(), ...fullPayload };
+      const { data: riskOnlyIns, error: riskOnlyErr } = await dbClient
         .from('mentor_assignments')
-        .insert([fallbackRow])
+        .insert([riskOnlyInsertRow])
         .select('*')
         .single();
-      if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
-      return { assignment: fallbackIns, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+      if (!riskOnlyErr) {
+        return { assignment: riskOnlyIns, persistedFields: Object.keys(params.dbFields) };
+      }
+      if (isMissingRiskColumnError(riskOnlyErr)) {
+        const fallbackRow = { id: crypto.randomUUID(), ...corePayload };
+        const { data: fallbackIns, error: fallbackErr } = await dbClient
+          .from('mentor_assignments')
+          .insert([fallbackRow])
+          .select('*')
+          .single();
+        if (fallbackErr) return { assignment: null, persistedFields: [], error: fallbackErr.message };
+        return { assignment: fallbackIns, persistedFields: ['lot_mode', 'lot_multiplier', 'fixed_lot'] };
+      }
+      return { assignment: null, persistedFields: [], error: riskOnlyErr.message };
     }
     return { assignment: null, persistedFields: [], error: insErr.message };
   };
@@ -2013,24 +2113,92 @@ export function createApiApp(deps?: ApiAppDependencies) {
     }
 
     const telemetry: TerminalHeartbeatTelemetry = {};
-    const parseFiniteNum = (val: unknown): number | undefined => {
-      if (val === null || val === undefined || val === '') return undefined;
+    const parseFiniteNum = (val: unknown): { present: boolean; valid: boolean; value?: number } => {
+      if (val === null || val === undefined || val === '') return { present: false, valid: true };
       const n = Number(val);
-      return Number.isFinite(n) ? n : undefined;
+      return { present: true, valid: Number.isFinite(n), value: Number.isFinite(n) ? n : undefined };
     };
 
-    const balanceVal = parseFiniteNum(req.body?.balance);
-    const equityVal = parseFiniteNum(req.body?.equity);
-    const marginVal = parseFiniteNum(req.body?.margin);
-    const freeMarginVal = parseFiniteNum(req.body?.freeMargin ?? req.body?.free_margin);
-    const pingVal = parseFiniteNum(req.body?.pingMs ?? req.body?.ping_ms);
+    const balanceParsed = parseFiniteNum(req.body?.balance);
+    const equityParsed = parseFiniteNum(req.body?.equity);
+    const marginParsed = parseFiniteNum(req.body?.margin);
+    const freeMarginParsed = parseFiniteNum(req.body?.freeMargin ?? req.body?.free_margin);
+    const pingParsed = parseFiniteNum(req.body?.pingMs ?? req.body?.ping_ms);
     const autoTradeRaw = req.body?.autoTradingEnabled ?? req.body?.auto_trading_enabled;
 
-    if (balanceVal !== undefined && balanceVal >= 0) telemetry.balance = balanceVal;
-    if (equityVal !== undefined && equityVal >= 0) telemetry.equity = equityVal;
-    if (marginVal !== undefined && marginVal >= 0) telemetry.margin = marginVal;
-    if (freeMarginVal !== undefined) telemetry.freeMargin = freeMarginVal;
-    if (pingVal !== undefined && pingVal >= 0) telemetry.pingMs = Math.round(pingVal);
+    if (balanceParsed.present && (!balanceParsed.valid || (balanceParsed.value ?? -1) < 0)) {
+      return res.status(400).json({
+        success: false,
+        code: 'INVALID_TELEMETRY',
+        error: 'Invalid balance telemetry: must be a finite number >= 0.',
+      });
+    }
+    if (equityParsed.present && (!equityParsed.valid || (equityParsed.value ?? -1) < 0)) {
+      return res.status(400).json({
+        success: false,
+        code: 'INVALID_TELEMETRY',
+        error: 'Invalid equity telemetry: must be a finite number >= 0.',
+      });
+    }
+
+    const rawSpecs = req.body?.symbolSpecs ?? req.body?.verifiedSymbolSpecs ?? req.body?.verified_symbol_specs;
+    if (rawSpecs !== undefined && rawSpecs !== null) {
+      const normalizedSpecs: Record<string, VerifiedSymbolSpec> = {};
+      const entries: Array<[string, any]> = Array.isArray(rawSpecs)
+        ? rawSpecs.map((item: any) => [String(item?.symbol || '').trim(), item])
+        : typeof rawSpecs === 'object'
+        ? Object.entries(rawSpecs)
+        : [];
+
+      if (!Array.isArray(rawSpecs) && typeof rawSpecs !== 'object') {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_SYMBOL_SPECS',
+          error: 'Invalid symbolSpecs payload: expected an object keyed by symbol or an array of specs.',
+        });
+      }
+
+      for (const [rawSym, specObj] of entries) {
+        const sym = String(rawSym || '').trim();
+        const minLot = Number(specObj?.minLot ?? specObj?.volumeMin ?? specObj?.min_lot);
+        const maxLot = Number(specObj?.maxLot ?? specObj?.volumeMax ?? specObj?.max_lot);
+        const lotStep = Number(specObj?.lotStep ?? specObj?.volumeStep ?? specObj?.lot_step);
+        if (
+          !sym ||
+          !Number.isFinite(minLot) ||
+          minLot <= 0 ||
+          !Number.isFinite(maxLot) ||
+          maxLot < minLot ||
+          !Number.isFinite(lotStep) ||
+          lotStep <= 0
+        ) {
+          return res.status(400).json({
+            success: false,
+            code: 'INVALID_SYMBOL_SPECS',
+            error: `Invalid broker symbol specification for "${sym || 'unknown'}": minLot > 0, maxLot >= minLot, and lotStep > 0 are required.`,
+          });
+        }
+        const contractSize = Number(specObj?.contractSize ?? specObj?.contract_size);
+        const digits = Number(specObj?.digits);
+        normalizedSpecs[sym] = {
+          minLot,
+          maxLot,
+          lotStep,
+          ...(Number.isFinite(contractSize) && contractSize > 0 ? { contractSize } : {}),
+          ...(Number.isFinite(digits) && digits >= 0 ? { digits: Math.round(digits) } : {}),
+        };
+      }
+
+      if (Object.keys(normalizedSpecs).length > 0) {
+        telemetry.verifiedSymbolSpecs = normalizedSpecs;
+      }
+    }
+
+    if (balanceParsed.valid && balanceParsed.value !== undefined) telemetry.balance = balanceParsed.value;
+    if (equityParsed.valid && equityParsed.value !== undefined) telemetry.equity = equityParsed.value;
+    if (marginParsed.valid && marginParsed.value !== undefined && marginParsed.value >= 0) telemetry.margin = marginParsed.value;
+    if (freeMarginParsed.valid && freeMarginParsed.value !== undefined) telemetry.freeMargin = freeMarginParsed.value;
+    if (pingParsed.valid && pingParsed.value !== undefined && pingParsed.value >= 0) telemetry.pingMs = Math.round(pingParsed.value);
     if (typeof autoTradeRaw === 'boolean') telemetry.autoTradingEnabled = autoTradeRaw;
 
     const auth = await authenticateTerminal(req, { touchDb: 'always', telemetry });
@@ -2042,6 +2210,17 @@ export function createApiApp(deps?: ApiAppDependencies) {
       });
     }
 
+    const dbClient = auth.dbClient || getServiceRoleClient() || undefined;
+    let hysteresis: { pausedCount: number; resumedCount: number; cancelledOpenCount: number } | undefined;
+    if (auth.terminal.accountRole === 'child' && telemetry.balance !== undefined && dbClient) {
+      hysteresis = await bridgeStore.evaluateChildBalanceHysteresis(
+        dbClient,
+        auth.terminal.accountId,
+        telemetry.balance,
+        auth.terminal.lastSeenAt
+      );
+    }
+
     if (auth.terminal.previousConnectionStatus !== 'connected') {
       await bridgeStore.addSyncLog(
         {
@@ -2050,7 +2229,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           details: `${auth.terminal.accountRole.toUpperCase()} MT5 Demo terminal #${auth.terminal.accountNumber} (${auth.terminal.brokerServer}) connected via EA heartbeat.`,
           latencyMs: auth.terminal.pingMs,
         },
-        auth.dbClient || getServiceRoleClient() || undefined
+        dbClient
       );
     }
 
@@ -2063,6 +2242,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       connectionStatus: 'connected',
       lastSync: auth.terminal.lastSeenAt,
       telemetry,
+      ...(hysteresis ? { hysteresis } : {}),
     });
   });
 
@@ -3157,7 +3337,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
       let [accResult, assignResult, profilesResult, mpResult]: [any, any, any, any] = await Promise.all([
         dbClient.from('mt5_accounts').select(extendedAccountColumns).order('created_at', { ascending: false }),
-        dbClient.from('mentor_assignments').select('*').in('status', ['active', 'inactive']),
+        dbClient.from('mentor_assignments').select('*').in('status', ['active', 'paused', 'suspended', 'inactive']),
         dbClient.from('profiles').select('id, full_name, email, role, avatar_url, status, created_at'),
         dbClient.from('mentor_profiles').select('*'),
       ]);
@@ -3244,12 +3424,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .from('mentor_assignments')
           .select('*')
           .eq('mentor_id', caller.user.id)
-          .in('status', ['active', 'inactive']),
+          .in('status', ['active', 'paused', 'suspended', 'inactive']),
         dbClient
           .from('mentor_assignments')
           .select('*')
           .eq('trader_id', caller.user.id)
-          .in('status', ['active', 'inactive']),
+          .in('status', ['active', 'paused', 'suspended', 'inactive']),
       ]);
 
       if (accRes.error && isMissingRelationError(accRes.error)) {
@@ -3589,6 +3769,9 @@ export function createApiApp(deps?: ApiAppDependencies) {
       tp,
       magicNumber = 888999,
       comment = 'TradeSync Master',
+      eventTimestamp,
+      openTime,
+      timestamp,
     } = req.body;
 
     if (ticket == null || !symbol || !type || lots == null) {
@@ -3605,6 +3788,20 @@ export function createApiApp(deps?: ApiAppDependencies) {
         success: false,
         error: 'Invalid trade volume: lots must be a positive finite number.',
       });
+    }
+
+    const rawEventTs = eventTimestamp ?? openTime ?? timestamp;
+    let parentEventTimestampIso = new Date().toISOString();
+    if (rawEventTs != null && String(rawEventTs).trim() !== '') {
+      const parsedEventMs = Date.parse(String(rawEventTs).trim());
+      if (!Number.isFinite(parsedEventMs)) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_EVENT_TIMESTAMP',
+          error: 'Invalid eventTimestamp: must be a valid ISO-8601 timestamp.',
+        });
+      }
+      parentEventTimestampIso = new Date(parsedEventMs).toISOString();
     }
 
     const magicNumStr = magicNumber != null ? String(magicNumber).trim() : '888999';
@@ -3629,6 +3826,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
       lotSettings: ReturnType<typeof RiskEngine.normalizeLotSettingsFromRow>;
       childBalance: number;
       childEquity: number;
+      activationEpoch: number;
+      brokerLimits?: { minLot: number; maxLot: number; lotStep: number };
     }
 
     let assignedChildren: ChildCandidate[] = [];
@@ -3747,16 +3946,60 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
+      const nowMs = Date.now();
+      const parentEventMs = Date.parse(parentEventTimestampIso);
+
       if (assignments && assignments.length > 0) {
         for (const a of assignments) {
           if (!a.child_account_id) continue;
 
+          // 2a. Enforce balance pause & activation boundary gates on the assignment
+          if (a.balance_pause_active === true) {
+            await bridgeStore.addSyncLog(
+              {
+                eventType: 'CHILD_BALANCE_PAUSED_SKIPPED',
+                level: 'warn',
+                details: `Skipped copy for child ${a.child_account_id}: assignment is paused due to verified balance < $${BALANCE_PAUSE_THRESHOLD_USD}.`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          if (a.activated_at) {
+            const activatedMs = Date.parse(a.activated_at);
+            if (Number.isFinite(activatedMs) && Number.isFinite(parentEventMs) && parentEventMs < activatedMs) {
+              await bridgeStore.addSyncLog(
+                {
+                  eventType: 'PRE_ACTIVATION_TRADE_SKIPPED',
+                  level: 'info',
+                  details: `Skipped copy for child ${a.child_account_id}: parent trade timestamp (${parentEventTimestampIso}) precedes assignment activation (${a.activated_at}).`,
+                  ticket: parentTicketStr,
+                },
+                dbClient
+              );
+              continue;
+            }
+          }
+
           // 3. Verify Child account exists, is assigned role 'child', and is DEMO
-          const { data: childAcc } = await dbClient
+          let { data: childAcc, error: childAccErr } = await dbClient
             .from('mt5_accounts')
-            .select('id, user_id, account_role, account_type, connection_status, balance, equity')
+            .select(
+              'id, user_id, account_role, account_type, connection_status, balance, equity, verified_balance, verified_equity, balance_verified_at, verified_symbol_specs'
+            )
             .eq('id', a.child_account_id)
             .maybeSingle();
+
+          if (childAccErr && isMissingRiskColumnError(childAccErr)) {
+            const fallbackChildRes = await dbClient
+              .from('mt5_accounts')
+              .select('id, user_id, account_role, account_type, connection_status, balance, equity')
+              .eq('id', a.child_account_id)
+              .maybeSingle();
+            childAcc = fallbackChildRes.data as any;
+          }
 
           if (!childAcc || childAcc.account_role !== 'child') {
             await bridgeStore.addSyncLog(
@@ -3784,6 +4027,46 @@ export function createApiApp(deps?: ApiAppDependencies) {
             continue;
           }
 
+          // 3a. Fail closed on missing, stale, or below-$50 verified balance telemetry
+          const verifiedBal =
+            childAcc.verified_balance != null ? Number(childAcc.verified_balance) : NaN;
+          const verifiedEq =
+            childAcc.verified_equity != null ? Number(childAcc.verified_equity) : verifiedBal;
+          const verifiedAtMs = childAcc.balance_verified_at ? Date.parse(childAcc.balance_verified_at) : NaN;
+          const isTelemetryFresh =
+            Number.isFinite(verifiedAtMs) && nowMs - verifiedAtMs <= STALE_HEARTBEAT_THRESHOLD_MS;
+
+          if (!Number.isFinite(verifiedBal) || !isTelemetryFresh) {
+            await bridgeStore.addSyncLog(
+              {
+                eventType: 'UNVERIFIED_OR_STALE_TELEMETRY',
+                level: 'warn',
+                details: `Skipped copy for child ${a.child_account_id}: verified balance telemetry is missing or stale (fail closed).`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          if (verifiedBal < BALANCE_PAUSE_THRESHOLD_USD) {
+            await bridgeStore.evaluateChildBalanceHysteresis(
+              dbClient,
+              a.child_account_id,
+              verifiedBal
+            );
+            await bridgeStore.addSyncLog(
+              {
+                eventType: 'CHILD_BALANCE_PAUSED_SKIPPED',
+                level: 'warn',
+                details: `Skipped copy for child ${a.child_account_id}: verified balance $${verifiedBal.toFixed(2)} < $${BALANCE_PAUSE_THRESHOLD_USD}.`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
           // 4. Verify Trader user profile is active and not suspended
           const { data: traderProf } = await dbClient
             .from('profiles')
@@ -3804,11 +4087,35 @@ export function createApiApp(deps?: ApiAppDependencies) {
             continue;
           }
 
+          const lotSettings = RiskEngine.normalizeLotSettingsFromRow(a);
+          const targetChildSym = `${String(lotSettings.symbolPrefix || '').trim()}${String(symbol).trim()}${String(lotSettings.symbolSuffix || '').trim()}`;
+          const specsMap =
+            childAcc.verified_symbol_specs && typeof childAcc.verified_symbol_specs === 'object'
+              ? childAcc.verified_symbol_specs
+              : {};
+          const rawSpec = specsMap[targetChildSym] || specsMap[String(symbol).trim()];
+          const brokerLimits =
+            rawSpec &&
+            Number.isFinite(Number(rawSpec.minLot)) &&
+            Number(rawSpec.minLot) > 0 &&
+            Number.isFinite(Number(rawSpec.maxLot)) &&
+            Number(rawSpec.maxLot) >= Number(rawSpec.minLot) &&
+            Number.isFinite(Number(rawSpec.lotStep)) &&
+            Number(rawSpec.lotStep) > 0
+              ? {
+                  minLot: Number(rawSpec.minLot),
+                  maxLot: Number(rawSpec.maxLot),
+                  lotStep: Number(rawSpec.lotStep),
+                }
+              : undefined;
+
           assignedChildren.push({
             childAccountId: a.child_account_id,
-            lotSettings: RiskEngine.normalizeLotSettingsFromRow(a),
-            childBalance: Number(childAcc.balance) || 10000,
-            childEquity: Number(childAcc.equity) || Number(childAcc.balance) || 10000,
+            lotSettings,
+            childBalance: verifiedBal,
+            childEquity: Number.isFinite(verifiedEq) ? verifiedEq : verifiedBal,
+            activationEpoch: Number(a.activation_epoch) || 1,
+            brokerLimits,
           });
         }
       }
@@ -3862,6 +4169,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           childEquity: child.childEquity,
           childBalance: child.childBalance,
           lotSettings: child.lotSettings,
+          brokerLimits: child.brokerLimits,
         });
 
         if (!sizing.valid) {
@@ -3895,6 +4203,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
             symbol: sizing.childSymbol,
             orderType: type,
             lots: sizing.childLots,
+            parentLots: parentLotsNum,
             openPrice: openPrice != null && openPrice !== '' ? Number(openPrice) : undefined,
             sl: hasSL ? effectiveSl : undefined,
             tp: hasTP ? effectiveTp : undefined,
@@ -3905,6 +4214,8 @@ export function createApiApp(deps?: ApiAppDependencies) {
             slippageMaxPips: child.lotSettings.slippageMaxPips,
             magicNumber: magicNumStr,
             comment: `${comment} (M#${parentTicketStr})`,
+            activationEpoch: child.activationEpoch,
+            parentEventTimestamp: parentEventTimestampIso,
           },
           dbClient
         );
@@ -3973,7 +4284,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
       return res.status(403).json({ success: false, error: 'Forbidden: Only Parent terminals may broadcast trade closures.' });
     }
 
-    const { ticket, closeType, closedLots, remainingLots, dealTicket, closePrice, realizedProfit, commission, swap } = req.body;
+    const {
+      ticket,
+      closeType,
+      closedLots,
+      remainingLots,
+      totalLots,
+      dealTicket,
+      closePrice,
+      realizedProfit,
+      commission,
+      swap,
+    } = req.body;
     if (ticket == null) {
       return res.status(400).json({ success: false, error: 'Missing ticket parameter' });
     }
@@ -3988,43 +4310,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       normalizedCloseType === 'PARTIAL' ||
       (Number.isFinite(remainingLotsNum) && remainingLotsNum > 0.00001 && normalizedCloseType !== 'FULL');
 
-    if (isPartialClose) {
-      const closedLotsNum = closedLots != null && closedLots !== '' ? Number(closedLots) : null;
-      await bridgeStore.addSyncLog(
-        {
-          eventType: 'PARTIAL_CLOSE_SKIPPED',
-          level: 'warn',
-          details: `Partial close reported for parent ticket #${parentTicketStr}${dealTicket ? ` (deal #${dealTicket})` : ''}${closedLotsNum != null && Number.isFinite(closedLotsNum) ? `, closed ${closedLotsNum} lots` : ''}${Number.isFinite(remainingLotsNum) ? `, remaining ${remainingLotsNum} lots` : ''}. Child positions remain open until full close per Stage 4 protocol safeguard.`,
-          ticket: parentTicketStr,
-        },
-        dbClient
-      );
-
-      return res.status(200).json({
-        success: true,
-        parentTicket: parentTicketStr,
-        closeType: 'PARTIAL',
-        partialCloseHandled: 'logged_not_executed',
-        closeInstructionsQueued: 0,
-        message: 'Partial close logged cleanly; open child positions remain intact until parent position is fully closed.',
-        instructions: [],
-      });
-    }
-
     try {
-      // Persist authoritative parent close deal fields (never fabricates realized P&L when omitted)
-      await bridgeStore.recordParentTradeClose(
-        {
-          accountId: terminal.accountId,
-          ticket: parentTicketStr,
-          closePrice: closePrice != null && closePrice !== '' ? Number(closePrice) : undefined,
-          realizedProfit: realizedProfit != null && realizedProfit !== '' ? Number(realizedProfit) : undefined,
-          commission: commission != null && commission !== '' ? Number(commission) : undefined,
-          swap: swap != null && swap !== '' ? Number(swap) : undefined,
-        },
-        dbClient
-      );
-
       // 1. Primary lookup: targeted query on trade_mappings for this parent account + ticket
       const { data: mapRows, error: mapErr } = await dbClient
         .from('trade_mappings')
@@ -4040,18 +4326,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
         id: r.id,
         parentTradeTicket: String(r.parent_trade_ticket),
         childTradeTicket: r.child_trade_ticket != null ? String(r.child_trade_ticket) : '0',
-        mentorId: '',
-        traderId: '',
         parentAccountId: r.parent_account_id,
         childAccountId: r.child_account_id,
         symbol: r.symbol,
         orderType: r.order_type as any,
         parentLots: Number(r.parent_lots),
         childLots: Number(r.child_lots),
-        openTime: r.open_time,
-        latencyMs: Number(r.latency_ms) || 0,
+        childRemainingLots:
+          r.child_remaining_lots != null && Number.isFinite(Number(r.child_remaining_lots))
+            ? Number(r.child_remaining_lots)
+            : Number(r.child_lots),
+        partialCloseCount: Number(r.partial_close_count) || 0,
         status: r.status as any,
-        retryCount: Number(r.retry_count) || 0,
       }));
 
       // 2. Resilient fallback for delayed acknowledgments
@@ -4070,26 +4356,182 @@ export function createApiApp(deps?: ApiAppDependencies) {
             id: `map_fallback_${parentTicketStr}_${oi.child_account_id}`,
             parentTradeTicket: parentTicketStr,
             childTradeTicket: oi.child_ticket != null ? String(oi.child_ticket) : '0',
-            mentorId: '',
-            traderId: '',
             parentAccountId: terminal.accountId,
             childAccountId: oi.child_account_id,
             symbol: oi.symbol,
             orderType: oi.order_type as any,
             parentLots: Number(oi.lots),
             childLots: Number(oi.lots),
-            openTime: new Date().toISOString(),
-            latencyMs: 0,
+            childRemainingLots: Number(oi.lots),
+            partialCloseCount: 0,
             status: 'PENDING' as any,
-            retryCount: 0,
           }));
         }
       }
 
+      if (isPartialClose) {
+        const closedLotsNum = closedLots != null && closedLots !== '' ? Number(closedLots) : NaN;
+        if (!Number.isFinite(closedLotsNum) || closedLotsNum <= 0 || !Number.isFinite(remainingLotsNum) || remainingLotsNum <= 0) {
+          return res.status(400).json({
+            success: false,
+            code: 'INVALID_PARTIAL_CLOSE_VOLUME',
+            error: 'Partial close requires positive finite closedLots and remainingLots.',
+          });
+        }
+
+        // Update parent open trade volume cleanly without marking parent CLOSED
+        await dbClient
+          .from('trades')
+          .update({ volume: remainingLotsNum, status: 'OPEN', updated_at: new Date().toISOString() })
+          .eq('account_id', terminal.accountId)
+          .eq('ticket', parentTicketStr);
+
+        const openMappings = mappings.filter((m) => m.status !== 'CLOSED' && m.status !== 'FAILED');
+        const queuedClose: any[] = [];
+        const rejectedChildren: Array<{ childAccountId: string; reason: string }> = [];
+
+        for (const map of openMappings) {
+          const { data: childAcc } = await dbClient
+            .from('mt5_accounts')
+            .select('id, verified_symbol_specs')
+            .eq('id', map.childAccountId)
+            .maybeSingle();
+
+          const specsMap =
+            childAcc?.verified_symbol_specs && typeof childAcc.verified_symbol_specs === 'object'
+              ? childAcc.verified_symbol_specs
+              : {};
+          const specRaw = specsMap[map.symbol];
+          const brokerLimits =
+            specRaw &&
+            Number.isFinite(Number(specRaw.minLot)) &&
+            Number(specRaw.minLot) > 0 &&
+            Number.isFinite(Number(specRaw.maxLot)) &&
+            Number(specRaw.maxLot) >= Number(specRaw.minLot) &&
+            Number.isFinite(Number(specRaw.lotStep)) &&
+            Number(specRaw.lotStep) > 0
+              ? {
+                  minLot: Number(specRaw.minLot),
+                  maxLot: Number(specRaw.maxLot),
+                  lotStep: Number(specRaw.lotStep),
+                }
+              : undefined;
+
+          const inferredTotalLots =
+            totalLots != null && Number.isFinite(Number(totalLots)) && Number(totalLots) > 0
+              ? Number(totalLots)
+              : Number.isFinite(map.parentLots) && map.parentLots >= closedLotsNum + remainingLotsNum - 1e-6
+              ? map.parentLots
+              : closedLotsNum + remainingLotsNum;
+
+          const partialCalc = RiskEngine.calculatePartialChildCloseLots({
+            symbol: map.symbol,
+            closedParentLots: closedLotsNum,
+            remainingParentLots: remainingLotsNum,
+            initialParentLots: inferredTotalLots,
+            currentChildRemainingLots: map.childRemainingLots,
+            partialCloseCount: map.partialCloseCount,
+            brokerLimits,
+          });
+
+          if (!partialCalc.valid) {
+            rejectedChildren.push({
+              childAccountId: map.childAccountId,
+              reason: partialCalc.reason || 'Partial close failed broker lot validation.',
+            });
+            await bridgeStore.addSyncLog(
+              {
+                eventType: 'PARTIAL_CLOSE_REJECTED',
+                level: 'warn',
+                details: `Partial close rejected for child ${map.childAccountId} (parent #${parentTicketStr}): ${partialCalc.reason}`,
+                ticket: parentTicketStr,
+              },
+              dbClient
+            );
+            continue;
+          }
+
+          const dealPart =
+            dealTicket != null && String(dealTicket).trim() !== ''
+              ? String(dealTicket).trim()
+              : `${closedLotsNum}_${remainingLotsNum}_${map.partialCloseCount + 1}`;
+          const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_CLOSE_PARTIAL_${dealPart}`;
+          const childTicketVal =
+            map.childTradeTicket && String(map.childTradeTicket) !== '0'
+              ? String(map.childTradeTicket)
+              : undefined;
+
+          const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
+            {
+              idempotencyKey,
+              action: 'CLOSE',
+              childAccountId: map.childAccountId,
+              parentAccountId: terminal.accountId,
+              parentTicket: parentTicketStr,
+              childTicket: childTicketVal,
+              symbol: map.symbol,
+              orderType: map.orderType,
+              lots: partialCalc.childCloseLots,
+              magicNumber: '888999',
+              comment: `Partial Close Parent #${parentTicketStr}`,
+            },
+            dbClient
+          );
+
+          queuedClose.push({
+            instructionId: instruction.instructionId,
+            childAccountId: instruction.childAccountId,
+            childTicket: instruction.childTicket,
+            lots: instruction.lots,
+            childRemainingAfterLots: partialCalc.childRemainingLotsAfter,
+            closeFraction: partialCalc.closeRatio,
+            isDuplicate,
+          });
+        }
+
+        if (queuedClose.length > 0) {
+          await bridgeStore.addSyncLog(
+            {
+              eventType: 'BRIDGE_PARENT_TRADE_PARTIAL_CLOSE',
+              level: 'info',
+              details: `Parent trade #${parentTicketStr} proportional partial close (${closedLotsNum} closed / ${remainingLotsNum} remaining) queued across ${queuedClose.length} child terminal(s).`,
+              ticket: parentTicketStr,
+            },
+            dbClient
+          );
+        }
+
+        return res.status(200).json({
+          success: true,
+          parentTicket: parentTicketStr,
+          closeType: 'PARTIAL',
+          partialCloseHandled: 'queued',
+          closeInstructionsQueued: queuedClose.length,
+          instructions: queuedClose,
+          rejectedChildren,
+        });
+      }
+
+      // Full close: persist authoritative parent close deal fields (never fabricates realized P&L when omitted)
+      await bridgeStore.recordParentTradeClose(
+        {
+          accountId: terminal.accountId,
+          ticket: parentTicketStr,
+          closePrice: closePrice != null && closePrice !== '' ? Number(closePrice) : undefined,
+          realizedProfit: realizedProfit != null && realizedProfit !== '' ? Number(realizedProfit) : undefined,
+          commission: commission != null && commission !== '' ? Number(commission) : undefined,
+          swap: swap != null && swap !== '' ? Number(swap) : undefined,
+        },
+        dbClient
+      );
+
       const queuedClose = [];
-      for (const map of mappings) {
+      for (const map of mappings.filter((m) => m.status !== 'CLOSED' && m.status !== 'FAILED')) {
         const idempotencyKey = `${parentTicketStr}_${map.childAccountId}_CLOSE`;
         const childTicketVal = map.childTradeTicket && String(map.childTradeTicket) !== '0' ? String(map.childTradeTicket) : undefined;
+        const lotsToClose = Number.isFinite(map.childRemainingLots) && map.childRemainingLots > 0
+          ? map.childRemainingLots
+          : map.childLots;
         const { instruction, isDuplicate } = await bridgeStore.queueInstruction(
           {
             idempotencyKey,
@@ -4100,7 +4542,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
             childTicket: childTicketVal,
             symbol: map.symbol,
             orderType: map.orderType,
-            lots: map.childLots,
+            lots: lotsToClose,
             magicNumber: '888999',
             comment: `Close Parent #${parentTicketStr}`,
           },
@@ -4111,6 +4553,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           instructionId: instruction.instructionId,
           childAccountId: instruction.childAccountId,
           childTicket: instruction.childTicket,
+          lots: instruction.lots,
           isDuplicate,
         });
       }
@@ -4706,7 +5149,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
               .from('mentor_assignments')
               .select('child_account_id')
               .eq('mentor_id', caller.user.id)
-              .in('status', ['active', 'inactive'])
+              .in('status', ['active', 'paused', 'suspended', 'inactive'])
           : Promise.resolve({ data: [], error: null } as any),
       ]);
 
@@ -4959,7 +5402,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const quotaCheck = await checkMentorFollowerQuota(dbClient, matchedMentor.id, resolvedChildId);
+      const quotaCheck = await checkMentorFollowerQuota(dbClient, matchedMentor.id, resolvedChildId, targetTraderId);
       if (!quotaCheck.allowed) {
         await writeAuditLog(dbClient, {
           actorId: caller.user.id,
@@ -5046,10 +5489,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       const rawStatus = String(req.body?.status || '').trim().toLowerCase();
-      const dbStatus = rawStatus === 'paused' ? 'inactive' : rawStatus;
-      if (dbStatus !== 'active' && dbStatus !== 'inactive') {
-        return res.status(400).json({ success: false, error: 'Status must be active, inactive, or paused.' });
+      if (!['active', 'paused', 'suspended', 'inactive'].includes(rawStatus)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Status must be active, paused, suspended, or inactive.',
+        });
       }
+      const nextStatus = rawStatus as 'active' | 'paused' | 'suspended' | 'inactive';
 
       const { data: existing, error: findErr } = await dbClient
         .from('mentor_assignments')
@@ -5060,7 +5506,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
       if (findErr) return res.status(500).json({ success: false, error: findErr.message });
       if (!existing) return res.status(404).json({ success: false, error: 'Assignment not found.' });
 
-      if (!caller.isVerifiedAdmin && existing.mentor_id !== caller.user.id && existing.trader_id !== caller.user.id) {
+      const isMentorOrAdmin = caller.isVerifiedAdmin || existing.mentor_id === caller.user.id;
+      const isOwningTrader = existing.trader_id === caller.user.id;
+
+      if (!isMentorOrAdmin && !isOwningTrader) {
         await writeAuditLog(dbClient, {
           actorId: caller.user.id,
           actorRole: (caller.profile?.role as any) || 'trader',
@@ -5073,10 +5522,52 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can change link status.' });
       }
 
-      if (dbStatus === 'active') {
-        const [{ data: mentorProf }, { data: traderProf }] = await Promise.all([
+      if (nextStatus === 'suspended' && !isMentorOrAdmin) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'ASSIGNMENT_STATUS_UPDATED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Blocked student attempt to set status='suspended' on assignment ${assignmentId}.`,
+        });
+        return res.status(403).json({
+          success: false,
+          code: 'FORBIDDEN_SUSPENSION',
+          error: 'Forbidden: Only owning mentor or admin can suspend a student assignment.',
+        });
+      }
+
+      if (existing.status === 'suspended' && nextStatus !== 'suspended' && !isMentorOrAdmin) {
+        await writeAuditLog(dbClient, {
+          actorId: caller.user.id,
+          actorRole: (caller.profile?.role as any) || 'trader',
+          action: 'ASSIGNMENT_STATUS_UPDATED',
+          targetType: 'mentor_assignments',
+          targetId: assignmentId,
+          result: 'denied',
+          details: `Blocked student attempt to unsuspend mentor-suspended assignment ${assignmentId}.`,
+        });
+        return res.status(403).json({
+          success: false,
+          code: 'FORBIDDEN_UNSUSPEND_BY_STUDENT',
+          error: 'Forbidden: Students cannot unsuspend a mentor- or admin-suspended assignment.',
+        });
+      }
+
+      const nowIso = new Date().toISOString();
+      let updatePatch: Record<string, any> = { status: nextStatus };
+
+      if (nextStatus === 'active') {
+        const [{ data: mentorProf }, { data: traderProf }, { data: childAcc }] = await Promise.all([
           dbClient.from('profiles').select('id, role, status').eq('id', existing.mentor_id).maybeSingle(),
           dbClient.from('profiles').select('id, status').eq('id', existing.trader_id).maybeSingle(),
+          dbClient
+            .from('mt5_accounts')
+            .select('id, verified_balance')
+            .eq('id', existing.child_account_id)
+            .maybeSingle(),
         ]);
         if (!mentorProf || mentorProf.role !== 'mentor' || mentorProf.status !== 'active') {
           await writeAuditLog(dbClient, {
@@ -5102,7 +5593,12 @@ export function createApiApp(deps?: ApiAppDependencies) {
           });
           return res.status(403).json({ success: false, error: 'Cannot activate link: trader profile is not active.' });
         }
-        const quotaCheck = await checkMentorFollowerQuota(dbClient, existing.mentor_id, existing.child_account_id);
+        const quotaCheck = await checkMentorFollowerQuota(
+          dbClient,
+          existing.mentor_id,
+          existing.child_account_id,
+          existing.trader_id
+        );
         if (!quotaCheck.allowed) {
           await writeAuditLog(dbClient, {
             actorId: caller.user.id,
@@ -5120,22 +5616,77 @@ export function createApiApp(deps?: ApiAppDependencies) {
             quota: quotaCheck,
           });
         }
+
+        const nextEpoch = (Number(existing.activation_epoch) || 1) + 1;
+        const verifiedBal = childAcc?.verified_balance != null ? Number(childAcc.verified_balance) : NaN;
+        const balancePatch: Record<string, any> = {};
+        if (existing.balance_pause_active === true && Number.isFinite(verifiedBal) && verifiedBal >= 100) {
+          balancePatch.balance_pause_active = false;
+          balancePatch.pause_reason = null;
+        } else if (Number.isFinite(verifiedBal) && verifiedBal < BALANCE_PAUSE_THRESHOLD_USD) {
+          balancePatch.balance_pause_active = true;
+          balancePatch.pause_reason = 'LOW_BALANCE_UNDER_50';
+        }
+
+        updatePatch = {
+          status: 'active',
+          activated_at: nowIso,
+          activation_epoch: nextEpoch,
+          resumed_at: nowIso,
+          suspended_by: null,
+          suspended_at: null,
+          suspension_reason: null,
+          ...balancePatch,
+        };
+      } else if (nextStatus === 'suspended') {
+        const cleanReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 240) : null;
+        updatePatch = {
+          status: 'suspended',
+          suspended_by: caller.user.id,
+          suspended_at: nowIso,
+          suspension_reason: cleanReason || null,
+        };
+      } else {
+        updatePatch = {
+          status: nextStatus,
+          paused_at: nowIso,
+        };
       }
 
-      const { data: updated, error: updErr } = await dbClient
+      let { data: updated, error: updErr } = await dbClient
         .from('mentor_assignments')
-        .update({ status: dbStatus })
+        .update(updatePatch)
         .eq('id', assignmentId)
         .select('*')
         .single();
 
+      if (updErr && (isMissingRiskColumnError(updErr) || String(updErr.message || '').includes('check constraint'))) {
+        const legacyStatus = nextStatus === 'active' ? 'active' : 'inactive';
+        const fallbackRes = await dbClient
+          .from('mentor_assignments')
+          .update({ status: legacyStatus })
+          .eq('id', assignmentId)
+          .select('*')
+          .single();
+        updated = fallbackRes.data;
+        updErr = fallbackRes.error;
+      }
+
       if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+      if (nextStatus !== 'active' && existing.child_account_id) {
+        await bridgeStore.cancelQueuedOpenInstructions(dbClient, {
+          childAccountId: existing.child_account_id,
+          parentAccountId: existing.parent_account_id || undefined,
+          reason: `Assignment ${assignmentId} changed to '${nextStatus}'`,
+        });
+      }
 
       await bridgeStore.addSyncLog(
         {
           eventType: 'ASSIGNMENT_STATUS_UPDATED',
-          level: dbStatus === 'inactive' ? 'warn' : 'info',
-          details: `Assignment ${assignmentId} status changed to '${dbStatus}' by ${caller.profile?.email || caller.user.id}.`,
+          level: nextStatus === 'active' ? 'info' : 'warn',
+          details: `Assignment ${assignmentId} status changed to '${nextStatus}' by ${caller.profile?.email || caller.user.id}. Open positions kept intact.`,
         },
         dbClient
       );
@@ -5146,7 +5697,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         targetType: 'mentor_assignments',
         targetId: assignmentId,
         result: 'success',
-        details: `Assignment ${assignmentId} status changed to '${dbStatus}'.`,
+        details: `Assignment ${assignmentId} status changed to '${nextStatus}'.`,
       });
 
       return res.status(200).json({ success: true, assignment: updated });
@@ -5192,6 +5743,14 @@ export function createApiApp(deps?: ApiAppDependencies) {
           details: `Denied unauthorized removal of assignment ${assignmentId}.`,
         });
         return res.status(403).json({ success: false, error: 'Forbidden: Only admin, mentor, or assigned trader can remove this link.' });
+      }
+
+      if (existing.child_account_id) {
+        await bridgeStore.cancelQueuedOpenInstructions(dbClient, {
+          childAccountId: existing.child_account_id,
+          parentAccountId: existing.parent_account_id || undefined,
+          reason: `Assignment ${assignmentId} unlinked prior to execution`,
+        });
       }
 
       const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', assignmentId);
@@ -5365,6 +5924,31 @@ export function createApiApp(deps?: ApiAppDependencies) {
 
     const dbClient = requireServiceRoleClient(res);
     if (!dbClient) return;
+
+    if (!ALLOW_MENTOR_EMERGENCY_CLOSE) {
+      await writeAuditLog(dbClient, {
+        actorId: caller.user.id,
+        actorRole: (caller.profile?.role as any) || 'mentor',
+        action: 'EMERGENCY_CLOSE_DISABLED',
+        targetType: 'trade_mappings',
+        targetId: req.body?.parentTicket ? String(req.body.parentTicket) : null,
+        result: 'denied',
+        details: 'Blocked remote mentor emergency close request: feature is disabled by policy (ALLOW_MENTOR_EMERGENCY_CLOSE=false).',
+      });
+      await bridgeStore.addSyncLog(
+        {
+          eventType: 'EMERGENCY_CLOSE_DISABLED',
+          level: 'warn',
+          details: `Blocked mentor/admin emergency-close request by ${caller.profile?.email || caller.user.id}: follower positions remain under trader control.`,
+        },
+        dbClient
+      );
+      return res.status(403).json({
+        success: false,
+        code: 'EMERGENCY_CLOSE_DISABLED',
+        error: 'Mentor-triggered remote closing of student positions is disabled. Open follower positions remain under trader control.',
+      });
+    }
 
     try {
       const { parentTicket, confirm } = req.body || {};
@@ -5758,7 +6342,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, cleanChildAccId);
+      const quotaCheck = await checkMentorFollowerQuota(dbClient, cleanMentorId, cleanChildAccId, cleanTraderId);
       if (!quotaCheck.allowed) {
         await writeAuditLog(dbClient, {
           actorId: caller.user.id,
@@ -5877,6 +6461,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       for (const row of matches) {
+        if (row.child_account_id) {
+          await bridgeStore.cancelQueuedOpenInstructions(dbClient, {
+            childAccountId: row.child_account_id,
+            parentAccountId: row.parent_account_id || undefined,
+            reason: `Admin removed assignment ${row.id}`,
+          });
+        }
         const { error: delErr } = await dbClient.from('mentor_assignments').delete().eq('id', row.id);
         if (delErr) {
           await writeAuditLog(dbClient, {

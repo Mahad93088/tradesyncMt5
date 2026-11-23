@@ -237,88 +237,277 @@ export function verifyPayPalWebhookSignature(params: {
   return { valid: false, reason: 'Invalid PayPal webhook HMAC signature.' };
 }
 
-export async function checkMentorFollowerQuota(
-  dbClient: SupabaseClient,
-  mentorId: string,
-  candidateChildAccountId?: string | null
-): Promise<QuotaCheckResult> {
-  try {
-    let maxFollowers: number | null = null;
-    let planName: string | null = null;
+import { CLIENT_PLAN_LIMITS, LEGACY_PLAN_CODE_COMPAT } from '../config/policy.ts';
 
-    // 1. Check active/trial subscription for this mentor
+export interface ResolvedPlanLimit {
+  enforced: boolean;
+  maxFollowers: number | null;
+  planName: string | null;
+  planCode: string | null;
+  subscriptionStatus?: string;
+  code?: string;
+  error?: string;
+}
+
+const LEGACY_PLAN_DEFAULT_LIMITS: Record<string, number> = {
+  starter_10: 10,
+  pro_50: 50,
+  business_200: 200,
+};
+
+export function resolvePlanFollowerLimit(planRow: Record<string, any> | null | undefined): {
+  valid: boolean;
+  limit: number | null;
+  planName: string | null;
+  planCode: string | null;
+  error?: string;
+} {
+  if (!planRow) {
+    return { valid: false, limit: null, planName: null, planCode: null, error: 'Subscription plan record not found.' };
+  }
+
+  const rawCode = String(planRow.code || '').trim().toLowerCase();
+  const planName = planRow.name ? String(planRow.name) : rawCode || null;
+
+  if (rawCode === 'trial') {
+    return { valid: true, limit: CLIENT_PLAN_LIMITS.trial, planName: planName || 'Trial', planCode: 'trial' };
+  }
+  if (rawCode === 'silver') {
+    return { valid: true, limit: CLIENT_PLAN_LIMITS.silver, planName: planName || 'Silver', planCode: 'silver' };
+  }
+  if (rawCode === 'gold') {
+    return { valid: true, limit: CLIENT_PLAN_LIMITS.gold, planName: planName || 'Gold', planCode: 'gold' };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(LEGACY_PLAN_DEFAULT_LIMITS, rawCode)) {
+    if (!LEGACY_PLAN_CODE_COMPAT) {
+      return {
+        valid: false,
+        limit: null,
+        planName,
+        planCode: rawCode,
+        error: `Legacy subscription plan code "${rawCode}" is disabled.`,
+      };
+    }
+    const rowLimit = Number(planRow.max_followers ?? planRow.max_child_accounts);
+    const resolved = Number.isFinite(rowLimit) && rowLimit > 0 ? Math.floor(rowLimit) : LEGACY_PLAN_DEFAULT_LIMITS[rawCode];
+    return { valid: true, limit: resolved, planName, planCode: rawCode };
+  }
+
+  const customLimit = Number(planRow.max_followers ?? planRow.max_child_accounts);
+  if (Number.isFinite(customLimit) && customLimit > 0) {
+    return { valid: true, limit: Math.floor(customLimit), planName, planCode: rawCode || null };
+  }
+
+  return {
+    valid: false,
+    limit: null,
+    planName,
+    planCode: rawCode || null,
+    error: `Invalid follower limit configured on plan "${planName || rawCode || 'unknown'}".`,
+  };
+}
+
+export async function resolveMentorPlanLimit(
+  dbClient: SupabaseClient,
+  mentorId: string
+): Promise<ResolvedPlanLimit> {
+  try {
     const { data: subRows, error: subErr } = await dbClient
       .from('subscriptions')
-      .select('id, plan_id, status, user_id, mentor_id')
+      .select('id, plan_id, status, user_id, mentor_id, current_period_end, created_at')
       .in('status', ['active', 'trial']);
 
     if (subErr) {
-      if (isMissingRelationError(subErr)) {
-        return { allowed: true, enforced: false, activeFollowers: 0, maxFollowers: null, planName: null };
-      }
-      return { allowed: true, enforced: false, activeFollowers: 0, maxFollowers: null, planName: null };
+      return {
+        enforced: true,
+        maxFollowers: null,
+        planName: null,
+        planCode: null,
+        code: 'QUOTA_VALIDATION_FAILED',
+        error: `Unable to validate mentor subscription: ${subErr.message}`,
+      };
     }
 
-    const activeSub = (subRows || []).find(
-      (s: any) => s.mentor_id === mentorId || s.user_id === mentorId
-    );
+    const nowMs = Date.now();
+    const validSubs = (subRows || [])
+      .filter((s: any) => {
+        if (s.mentor_id !== mentorId && s.user_id !== mentorId) return false;
+        const status = String(s.status || '').trim().toLowerCase();
+        if (status !== 'active' && status !== 'trial') return false;
+        if (s.current_period_end == null || s.current_period_end === '') return true;
+        const endMs = Date.parse(String(s.current_period_end));
+        return Number.isFinite(endMs) && endMs > nowMs;
+      })
+      .sort((a: any, b: any) => {
+        const ta = a.created_at ? Date.parse(String(a.created_at)) : 0;
+        const tb = b.created_at ? Date.parse(String(b.created_at)) : 0;
+        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+      });
 
-    if (activeSub?.plan_id) {
-      const { data: planRow, error: planErr } = await dbClient
-        .from('subscription_plans')
-        .select('id, name, max_followers, max_child_accounts')
-        .eq('id', activeSub.plan_id)
+    const activeSub = validSubs[0];
+    if (!activeSub || !activeSub.plan_id) {
+      return {
+        enforced: true,
+        maxFollowers: null,
+        planName: null,
+        planCode: null,
+        code: 'NO_ACTIVE_SUBSCRIPTION',
+        error: 'Mentor does not have an active, unexpired subscription plan.',
+      };
+    }
+
+    const { data: planRow, error: planErr } = await dbClient
+      .from('subscription_plans')
+      .select('id, code, name, max_followers, max_child_accounts')
+      .eq('id', activeSub.plan_id)
+      .maybeSingle();
+
+    if (planErr || !planRow) {
+      return {
+        enforced: true,
+        maxFollowers: null,
+        planName: null,
+        planCode: null,
+        code: 'QUOTA_VALIDATION_FAILED',
+        error: planErr ? `Failed to load subscription plan: ${planErr.message}` : 'Assigned subscription plan not found.',
+      };
+    }
+
+    const resolved = resolvePlanFollowerLimit(planRow);
+    if (!resolved.valid || resolved.limit === null || resolved.limit <= 0) {
+      return {
+        enforced: true,
+        maxFollowers: null,
+        planName: resolved.planName,
+        planCode: resolved.planCode,
+        code: 'QUOTA_VALIDATION_FAILED',
+        error: resolved.error || 'Invalid subscription plan follower capacity.',
+      };
+    }
+
+    return {
+      enforced: true,
+      maxFollowers: resolved.limit,
+      planName: resolved.planName,
+      planCode: resolved.planCode,
+      subscriptionStatus: String(activeSub.status),
+    };
+  } catch (err: any) {
+    return {
+      enforced: true,
+      maxFollowers: null,
+      planName: null,
+      planCode: null,
+      code: 'QUOTA_VALIDATION_FAILED',
+      error: err?.message || 'Unexpected error resolving mentor subscription quota.',
+    };
+  }
+}
+
+export async function checkMentorFollowerQuota(
+  dbClient: SupabaseClient,
+  mentorId: string,
+  candidateChildAccountId?: string | null,
+  candidateTraderId?: string | null
+): Promise<QuotaCheckResult> {
+  try {
+    const planCheck = await resolveMentorPlanLimit(dbClient, mentorId);
+    if (planCheck.maxFollowers === null || planCheck.maxFollowers <= 0) {
+      return {
+        allowed: false,
+        enforced: true,
+        activeFollowers: 0,
+        maxFollowers: null,
+        planName: planCheck.planName,
+        code: planCheck.code || 'NO_ACTIVE_SUBSCRIPTION',
+        error: planCheck.error || 'Mentor does not have an active, unexpired subscription plan.',
+      };
+    }
+
+    const maxFollowers = planCheck.maxFollowers;
+    const planName = planCheck.planName;
+
+    // Resolve trader_id for candidate child account if not passed directly
+    let resolvedTraderId = candidateTraderId ? String(candidateTraderId).trim() : '';
+    if (!resolvedTraderId && candidateChildAccountId) {
+      const { data: childAcc, error: childErr } = await dbClient
+        .from('mt5_accounts')
+        .select('user_id')
+        .eq('id', candidateChildAccountId)
         .maybeSingle();
 
-      if (!planErr && planRow) {
-        maxFollowers = Number(planRow.max_followers || planRow.max_child_accounts) || null;
-        planName = planRow.name || null;
+      if (childErr) {
+        return {
+          allowed: false,
+          enforced: true,
+          activeFollowers: 0,
+          maxFollowers,
+          planName,
+          code: 'QUOTA_VALIDATION_FAILED',
+          error: `Unable to resolve trader ownership for child account: ${childErr.message}`,
+        };
+      }
+      if (childAcc?.user_id) {
+        resolvedTraderId = String(childAcc.user_id).trim();
       }
     }
 
-    // 2. Fallback to mentor_profiles.max_followers if no active subscription overrides it
-    if (maxFollowers == null) {
-      const { data: mpRow, error: mpErr } = await dbClient
-        .from('mentor_profiles')
-        .select('max_followers')
-        .eq('user_id', mentorId)
-        .maybeSingle();
-      if (!mpErr && mpRow && Number(mpRow.max_followers) > 0) {
-        maxFollowers = Number(mpRow.max_followers);
-        planName = 'Mentor Profile Cap';
-      }
-    }
-
-    if (maxFollowers == null) {
-      return { allowed: true, enforced: false, activeFollowers: 0, maxFollowers: null, planName: null };
-    }
-
-    // 3. Count active follower child accounts currently assigned to this mentor
+    // Count DISTINCT active trader_id assigned to this mentor
     const { data: activeAssigns, error: assignErr } = await dbClient
       .from('mentor_assignments')
-      .select('id, child_account_id')
+      .select('id, trader_id, child_account_id')
       .eq('mentor_id', mentorId)
       .eq('status', 'active');
 
     if (assignErr) {
-      return { allowed: true, enforced: false, activeFollowers: 0, maxFollowers, planName };
+      return {
+        allowed: false,
+        enforced: true,
+        activeFollowers: 0,
+        maxFollowers,
+        planName,
+        code: 'QUOTA_VALIDATION_FAILED',
+        error: `Unable to validate active student count: ${assignErr.message}`,
+      };
     }
 
-    const activeChildIds = new Set<string>(
-      (activeAssigns || []).map((a: any) => a.child_account_id).filter(Boolean)
-    );
+    const activeTraderIds = new Set<string>();
+    const activeChildIds = new Set<string>();
+    for (const a of activeAssigns || []) {
+      if (a?.trader_id) {
+        activeTraderIds.add(String(a.trader_id).trim());
+      } else if (a?.id) {
+        activeTraderIds.add(String(a.id));
+      }
+      if (a?.child_account_id) {
+        activeChildIds.add(String(a.child_account_id).trim());
+      }
+    }
 
-    if (candidateChildAccountId && activeChildIds.has(candidateChildAccountId)) {
+    const activeCount = activeTraderIds.size;
+
+    // Adding/reactivating another child account for an already-active distinct student trader does not consume an extra slot
+    if (resolvedTraderId && activeTraderIds.has(resolvedTraderId)) {
       return {
         allowed: true,
         enforced: true,
-        activeFollowers: activeChildIds.size,
+        activeFollowers: activeCount,
         maxFollowers,
         planName,
       };
     }
 
-    const activeCount = activeChildIds.size > 0 ? activeChildIds.size : (activeAssigns || []).length;
+    if (candidateChildAccountId && activeChildIds.has(String(candidateChildAccountId).trim())) {
+      return {
+        allowed: true,
+        enforced: true,
+        activeFollowers: activeCount,
+        maxFollowers,
+        planName,
+      };
+    }
+
     if (activeCount >= maxFollowers) {
       return {
         allowed: false,
@@ -327,7 +516,7 @@ export async function checkMentorFollowerQuota(
         maxFollowers,
         planName,
         code: 'PLAN_FOLLOWER_QUOTA_EXCEEDED',
-        error: `Follower limit reached (${activeCount}/${maxFollowers}) on ${planName || 'current plan'}. Upgrade plan or raise maxFollowers limit to link additional students.`,
+        error: `Follower limit reached (${activeCount}/${maxFollowers} distinct student traders) on ${planName || 'current plan'}. Upgrade plan to link additional students.`,
       };
     }
 
@@ -338,7 +527,15 @@ export async function checkMentorFollowerQuota(
       maxFollowers,
       planName,
     };
-  } catch {
-    return { allowed: true, enforced: false, activeFollowers: 0, maxFollowers: null, planName: null };
+  } catch (err: any) {
+    return {
+      allowed: false,
+      enforced: true,
+      activeFollowers: 0,
+      maxFollowers: null,
+      planName: null,
+      code: 'QUOTA_VALIDATION_FAILED',
+      error: err?.message || 'Quota validation failed unexpectedly.',
+    };
   }
 }

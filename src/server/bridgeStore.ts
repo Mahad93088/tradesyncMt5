@@ -1,7 +1,22 @@
 import crypto from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { OrderType, MappingExecutionStatus, TradeMapping, SyncLog } from '../types';
+import { BALANCE_PAUSE_THRESHOLD_USD, BALANCE_RESUME_THRESHOLD_USD } from '../config/policy.ts';
 import { isMissingRelationError, sanitizeAuditText } from './billingService.ts';
+
+function isMissingSchemaColumnError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  return err?.code === '42703' || msg.includes('column') && msg.includes('does not exist') || msg.includes('schema cache');
+}
+
+export interface VerifiedSymbolSpec {
+  minLot: number;
+  maxLot: number;
+  lotStep: number;
+  contractSize?: number;
+  digits?: number;
+  verifiedAt?: string;
+}
 
 export interface RegisteredTerminal {
   tokenHash: string;
@@ -26,6 +41,7 @@ export interface TerminalHeartbeatTelemetry {
   freeMargin?: number;
   pingMs?: number;
   autoTradingEnabled?: boolean;
+  verifiedSymbolSpecs?: Record<string, VerifiedSymbolSpec>;
 }
 
 export interface AuthenticateTerminalOptions {
@@ -47,6 +63,7 @@ export interface BridgeInstruction {
   symbol: string;
   orderType: OrderType;
   lots: number;
+  parentLots?: number;
   openPrice?: number;
   sl?: number;
   tp?: number;
@@ -57,6 +74,8 @@ export interface BridgeInstruction {
   magicNumber: number | string;
   comment: string;
   slippageMaxPips?: number;
+  activationEpoch?: number;
+  parentEventTimestamp?: string;
   createdAt: string;
   status: 'QUEUED' | 'IN_FLIGHT' | 'COMPLETED' | 'FAILED';
   leaseExpiresAt?: number;
@@ -195,11 +214,26 @@ export class BridgeStore {
     // 1. Direct query against Supabase PostgreSQL
     if (supabaseClient) {
       try {
-        const { data: acc, error } = await supabaseClient
+        const extendedCols =
+          'id, user_id, account_role, account_type, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms, verified_balance, verified_equity, balance_verified_at, verified_symbol_specs';
+        const baseCols =
+          'id, user_id, account_role, account_type, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms';
+
+        let { data: acc, error } = await supabaseClient
           .from('mt5_accounts')
-          .select('id, user_id, account_role, account_type, account_number, broker_server, broker_name, connection_status, last_sync, error_message, ping_ms')
+          .select(extendedCols)
           .eq('terminal_token_hash', hash)
           .maybeSingle();
+
+        if (error && isMissingSchemaColumnError(error)) {
+          const fallbackRes = await supabaseClient
+            .from('mt5_accounts')
+            .select(baseCols)
+            .eq('terminal_token_hash', hash)
+            .maybeSingle();
+          acc = fallbackRes.data as any;
+          error = fallbackRes.error;
+        }
 
         if (error) {
           console.error('[BridgeStore] Supabase terminal token query error:', error.message);
@@ -240,13 +274,22 @@ export class BridgeStore {
           const throttleMs = options?.throttleMs ?? 15_000;
           const telemetry = options?.telemetry;
           const telemetryFields: Record<string, any> = {};
+          const verifiedTelemetryFields: Record<string, any> = {};
 
           if (telemetry) {
-            if (typeof telemetry.balance === 'number' && Number.isFinite(telemetry.balance)) {
+            let balanceOrEquityVerified = false;
+            if (typeof telemetry.balance === 'number' && Number.isFinite(telemetry.balance) && telemetry.balance >= 0) {
               telemetryFields.balance = telemetry.balance;
+              verifiedTelemetryFields.verified_balance = telemetry.balance;
+              balanceOrEquityVerified = true;
             }
-            if (typeof telemetry.equity === 'number' && Number.isFinite(telemetry.equity)) {
+            if (typeof telemetry.equity === 'number' && Number.isFinite(telemetry.equity) && telemetry.equity >= 0) {
               telemetryFields.equity = telemetry.equity;
+              verifiedTelemetryFields.verified_equity = telemetry.equity;
+              balanceOrEquityVerified = true;
+            }
+            if (balanceOrEquityVerified) {
+              verifiedTelemetryFields.balance_verified_at = nowIso;
             }
             if (typeof telemetry.margin === 'number' && Number.isFinite(telemetry.margin)) {
               telemetryFields.margin = telemetry.margin;
@@ -260,9 +303,23 @@ export class BridgeStore {
             if (typeof telemetry.autoTradingEnabled === 'boolean') {
               telemetryFields.auto_trading_enabled = telemetry.autoTradingEnabled;
             }
+            if (telemetry.verifiedSymbolSpecs && Object.keys(telemetry.verifiedSymbolSpecs).length > 0) {
+              const existingSpecs =
+                (acc as any).verified_symbol_specs && typeof (acc as any).verified_symbol_specs === 'object'
+                  ? { ...(acc as any).verified_symbol_specs }
+                  : {};
+              for (const [sym, spec] of Object.entries(telemetry.verifiedSymbolSpecs)) {
+                existingSpecs[sym] = {
+                  ...spec,
+                  verifiedAt: spec.verifiedAt || nowIso,
+                };
+              }
+              verifiedTelemetryFields.verified_symbol_specs = existingSpecs;
+            }
           }
 
-          const hasTelemetry = Object.keys(telemetryFields).length > 0;
+          const hasTelemetry =
+            Object.keys(telemetryFields).length > 0 || Object.keys(verifiedTelemetryFields).length > 0;
           const dbLastSyncMs = acc.last_sync ? Date.parse(acc.last_sync) : NaN;
           const memLastSyncMs = this.lastSyncWriteByAccountId.get(acc.id) ?? 0;
           const latestSyncMs = Math.max(Number.isFinite(dbLastSyncMs) ? dbLastSyncMs : 0, memLastSyncMs);
@@ -277,15 +334,27 @@ export class BridgeStore {
             (touchDbMode === 'throttled' && (isStaleWriteNeeded || hasTelemetry));
 
           if (shouldWriteDb) {
-            const { error: statusUpdateErr } = await supabaseClient
+            const baseUpdate = {
+              connection_status: 'connected',
+              last_sync: nowIso,
+              error_message: null,
+              ...telemetryFields,
+            };
+            let { error: statusUpdateErr } = await supabaseClient
               .from('mt5_accounts')
               .update({
-                connection_status: 'connected',
-                last_sync: nowIso,
-                error_message: null,
-                ...telemetryFields,
+                ...baseUpdate,
+                ...verifiedTelemetryFields,
               })
               .eq('id', acc.id);
+
+            if (statusUpdateErr && isMissingSchemaColumnError(statusUpdateErr)) {
+              const retryRes = await supabaseClient
+                .from('mt5_accounts')
+                .update(baseUpdate)
+                .eq('id', acc.id);
+              statusUpdateErr = retryRes.error;
+            }
 
             if (statusUpdateErr) {
               console.warn('[BridgeStore] Failed to update terminal connection_status:', statusUpdateErr.message);
@@ -462,7 +531,7 @@ export class BridgeStore {
     // 3. Write to durable PostgreSQL tables
     if (supabaseClient) {
       try {
-        const { error: insErr } = await supabaseClient.from('bridge_instructions').insert({
+        const coreInstructionInsert: Record<string, any> = {
           id: instructionId,
           idempotency_key: params.idempotencyKey,
           action: params.action,
@@ -480,7 +549,18 @@ export class BridgeStore {
           comment: params.comment,
           status: 'QUEUED',
           retry_count: 0,
-        });
+        };
+        const extInstructionInsert: Record<string, any> = {
+          ...coreInstructionInsert,
+          ...(params.activationEpoch != null ? { activation_epoch: params.activationEpoch } : {}),
+          ...(params.parentEventTimestamp ? { parent_event_timestamp: params.parentEventTimestamp } : {}),
+        };
+
+        let { error: insErr } = await supabaseClient.from('bridge_instructions').insert(extInstructionInsert);
+        if (insErr && isMissingSchemaColumnError(insErr)) {
+          const fallbackIns = await supabaseClient.from('bridge_instructions').insert(coreInstructionInsert);
+          insErr = fallbackIns.error;
+        }
 
         if (insErr) {
           // If unique constraint race condition hit, retrieve existing
@@ -514,6 +594,8 @@ export class BridgeStore {
                 hasTp: raceHasTP,
                 magicNumber: raceExisting.magic_number != null ? String(raceExisting.magic_number) : '888999',
                 comment: raceExisting.comment || '',
+                activationEpoch: raceExisting.activation_epoch != null ? Number(raceExisting.activation_epoch) : undefined,
+                parentEventTimestamp: raceExisting.parent_event_timestamp || undefined,
                 createdAt: raceExisting.created_at,
                 status: raceExisting.status,
                 retryCount: Number(raceExisting.retry_count) || 0,
@@ -527,6 +609,7 @@ export class BridgeStore {
 
         if (params.action === 'OPEN') {
           const parentTicketStr = String(params.parentTicket);
+          const effectiveParentLots = params.parentLots != null && Number.isFinite(Number(params.parentLots)) ? Number(params.parentLots) : params.lots;
           const { data: existingMap, error: mapLookupErr } = await supabaseClient
             .from('trade_mappings')
             .select('id')
@@ -544,24 +627,38 @@ export class BridgeStore {
             throw new Error(`Failed to verify existing trade mapping: ${mapLookupErr.message}`);
           }
 
+          const coreMapUpdate = {
+            parent_account_id: params.parentAccountId,
+            symbol: params.symbol,
+            order_type: params.orderType,
+            parent_lots: effectiveParentLots,
+            child_lots: params.lots,
+            status: 'PENDING',
+            retry_count: 0,
+            updated_at: new Date().toISOString(),
+          };
+          const extMapFields = {
+            child_remaining_lots: params.lots,
+            partial_close_count: 0,
+            ...(params.activationEpoch != null ? { activation_epoch: params.activationEpoch } : {}),
+            ...(params.parentEventTimestamp ? { parent_event_timestamp: params.parentEventTimestamp } : {}),
+          };
+
           let mapErr: any = null;
           if (existingMap?.id) {
-            const updRes = await supabaseClient
+            let updRes = await supabaseClient
               .from('trade_mappings')
-              .update({
-                parent_account_id: params.parentAccountId,
-                symbol: params.symbol,
-                order_type: params.orderType,
-                parent_lots: params.lots,
-                child_lots: params.lots,
-                status: 'PENDING',
-                retry_count: 0,
-                updated_at: new Date().toISOString(),
-              })
+              .update({ ...coreMapUpdate, ...extMapFields })
               .eq('id', existingMap.id);
+            if (updRes.error && isMissingSchemaColumnError(updRes.error)) {
+              updRes = await supabaseClient
+                .from('trade_mappings')
+                .update(coreMapUpdate)
+                .eq('id', existingMap.id);
+            }
             mapErr = updRes.error;
           } else {
-            const insMapRes = await supabaseClient.from('trade_mappings').insert({
+            const coreMapInsert = {
               id: `map_${instructionId}`,
               parent_trade_ticket: parentTicketStr,
               child_trade_ticket: null,
@@ -569,26 +666,31 @@ export class BridgeStore {
               child_account_id: params.childAccountId,
               symbol: params.symbol,
               order_type: params.orderType,
-              parent_lots: params.lots,
+              parent_lots: effectiveParentLots,
               child_lots: params.lots,
               status: 'PENDING',
               retry_count: 0,
+            };
+            let insMapRes = await supabaseClient.from('trade_mappings').insert({
+              ...coreMapInsert,
+              ...extMapFields,
             });
+            if (insMapRes.error && isMissingSchemaColumnError(insMapRes.error)) {
+              insMapRes = await supabaseClient.from('trade_mappings').insert(coreMapInsert);
+            }
             if (insMapRes.error?.code === '23505') {
-              const conflictUpd = await supabaseClient
+              let conflictUpd = await supabaseClient
                 .from('trade_mappings')
-                .update({
-                  parent_account_id: params.parentAccountId,
-                  symbol: params.symbol,
-                  order_type: params.orderType,
-                  parent_lots: params.lots,
-                  child_lots: params.lots,
-                  status: 'PENDING',
-                  retry_count: 0,
-                  updated_at: new Date().toISOString(),
-                })
+                .update({ ...coreMapUpdate, ...extMapFields })
                 .eq('parent_trade_ticket', parentTicketStr)
                 .eq('child_account_id', params.childAccountId);
+              if (conflictUpd.error && isMissingSchemaColumnError(conflictUpd.error)) {
+                conflictUpd = await supabaseClient
+                  .from('trade_mappings')
+                  .update(coreMapUpdate)
+                  .eq('parent_trade_ticket', parentTicketStr)
+                  .eq('child_account_id', params.childAccountId);
+              }
               mapErr = conflictUpd.error;
             } else {
               mapErr = insMapRes.error;
@@ -648,6 +750,164 @@ export class BridgeStore {
   }
 
   /**
+   * Cancel only QUEUED OPEN instructions for a child/parent assignment.
+   * Never touches CLOSE/MODIFY instructions and never generates liquidation orders.
+   */
+  public async cancelQueuedOpenInstructions(
+    supabaseClient: SupabaseClient | undefined,
+    params: { childAccountId?: string; parentAccountId?: string; reason?: string }
+  ): Promise<number> {
+    const reason = params.reason || 'Assignment paused, suspended, or deactivated prior to execution';
+    let cancelled = 0;
+
+    for (const inst of this.instructions.values()) {
+      if (inst.action !== 'OPEN' || inst.status !== 'QUEUED') continue;
+      if (params.childAccountId && inst.childAccountId !== params.childAccountId) continue;
+      if (params.parentAccountId && inst.parentAccountId !== params.parentAccountId) continue;
+      inst.status = 'FAILED';
+      cancelled += 1;
+    }
+
+    if (!supabaseClient || typeof (supabaseClient as any).from !== 'function') {
+      return cancelled;
+    }
+
+    let query = supabaseClient
+      .from('bridge_instructions')
+      .select('id, child_account_id, parent_ticket')
+      .eq('action', 'OPEN')
+      .eq('status', 'QUEUED');
+
+    if (params.childAccountId) query = query.eq('child_account_id', params.childAccountId);
+    if (params.parentAccountId) query = query.eq('parent_account_id', params.parentAccountId);
+
+    const { data: queuedRows, error: qErr } = await query;
+    if (qErr || !Array.isArray(queuedRows) || queuedRows.length === 0) {
+      return cancelled;
+    }
+
+    let dbCancelled = 0;
+    const nowIso = new Date().toISOString();
+    for (const row of queuedRows) {
+      const { data: updatedRow, error: updErr } = await supabaseClient
+        .from('bridge_instructions')
+        .update({ status: 'FAILED' })
+        .eq('id', row.id)
+        .eq('status', 'QUEUED')
+        .select('id')
+        .maybeSingle();
+
+      if (!updErr && updatedRow?.id) {
+        dbCancelled += 1;
+        await supabaseClient
+          .from('trade_mappings')
+          .update({
+            status: 'FAILED',
+            error_message: reason,
+            updated_at: nowIso,
+          })
+          .eq('child_account_id', row.child_account_id)
+          .eq('parent_trade_ticket', String(row.parent_ticket))
+          .eq('status', 'PENDING');
+      }
+    }
+
+    return dbCancelled;
+  }
+
+  /**
+   * Evaluate $50 pause / $100 resume hysteresis on verified child balance telemetry.
+   * Never overrides manual suspension ('suspended'), manual pause ('paused'), or 'inactive'.
+   */
+  public async evaluateChildBalanceHysteresis(
+    supabaseClient: SupabaseClient | undefined,
+    childAccountId: string,
+    verifiedBalance: number,
+    nowIso: string = new Date().toISOString()
+  ): Promise<{ pausedCount: number; resumedCount: number; cancelledOpenCount: number }> {
+    if (!supabaseClient || typeof (supabaseClient as any).from !== 'function') {
+      return { pausedCount: 0, resumedCount: 0, cancelledOpenCount: 0 };
+    }
+    if (!Number.isFinite(verifiedBalance) || verifiedBalance < 0) {
+      return { pausedCount: 0, resumedCount: 0, cancelledOpenCount: 0 };
+    }
+
+    const { data: assignments, error } = await supabaseClient
+      .from('mentor_assignments')
+      .select('id, status, balance_pause_active, activation_epoch, parent_account_id, suspended_at, suspended_by')
+      .eq('child_account_id', childAccountId);
+
+    if (error || !Array.isArray(assignments) || assignments.length === 0) {
+      return { pausedCount: 0, resumedCount: 0, cancelledOpenCount: 0 };
+    }
+
+    let pausedCount = 0;
+    let resumedCount = 0;
+    let cancelledOpenCount = 0;
+
+    for (const a of assignments) {
+      if (verifiedBalance < BALANCE_PAUSE_THRESHOLD_USD) {
+        if (!a.balance_pause_active) {
+          const { error: pauseErr } = await supabaseClient
+            .from('mentor_assignments')
+            .update({
+              balance_pause_active: true,
+              pause_reason: 'LOW_BALANCE_UNDER_50',
+              paused_at: nowIso,
+            })
+            .eq('id', a.id);
+
+          if (!pauseErr) {
+            pausedCount += 1;
+            cancelledOpenCount += await this.cancelQueuedOpenInstructions(supabaseClient, {
+              childAccountId,
+              parentAccountId: a.parent_account_id || undefined,
+              reason: `Child verified balance $${verifiedBalance.toFixed(2)} fell below $${BALANCE_PAUSE_THRESHOLD_USD} threshold`,
+            });
+            await this.addSyncLog(
+              {
+                eventType: 'CHILD_BALANCE_PAUSED',
+                level: 'warn',
+                details: `Child account ${childAccountId} paused automatically (verified balance $${verifiedBalance.toFixed(2)} < $${BALANCE_PAUSE_THRESHOLD_USD}). Open positions kept intact.`,
+              },
+              supabaseClient
+            );
+          }
+        }
+      } else if (verifiedBalance >= BALANCE_RESUME_THRESHOLD_USD) {
+        // Auto-resume ONLY when status is strictly 'active' (never override manual suspended/paused/inactive)
+        if (a.balance_pause_active === true && a.status === 'active' && !a.suspended_at && !a.suspended_by) {
+          const nextEpoch = (Number(a.activation_epoch) || 1) + 1;
+          const { error: resErr } = await supabaseClient
+            .from('mentor_assignments')
+            .update({
+              balance_pause_active: false,
+              pause_reason: null,
+              resumed_at: nowIso,
+              activated_at: nowIso,
+              activation_epoch: nextEpoch,
+            })
+            .eq('id', a.id);
+
+          if (!resErr) {
+            resumedCount += 1;
+            await this.addSyncLog(
+              {
+                eventType: 'CHILD_BALANCE_RESUMED',
+                level: 'info',
+                details: `Child account ${childAccountId} auto-resumed at epoch ${nextEpoch} (verified balance $${verifiedBalance.toFixed(2)} >= $${BALANCE_RESUME_THRESHOLD_USD}).`,
+              },
+              supabaseClient
+            );
+          }
+        }
+      }
+    }
+
+    return { pausedCount, resumedCount, cancelledOpenCount };
+  }
+
+  /**
    * Poll pending instructions with durable cross-instance lease locking
    */
   public async pollPendingInstructions(
@@ -698,6 +958,8 @@ export class BridgeStore {
               slippageMaxPips: this.instructions.get(r.id)?.slippageMaxPips,
               magicNumber: r.magic_number != null ? String(r.magic_number) : '888999',
               comment: r.comment || '',
+              activationEpoch: r.activation_epoch != null ? Number(r.activation_epoch) : undefined,
+              parentEventTimestamp: r.parent_event_timestamp || undefined,
               createdAt: r.created_at,
               status: 'IN_FLIGHT',
               leaseExpiresAt: validLease,
@@ -719,7 +981,7 @@ export class BridgeStore {
       const nowIso = new Date(now).toISOString();
       const { data: candidateRows, error: candErr } = await supabaseClient
         .from('bridge_instructions')
-        .select('id, retry_count, status, lease_expires_at, parent_ticket')
+        .select('*')
         .eq('child_account_id', childAccountId)
         .or(`status.eq.QUEUED,and(status.eq.IN_FLIGHT,lease_expires_at.lt.${nowIso})`)
         .order('created_at', { ascending: true })
@@ -731,11 +993,69 @@ export class BridgeStore {
       }
 
       if (candidateRows && candidateRows.length > 0) {
+        // Load assignments for this child so secondary fallback mirrors claim_pending_instructions gating for OPEN
+        const { data: childAssignments } = await supabaseClient
+          .from('mentor_assignments')
+          .select('parent_account_id, status, balance_pause_active, activated_at, activation_epoch')
+          .eq('child_account_id', childAccountId);
+        const assignByParent = new Map<string, any>();
+        for (const a of childAssignments || []) {
+          if (a?.parent_account_id) {
+            assignByParent.set(a.parent_account_id, a);
+          }
+        }
+
         const deliverableInstructions: BridgeInstruction[] = [];
 
         for (const cand of candidateRows) {
           const currentRetries = Number(cand.retry_count) || 0;
           const isExpiredLease = cand.status === 'IN_FLIGHT';
+
+          // Fail/cancel blocked or pre-activation QUEUED OPEN instructions (CLOSE/MODIFY always allowed)
+          if (cand.action === 'OPEN' && cand.status === 'QUEUED') {
+            const assign = assignByParent.get(cand.parent_account_id);
+            const eventTimeStr = cand.parent_event_timestamp || cand.created_at;
+            const eventTimeMs = eventTimeStr ? Date.parse(eventTimeStr) : NaN;
+            const activatedAtMs = assign?.activated_at ? Date.parse(assign.activated_at) : NaN;
+            const isPreActivationEpoch =
+              assign?.activation_epoch != null &&
+              cand.activation_epoch != null &&
+              Number(cand.activation_epoch) < Number(assign.activation_epoch);
+            const isPreActivationTime =
+              Number.isFinite(activatedAtMs) && Number.isFinite(eventTimeMs) && eventTimeMs < activatedAtMs;
+
+            const openBlocked =
+              !assign ||
+              assign.status !== 'active' ||
+              assign.balance_pause_active === true ||
+              isPreActivationEpoch ||
+              isPreActivationTime;
+
+            if (openBlocked) {
+              await supabaseClient
+                .from('bridge_instructions')
+                .update({ status: 'FAILED' })
+                .eq('id', cand.id)
+                .eq('status', 'QUEUED');
+
+              await supabaseClient
+                .from('trade_mappings')
+                .update({
+                  status: 'FAILED',
+                  error_message:
+                    assign?.balance_pause_active
+                      ? 'Cancelled: child account paused due to low verified balance'
+                      : isPreActivationEpoch || isPreActivationTime
+                      ? 'Cancelled: instruction predates assignment activation boundary'
+                      : 'Cancelled: assignment inactive, paused, or suspended before execution',
+                  updated_at: nowIso,
+                })
+                .eq('child_account_id', childAccountId)
+                .eq('parent_trade_ticket', String(cand.parent_ticket))
+                .eq('status', 'PENDING');
+              continue;
+            }
+          }
 
           // Retry limit check (5 max attempts)
           if (isExpiredLease && currentRetries >= 5) {
@@ -820,6 +1140,8 @@ export class BridgeStore {
               slippageMaxPips: this.instructions.get(claimedRow.id)?.slippageMaxPips,
               magicNumber: claimedRow.magic_number != null ? String(claimedRow.magic_number) : '888999',
               comment: claimedRow.comment || '',
+              activationEpoch: claimedRow.activation_epoch != null ? Number(claimedRow.activation_epoch) : undefined,
+              parentEventTimestamp: claimedRow.parent_event_timestamp || undefined,
               createdAt: claimedRow.created_at,
               status: 'IN_FLIGHT',
               leaseExpiresAt: validLease,
@@ -985,6 +1307,9 @@ export class BridgeStore {
       ? String(ack.childTicket).trim()
       : undefined;
 
+    let isPartialCloseRemaining = false;
+    let remainingLotsAfterClose: number | undefined;
+
     // 2. Persist execution outcome to Supabase PostgreSQL
     if (supabaseClient && typeof (supabaseClient as any).from === 'function') {
       try {
@@ -1030,22 +1355,96 @@ export class BridgeStore {
             };
           }
         } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
-          const { error: closeMapErr } = await supabaseClient
+          const isPartialCloseInst = inst.idempotencyKey.includes('_CLOSE_PARTIAL_');
+          const { data: currentMap } = await supabaseClient
             .from('trade_mappings')
-            .update({
-              status: 'CLOSED',
-              updated_at: new Date().toISOString(),
-            })
+            .select('id, child_lots, child_remaining_lots, partial_close_count')
             .eq('parent_trade_ticket', String(inst.parentTicket))
-            .eq('child_account_id', inst.childAccountId);
+            .eq('child_account_id', inst.childAccountId)
+            .maybeSingle();
 
-          if (closeMapErr) {
-            console.error('[BridgeStore] Supabase CLOSE trade_mappings update error:', closeMapErr.message);
-            return {
-              success: false,
-              statusCode: 500,
-              error: `Failed to persist CLOSE trade_mapping state: ${closeMapErr.message}`,
+          const currentRemaining =
+            currentMap?.child_remaining_lots != null && Number.isFinite(Number(currentMap.child_remaining_lots))
+              ? Number(currentMap.child_remaining_lots)
+              : currentMap?.child_lots != null && Number.isFinite(Number(currentMap.child_lots))
+              ? Number(currentMap.child_lots)
+              : Number(inst.lots);
+          const closedLotsVal =
+            ack.executedLots != null && Number.isFinite(Number(ack.executedLots)) && Number(ack.executedLots) > 0
+              ? Number(ack.executedLots)
+              : Number(inst.lots);
+          const nextRemaining = Math.max(0, Number((currentRemaining - closedLotsVal).toFixed(8)));
+          const nextPartialCount = (Number(currentMap?.partial_close_count) || 0) + (isPartialCloseInst ? 1 : 0);
+
+          if (isPartialCloseInst && nextRemaining > 1e-6) {
+            isPartialCloseRemaining = true;
+            remainingLotsAfterClose = nextRemaining;
+
+            const partialMapUpdate = {
+              status: 'EXECUTED',
+              child_remaining_lots: nextRemaining,
+              partial_close_count: nextPartialCount,
+              updated_at: new Date().toISOString(),
             };
+            let { error: partialMapErr } = await supabaseClient
+              .from('trade_mappings')
+              .update(partialMapUpdate)
+              .eq('parent_trade_ticket', String(inst.parentTicket))
+              .eq('child_account_id', inst.childAccountId);
+
+            if (partialMapErr && isMissingSchemaColumnError(partialMapErr)) {
+              const fallbackRes = await supabaseClient
+                .from('trade_mappings')
+                .update({
+                  status: 'EXECUTED',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('parent_trade_ticket', String(inst.parentTicket))
+                .eq('child_account_id', inst.childAccountId);
+              partialMapErr = fallbackRes.error;
+            }
+
+            if (partialMapErr) {
+              console.error('[BridgeStore] Supabase partial CLOSE trade_mappings update error:', partialMapErr.message);
+              return {
+                success: false,
+                statusCode: 500,
+                error: `Failed to persist partial CLOSE trade_mapping state: ${partialMapErr.message}`,
+              };
+            }
+          } else {
+            const fullCloseUpdate = {
+              status: 'CLOSED',
+              child_remaining_lots: 0,
+              partial_close_count: nextPartialCount,
+              updated_at: new Date().toISOString(),
+            };
+            let { error: closeMapErr } = await supabaseClient
+              .from('trade_mappings')
+              .update(fullCloseUpdate)
+              .eq('parent_trade_ticket', String(inst.parentTicket))
+              .eq('child_account_id', inst.childAccountId);
+
+            if (closeMapErr && isMissingSchemaColumnError(closeMapErr)) {
+              const fallbackRes = await supabaseClient
+                .from('trade_mappings')
+                .update({
+                  status: 'CLOSED',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('parent_trade_ticket', String(inst.parentTicket))
+                .eq('child_account_id', inst.childAccountId);
+              closeMapErr = fallbackRes.error;
+            }
+
+            if (closeMapErr) {
+              console.error('[BridgeStore] Supabase CLOSE trade_mappings update error:', closeMapErr.message);
+              return {
+                success: false,
+                statusCode: 500,
+                error: `Failed to persist CLOSE trade_mapping state: ${closeMapErr.message}`,
+              };
+            }
           }
         } else if (inst.action === 'MODIFY') {
           const { error: modMapErr } = await supabaseClient
@@ -1069,7 +1468,7 @@ export class BridgeStore {
         }
 
         // Persist durable child trade lifecycle record without fabricating realized P&L
-        await this.syncChildAckToTradesTable(inst, ack, childTicketStr, supabaseClient);
+        await this.syncChildAckToTradesTable(inst, ack, childTicketStr, supabaseClient, remainingLotsAfterClose);
       } catch (err: any) {
         console.error('[BridgeStore] Supabase ack persistence exception:', err.message);
         return { success: false, statusCode: 500, error: `Database ACK persistence exception: ${err.message}` };
@@ -1089,10 +1488,14 @@ export class BridgeStore {
       if (inst.action === 'OPEN') {
         map.status = ack.status;
       } else if (inst.action === 'CLOSE' && ack.status === 'EXECUTED') {
-        map.status = 'CLOSED';
-        map.closeTime = new Date().toISOString();
-        if (ack.realizedProfit != null && Number.isFinite(Number(ack.realizedProfit))) {
-          map.childProfitUSD = Number(ack.realizedProfit);
+        if (isPartialCloseRemaining) {
+          map.status = 'EXECUTED';
+        } else {
+          map.status = 'CLOSED';
+          map.closeTime = new Date().toISOString();
+          if (ack.realizedProfit != null && Number.isFinite(Number(ack.realizedProfit))) {
+            map.childProfitUSD = Number(ack.realizedProfit);
+          }
         }
       }
       map.latencyMs = ack.executionLatencyMs || map.latencyMs;
@@ -1242,7 +1645,8 @@ export class BridgeStore {
     inst: BridgeInstruction,
     ack: ExecutionAckPayload,
     childTicketStr: string | undefined,
-    supabaseClient: SupabaseClient
+    supabaseClient: SupabaseClient,
+    remainingLotsAfterPartialClose?: number
   ): Promise<void> {
     try {
       const { data: childAcc } = await supabaseClient
@@ -1304,6 +1708,21 @@ export class BridgeStore {
             : ack.fillPrice != null && Number.isFinite(Number(ack.fillPrice))
             ? Number(ack.fillPrice)
             : undefined;
+
+        if (remainingLotsAfterPartialClose != null && remainingLotsAfterPartialClose > 1e-6) {
+          if (targetTicket) {
+            await supabaseClient
+              .from('trades')
+              .update({
+                volume: remainingLotsAfterPartialClose,
+                status: 'OPEN',
+                updated_at: nowIso,
+              })
+              .eq('account_id', inst.childAccountId)
+              .eq('ticket', targetTicket);
+          }
+          return;
+        }
 
         const patch: Record<string, any> = {
           status: 'CLOSED',

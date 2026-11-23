@@ -204,6 +204,12 @@ async function runTests() {
         auto_trading_enabled: true,
         last_sync: new Date().toISOString(),
         error_message: null,
+        verified_balance: 10000,
+        verified_equity: 10000,
+        balance_verified_at: new Date().toISOString(),
+        verified_symbol_specs: {
+          EURUSD: { minLot: 0.01, maxLot: 100, lotStep: 0.01 },
+        },
         terminal_token_hash: BridgeStore.hashToken(childToken),
       },
     ],
@@ -273,7 +279,7 @@ async function runTests() {
 
   try {
     // ------------------------------------------------------------------
-    // 1. Explicit PARTIAL close is logged cleanly and NOT executed
+    // 1. Explicit PARTIAL close queues proportional CLOSE without closing mapping prematurely
     // ------------------------------------------------------------------
     const partialRes = await fetch(`${baseUrl}/api/v1/bridge/events/trade-close`, {
       method: 'POST',
@@ -298,31 +304,28 @@ async function runTests() {
     assert.strictEqual(partialJson.success, true);
     assert.strictEqual(partialJson.parentTicket, parentTicketPartial);
     assert.strictEqual(partialJson.closeType, 'PARTIAL');
-    assert.strictEqual(partialJson.partialCloseHandled, 'logged_not_executed');
-    assert.strictEqual(partialJson.closeInstructionsQueued, 0);
-    assert.deepStrictEqual(partialJson.instructions, []);
+    assert.strictEqual(partialJson.partialCloseHandled, 'queued');
+    assert.strictEqual(partialJson.closeInstructionsQueued, 1);
+    assert.strictEqual(partialJson.instructions[0].lots, 0.1);
 
-    assert.strictEqual(
-      state.bridge_instructions.length,
-      0,
-      'PARTIAL close must NOT queue any CLOSE instructions'
-    );
+    assert.strictEqual(state.bridge_instructions.length, 1);
     assert.strictEqual(
       state.trade_mappings[0].status,
       'EXECUTED',
       'Open child trade mapping must remain EXECUTED until FULL close'
     );
 
-    const partialLogs = state.bridge_sync_logs.filter((l) => l.event_type === 'PARTIAL_CLOSE_SKIPPED');
-    assert.strictEqual(partialLogs.length, 1, 'PARTIAL_CLOSE_SKIPPED audit log must be persisted');
-    assert.strictEqual(partialLogs[0].level, 'warn');
+    const partialLogs = state.bridge_sync_logs.filter((l) => l.event_type === 'BRIDGE_PARENT_TRADE_PARTIAL_CLOSE');
+    assert.strictEqual(partialLogs.length, 1);
     assert.strictEqual(partialLogs[0].ticket, parentTicketPartial);
-    assert.ok(partialLogs[0].details.includes('deal #9001'));
-    console.log('[PASS] 1. Explicit PARTIAL close logs PARTIAL_CLOSE_SKIPPED, queues 0 CLOSE instructions, and keeps child open.');
+    console.log('[PASS] 1. Explicit PARTIAL close queues proportional CLOSE (0.1 lots) and keeps mapping open.');
 
     // ------------------------------------------------------------------
-    // 2. Omitted closeType with remainingLots > 0.00001 is safely detected as PARTIAL
+    // 2. Omitted closeType with remainingLots > 0.00001 is detected as PARTIAL and rejects sub-minLot dust safely
     // ------------------------------------------------------------------
+    state.mt5_accounts[1].verified_symbol_specs = {
+      EURUSD: { minLot: 0.15, maxLot: 100, lotStep: 0.01 },
+    };
     const implicitPartialRes = await fetch(`${baseUrl}/api/v1/bridge/events/trade-close`, {
       method: 'POST',
       headers: {
@@ -334,6 +337,7 @@ async function runTests() {
         account_number: '99110011',
         ticket: parentTicketPartial,
         closePrice: 1.096,
+        closedLots: 0.05,
         remainingLots: 0.05,
       }),
     });
@@ -341,11 +345,12 @@ async function runTests() {
     assert.strictEqual(implicitPartialRes.status, 200);
     const implicitPartialJson: any = await implicitPartialRes.json();
     assert.strictEqual(implicitPartialJson.closeType, 'PARTIAL');
-    assert.strictEqual(implicitPartialJson.partialCloseHandled, 'logged_not_executed');
+    assert.strictEqual(implicitPartialJson.partialCloseHandled, 'queued');
     assert.strictEqual(implicitPartialJson.closeInstructionsQueued, 0);
-    assert.strictEqual(state.bridge_instructions.length, 0);
-    assert.strictEqual(state.bridge_sync_logs.filter((l) => l.event_type === 'PARTIAL_CLOSE_SKIPPED').length, 2);
-    console.log('[PASS] 2. Omitted closeType with remainingLots > 0.00001 is safely treated as PARTIAL.');
+    assert.strictEqual(implicitPartialJson.rejectedChildren.length, 1);
+    assert.strictEqual(state.bridge_instructions.length, 1);
+    assert.strictEqual(state.bridge_sync_logs.filter((l) => l.event_type === 'PARTIAL_CLOSE_REJECTED').length, 1);
+    console.log('[PASS] 2. Omitted closeType with remainingLots > 0.00001 triggers PARTIAL and safely rejects sub-minLot close.');
 
     // ------------------------------------------------------------------
     // 3. Explicit FULL close and legacy omitted closeType queue CLOSE normally
@@ -374,8 +379,8 @@ async function runTests() {
     assert.strictEqual(fullExplicitJson.closeInstructionsQueued, 1);
     assert.strictEqual(fullExplicitJson.instructions[0].childAccountId, childAccId);
     assert.strictEqual(fullExplicitJson.instructions[0].childTicket, '910002');
-    assert.strictEqual(state.bridge_instructions[0].action, 'CLOSE');
-    assert.strictEqual(state.bridge_instructions[0].parent_ticket, parentTicketFullExplicit);
+    assert.strictEqual(state.bridge_instructions[1].action, 'CLOSE');
+    assert.strictEqual(state.bridge_instructions[1].parent_ticket, parentTicketFullExplicit);
 
     const fullLegacyRes = await fetch(`${baseUrl}/api/v1/bridge/events/trade-close`, {
       method: 'POST',
@@ -397,9 +402,9 @@ async function runTests() {
     assert.strictEqual(fullLegacyJson.closeInstructionsQueued, 1);
     assert.strictEqual(fullLegacyJson.instructions[0].childAccountId, childAccId);
     assert.strictEqual(fullLegacyJson.instructions[0].childTicket, '910003');
-    assert.strictEqual(state.bridge_instructions.length, 2);
-    assert.strictEqual(state.bridge_instructions[1].action, 'CLOSE');
-    assert.strictEqual(state.bridge_instructions[1].parent_ticket, parentTicketFullLegacy);
+    assert.strictEqual(state.bridge_instructions.length, 3);
+    assert.strictEqual(state.bridge_instructions[2].action, 'CLOSE');
+    assert.strictEqual(state.bridge_instructions[2].parent_ticket, parentTicketFullLegacy);
     console.log('[PASS] 3. Explicit FULL close and legacy omitted closeType queue child CLOSE instructions.');
 
     // ------------------------------------------------------------------

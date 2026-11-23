@@ -464,8 +464,20 @@ async function runTests() {
     mentor_trader_invitations: [],
     brokers: [],
     broker_symbols: [],
-    subscription_plans: [],
-    subscriptions: [],
+    subscription_plans: [
+      { id: 'plan-silver-10', code: 'silver', name: 'Silver', max_followers: 50, max_child_accounts: 50, is_active: true },
+    ],
+    subscriptions: [
+      {
+        id: 'sub-m10',
+        user_id: mentorId,
+        mentor_id: mentorId,
+        plan_id: 'plan-silver-10',
+        status: 'active',
+        current_period_end: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        created_at: new Date().toISOString(),
+      },
+    ],
     platform_settings: [{ id: 'default', demo_only_enforced: true }],
     audit_logs: [],
     notifications: [],
