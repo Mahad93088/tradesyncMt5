@@ -882,7 +882,7 @@ export const INITIAL_AUDIT_LOGS: AuditLog[] = [
     targetResource: 'MentorProfile',
     targetId: 'mentor_prof_1',
     result: 'success',
-    details: 'Provisioned mentor Alex Vance (Alpha FX) with Pro Yearly subscription tier.',
+    details: 'Provisioned mentor Alex Vance (Alpha FX) with Gold Yearly subscription plan.',
     ipAddress: '198.51.100.24'
   },
   {

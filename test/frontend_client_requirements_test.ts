@@ -185,6 +185,31 @@ function runTests() {
   assert.strictEqual(tradersMgmt.includes('balance_paused') && tradersMgmt.includes('suspensionReason'), true);
   console.log('[PASS] 7. Admin dashboard & management views display distinct counts, Trial/Silver/Gold limits, balance_paused, and Suspend/Reactivate controls.');
 
+  // 8. Final UI cleanup checks: no stale Pro Yearly mock log, read-only follower limit in Edit Mentor modal, clarified schema tier labels
+  const mockDataSrc = readSrc('src/data/mockData.ts');
+  assert.strictEqual(mockDataSrc.includes('Pro Yearly'), false, 'mockData.ts must not contain stale "Pro Yearly" label');
+  assert.strictEqual(mockDataSrc.includes('Gold Yearly subscription plan'), true);
+
+  assert.strictEqual(
+    mentorsMgmt.includes('Authoritative Follower Limit (Read-Only)'),
+    true,
+    'MentorsManagement Edit modal must display read-only Authoritative Follower Limit'
+  );
+  assert.strictEqual(
+    mentorsMgmt.includes('setEditMaxFollowers(parseInt'),
+    false,
+    'MentorsManagement Edit modal must not allow editing maxFollowers'
+  );
+
+  assert.strictEqual(plansView.includes('value="free_demo"'), true);
+  assert.strictEqual(plansView.includes('value="trader_pro"'), true);
+  assert.strictEqual(plansView.includes('value="mentor_pro"'), true);
+  assert.strictEqual(plansView.includes('value="enterprise"'), true);
+  assert.strictEqual(plansView.includes('Enterprise / Business'), false);
+  assert.strictEqual(plansView.includes('>Trader Pro<'), false);
+  assert.strictEqual(plansView.includes('>Mentor Pro<'), false);
+  console.log('[PASS] 8. Stale mock log updated, Edit Mentor follower limit is read-only, and SubscriptionPlansView tier labels are clarified.');
+
   console.log('\nALL FRONTEND CLIENT REQUIREMENTS TESTS PASSED.');
 }
 

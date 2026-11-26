@@ -172,6 +172,15 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
       subscriptionExpiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
       riskScore: 'Low',
     };
+    const mentorSub =
+      subscriptions.find(
+        (s) => (s.mentorId === mentorUser.id || s.userId === mentorUser.id) && (s.status === 'active' || s.status === 'trial')
+      ) || subscriptions.find((s) => s.mentorId === mentorUser.id || s.userId === mentorUser.id);
+    const mentorPlan = mentorSub ? subscriptionPlans.find((p) => p.id === mentorSub.planId) : undefined;
+    const authoritativeFollowerLimit = mentorPlan
+      ? resolvePlanFollowerLimit(mentorPlan)
+      : mentorSub?.maxFollowers ?? profile.maxFollowers ?? 2;
+
     setEditingMentor({ user: mentorUser, profile });
     setEditFullName(mentorUser.fullName);
     setEditEmail(mentorUser.email);
@@ -179,7 +188,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
     setEditStrategyName(profile.strategyName);
     setEditDescription(profile.description);
     setEditMonthlyFee(profile.monthlyFee);
-    setEditMaxFollowers(profile.maxFollowers);
+    setEditMaxFollowers(authoritativeFollowerLimit);
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
@@ -756,19 +765,38 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Display Follower Cap (Plan limits enforced: Trial 2, Silver 50, Gold 100)
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="100"
-                  value={editMaxFollowers}
-                  onChange={(e) => setEditMaxFollowers(parseInt(e.target.value, 10) || 2)}
-                  className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono focus:border-sky-500 focus:outline-none"
-                />
-              </div>
+              {(() => {
+                const sub =
+                  subscriptions.find(
+                    (s) =>
+                      (s.mentorId === editingMentor.user.id || s.userId === editingMentor.user.id) &&
+                      (s.status === 'active' || s.status === 'trial')
+                  ) ||
+                  subscriptions.find(
+                    (s) => s.mentorId === editingMentor.user.id || s.userId === editingMentor.user.id
+                  );
+                const plan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : undefined;
+                const authoritativeLimit = plan
+                  ? resolvePlanFollowerLimit(plan)
+                  : sub?.maxFollowers ?? editMaxFollowers ?? 2;
+                const planLabel = plan?.name || sub?.planName || 'Trial';
+
+                return (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-700 font-semibold">
+                        Authoritative Follower Limit (Read-Only)
+                      </span>
+                      <span className="font-mono font-bold text-slate-900 tabular-nums">
+                        {authoritativeLimit} distinct traders
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Controlled by assigned subscription plan ({planLabel}). Enforced limits: Trial 2, Silver 50, Gold 100.
+                    </p>
+                  </div>
+                );
+              })()}
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
                 <button

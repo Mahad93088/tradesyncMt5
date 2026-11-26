@@ -497,16 +497,16 @@ export const SubscriptionPlansView: React.FC = () => {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Tier Category</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Schema Tier Category</label>
                   <select
                     value={tier}
                     onChange={(e) => setTier(e.target.value as any)}
                     className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
                   >
-                    <option value="free_demo">Free Demo</option>
-                    <option value="trader_pro">Trader Pro</option>
-                    <option value="mentor_pro">Mentor Pro</option>
-                    <option value="enterprise">Enterprise / Business</option>
+                    <option value="free_demo">Free / Trial Category (free_demo)</option>
+                    <option value="trader_pro">Trader Category (trader_pro)</option>
+                    <option value="mentor_pro">Mentor Standard Category — Silver (mentor_pro)</option>
+                    <option value="enterprise">Mentor Scale Category — Gold (enterprise)</option>
                   </select>
                 </div>
                 <div>
