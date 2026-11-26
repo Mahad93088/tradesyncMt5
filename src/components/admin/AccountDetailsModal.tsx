@@ -308,7 +308,15 @@ export const AccountDetailsModal: React.FC<AccountDetailsModalProps> = ({
                               {child.brokerName}
                             </td>
                             <td className="py-2.5">
-                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                                  child.assignmentStatus === 'suspended'
+                                    ? 'bg-rose-950 text-rose-300 border-rose-800'
+                                    : child.assignmentStatus === 'inactive'
+                                    ? 'bg-amber-950 text-amber-300 border-amber-800'
+                                    : 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                }`}
+                              >
                                 {child.assignmentStatus}
                               </span>
                             </td>

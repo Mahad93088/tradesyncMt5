@@ -7,12 +7,15 @@ import {
   Unlink,
   AlertCircle,
   CheckCircle2,
-  X
+  X,
+  ShieldOff,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { countDistinctTraders } from '../common/dashboardHelpers';
 import { ParentChildLink } from '../../types';
 
 export const AccountRelationshipsView: React.FC = () => {
@@ -21,22 +24,32 @@ export const AccountRelationshipsView: React.FC = () => {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMentor, setFilterMentor] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused' | 'suspended' | 'balance_paused'>('all');
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
   const [confirmUnlink, setConfirmUnlink] = useState<ParentChildLink | null>(null);
+  const [pendingSuspend, setPendingSuspend] = useState<ParentChildLink | null>(null);
+  const [suspendReason, setSuspendReason] = useState('');
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
 
   const filteredLinks = parentChildLinks.filter((link) => {
     const matchesSearch =
       link.mentorName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       link.traderName.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesMentor = filterMentor === 'all' || link.mentorId === filterMentor;
-    return matchesSearch && matchesMentor;
+    const matchesStatus =
+      statusFilter === 'all'
+        ? true
+        : statusFilter === 'balance_paused'
+        ? Boolean(link.balancePauseActive)
+        : link.status === statusFilter;
+    return matchesSearch && matchesMentor && matchesStatus;
   });
 
   const mentorsList = Array.from(
     new Map(parentChildLinks.map((l) => [l.mentorId, { id: l.mentorId, name: l.mentorName }])).values()
   );
 
-  const activeCount = parentChildLinks.filter((l) => l.status === 'active').length;
+  const activeTradersCount = countDistinctTraders(parentChildLinks, ['active']);
 
   const handleToggleLink = async (linkId: string) => {
     setFeedback(null);
@@ -44,8 +57,39 @@ export const AccountRelationshipsView: React.FC = () => {
     if (!res.success) {
       setFeedback({ type: 'error', message: res.message || 'Failed to update assignment status.' });
     } else {
-      setFeedback({ type: 'success', message: 'Assignment status updated.' });
+      setFeedback({ type: 'success', message: res.message || 'Assignment status updated.' });
     }
+  };
+
+  const handleReactivateLink = async (link: ParentChildLink) => {
+    setFeedback(null);
+    setIsUpdatingStatus(true);
+    const res = await toggleLinkStatus(link.id, 'active');
+    setIsUpdatingStatus(false);
+    if (!res.success) {
+      setFeedback({ type: 'error', message: res.message || `Failed to reactivate ${link.traderName}.` });
+    } else {
+      setFeedback({ type: 'success', message: res.message || `Reactivated copy stream for ${link.traderName}.` });
+    }
+  };
+
+  const handleConfirmSuspend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingSuspend) return;
+    setFeedback(null);
+    setIsUpdatingStatus(true);
+    const res = await toggleLinkStatus(pendingSuspend.id, 'suspended', suspendReason.trim() || undefined);
+    setIsUpdatingStatus(false);
+    if (!res.success) {
+      setFeedback({ type: 'error', message: res.message || `Failed to suspend ${pendingSuspend.traderName}.` });
+      return;
+    }
+    setFeedback({
+      type: 'success',
+      message: res.message || `Suspended copy stream for ${pendingSuspend.traderName}.`,
+    });
+    setPendingSuspend(null);
+    setSuspendReason('');
   };
 
   const handleConfirmUnlink = async () => {
@@ -69,7 +113,7 @@ export const AccountRelationshipsView: React.FC = () => {
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             Parent-Child Account Relationships
             <span className="rounded-full bg-cyan-950 border border-cyan-800 px-2 py-0.5 text-xs text-cyan-400 font-mono">
-              {activeCount} Active / {parentChildLinks.length} Total
+              {activeTradersCount} Active Traders · {parentChildLinks.length} Links
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-1">
@@ -113,8 +157,21 @@ export const AccountRelationshipsView: React.FC = () => {
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <span className="text-xs text-slate-400 font-medium">Mentor:</span>
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <span className="text-xs text-slate-400 font-medium">Status:</span>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+          >
+            <option value="all">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="suspended">Suspended</option>
+            <option value="balance_paused">Balance Paused</option>
+          </select>
+
+          <span className="text-xs text-slate-400 font-medium ml-1">Mentor:</span>
           <select
             value={filterMentor}
             onChange={(e) => setFilterMentor(e.target.value)}
@@ -252,22 +309,53 @@ export const AccountRelationshipsView: React.FC = () => {
                     </div>
 
                     {/* Stream Status & Actions */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <StatusBadge status={link.status} size="sm" />
+                      {link.balancePauseActive && <StatusBadge status="balance_paused" size="sm" />}
+
+                      {link.status === 'suspended' ? (
+                        <button
+                          type="button"
+                          disabled={isUpdatingStatus}
+                          onClick={() => void handleReactivateLink(link)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-700/60 bg-emerald-950/60 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/60 disabled:opacity-50 transition-colors"
+                          title="Reactivate suspended assignment"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          <span>Reactivate</span>
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleLink(link.id)}
+                            className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                            title={link.status === 'active' ? 'Pause trade copying' : 'Resume trade copying'}
+                          >
+                            {link.status === 'active' ? (
+                              <PauseCircle className="h-5 w-5 text-amber-400" />
+                            ) : (
+                              <PlayCircle className="h-5 w-5 text-emerald-400" />
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPendingSuspend(link);
+                              setSuspendReason(link.suspensionReason || '');
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-800/60 bg-rose-950/40 px-2.5 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-900/50 transition-colors"
+                            title="Suspend assignment"
+                          >
+                            <ShieldOff className="h-3.5 w-3.5" />
+                            <span>Suspend</span>
+                          </button>
+                        </>
+                      )}
 
                       <button
-                        onClick={() => void handleToggleLink(link.id)}
-                        className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-                        title={link.status === 'active' ? 'Pause trade copying' : 'Resume trade copying'}
-                      >
-                        {link.status === 'active' ? (
-                          <PauseCircle className="h-5 w-5 text-amber-400" />
-                        ) : (
-                          <PlayCircle className="h-5 w-5 text-emerald-400" />
-                        )}
-                      </button>
-
-                      <button
+                        type="button"
                         onClick={() => setConfirmUnlink(link)}
                         className="rounded-lg p-2 text-slate-400 hover:bg-rose-950/60 hover:text-rose-400 transition-colors"
                         title="Sever parent-child link"
@@ -277,11 +365,87 @@ export const AccountRelationshipsView: React.FC = () => {
                     </div>
                   </div>
                 </div>
+
+                {(link.status === 'suspended' || link.balancePauseActive) && (
+                  <div className="mt-3 pt-3 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center gap-2 text-xs">
+                    {link.status === 'suspended' && (
+                      <div className="rounded-lg border border-rose-800/50 bg-rose-950/30 px-3 py-1.5 text-rose-200 flex-1">
+                        <strong className="text-rose-300">Manual Suspension:</strong>{' '}
+                        {link.suspensionReason || 'Suspended by mentor or administrator. New copy signals are blocked.'}
+                      </div>
+                    )}
+                    {link.balancePauseActive && (
+                      <div className="rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-1.5 text-amber-200 flex-1">
+                        <strong className="text-amber-300">Balance Pause:</strong>{' '}
+                        {link.pauseReason || 'Account balance dropped below $50 threshold (resumes automatically at $100 verified balance).'}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })
         )}
       </div>
+
+      {pendingSuspend && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <ShieldOff className="h-4 w-4 text-rose-400" />
+                  <span>Suspend Copy Assignment</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Suspend {pendingSuspend.traderName} from mentor {pendingSuspend.mentorName}. Existing open positions remain untouched.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingSuspend(null);
+                  setSuspendReason('');
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleConfirmSuspend} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Suspension Reason (optional)</label>
+                <textarea
+                  rows={2}
+                  value={suspendReason}
+                  onChange={(e) => setSuspendReason(e.target.value)}
+                  placeholder="e.g. Risk review or manual compliance pause"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2.5 text-white placeholder-slate-500 focus:border-rose-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingSuspend(null);
+                    setSuspendReason('');
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdatingStatus}
+                  className="rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-50 px-3.5 py-1.5 font-semibold text-white"
+                >
+                  {isUpdatingStatus ? 'Suspending...' : 'Confirm Suspend'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       <ConfirmationModal
         isOpen={Boolean(confirmUnlink)}

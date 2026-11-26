@@ -311,7 +311,7 @@ CREATE TABLE parent_child_links (
         "maxLotCap": 1.0,
         "minLotClamp": 0.01,
         "maxDrawdownProtectionPercent": 10.0,
-        "copyPendingOrders": true,
+        "copyPendingOrders": false,
         "syncSlTp": true,
         "slippageMaxPips": 3.0
     }'::jsonb,

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { countDistinctTraders } from './dashboardHelpers';
 
 interface SidebarProps {
   currentTab: string;
@@ -41,9 +42,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const role = currentUser.role;
 
-  const activeFollowers = parentChildLinks.filter(
-    (l) => l.mentorId === currentUser.id && l.status === 'active'
-  ).length;
+  const activeFollowers = countDistinctTraders(
+    parentChildLinks.filter((l) => l.mentorId === currentUser.id),
+    ['active']
+  );
 
   const unreadNotifications = notifications.filter((n) => !n.read).length;
 

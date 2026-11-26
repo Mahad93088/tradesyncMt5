@@ -21,6 +21,7 @@ import {
   AdminFeedbackBanner,
   AdminEmptyState,
 } from './adminUi';
+import { countDistinctTraders, resolvePlanFollowerLimit } from '../common/dashboardHelpers';
 
 interface MentorsManagementProps {
   isCreateOpen: boolean;
@@ -73,7 +74,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
   const [editStrategyName, setEditStrategyName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editMonthlyFee, setEditMonthlyFee] = useState(149);
-  const [editMaxFollowers, setEditMaxFollowers] = useState(25);
+  const [editMaxFollowers, setEditMaxFollowers] = useState(2);
 
   const [editingSubMentorId, setEditingSubMentorId] = useState<string | null>(null);
   const [editPlanId, setEditPlanId] = useState<string>('');
@@ -161,12 +162,12 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
       winRate: 72.4,
       profitFactor: 2.15,
       monthlyFee: 149,
-      maxFollowers: 25,
+      maxFollowers: 2,
       totalFollowers: 0,
       totalTrades: 128,
       inviteCode: `TS-${mentorUser.id.slice(0, 6).toUpperCase()}`,
       inviteLink: `https://tradesync.io/invite/TS-${mentorUser.id.slice(0, 6).toUpperCase()}`,
-      subscriptionPlanId: 'plan_pro',
+      subscriptionPlanId: 'plan_trial',
       subscriptionStatus: 'active',
       subscriptionExpiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
       riskScore: 'Low',
@@ -373,17 +374,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                   );
                   const sub = subscriptions.find((s) => s.mentorId === mentor.id || s.userId === mentor.id);
                   const subPlan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : undefined;
-                  const followersCount = new Set(
-                    parentChildLinks
-                      .filter((l) => l.mentorId === mentor.id && l.status === 'active')
-                      .map((l) => l.traderId)
-                  ).size;
-                  const maxFollowersQuota =
-                    sub?.maxFollowers ??
-                    subPlan?.maxFollowers ??
-                    subPlan?.maxChildAccounts ??
-                    profile?.maxFollowers ??
-                    2;
+                  const mentorLinks = parentChildLinks.filter((l) => l.mentorId === mentor.id);
+                  const followersCount = countDistinctTraders(mentorLinks, ['active']);
+                  const maxFollowersQuota = subPlan
+                    ? resolvePlanFollowerLimit(subPlan)
+                    : sub?.maxFollowers ?? profile?.maxFollowers ?? 2;
                   const deterministicInvite = `TS-${mentor.id.slice(0, 8).toUpperCase()}`;
 
                   return (
@@ -601,11 +596,11 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
                   <span className="text-slate-500 text-[10px] uppercase font-mono">Plan Limit</span>
                   <p className="font-mono font-bold text-slate-900 text-sm mt-0.5 tabular-nums">
-                    {new Set(followers.filter((l) => l.status === 'active').map((l) => l.traderId)).size} /{' '}
-                    {sub?.maxFollowers ??
-                      (sub ? subscriptionPlans.find((p) => p.id === sub.planId)?.maxFollowers : undefined) ??
-                      profile?.maxFollowers ??
-                      2}
+                    {countDistinctTraders(followers, ['active'])} /{' '}
+                    {(() => {
+                      const plan = sub ? subscriptionPlans.find((p) => p.id === sub.planId) : undefined;
+                      return plan ? resolvePlanFollowerLimit(plan) : sub?.maxFollowers ?? profile?.maxFollowers ?? 2;
+                    })()}
                   </p>
                 </div>
                 <div className="rounded-lg bg-slate-50 border border-slate-200 p-2.5">
@@ -620,7 +615,7 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-[11px] text-slate-600">
                     <div>Account: <strong className="text-slate-900">#{parentAccount.accountNumber}</strong></div>
                     <div>Broker: <strong className="text-slate-900">{parentAccount.broker}</strong></div>
-                    <div>Equity: <strong className="text-emerald-700">${parentAccount.equity.toLocaleString()}</strong></div>
+                    <div>Equity: <strong className="text-emerald-700">${(parentAccount.verifiedEquity ?? parentAccount.equity).toLocaleString()}</strong></div>
                     <div>Status: <AdminStatusText status={parentAccount.isStale ? 'stale' : parentAccount.connectionStatus} /></div>
                   </div>
                 ) : (
@@ -629,18 +624,28 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
               </div>
 
               <div className="space-y-2 text-xs">
-                <span className="font-semibold text-slate-800 block">Assigned Follower Traders ({followers.length})</span>
+                <span className="font-semibold text-slate-800 block">
+                  Assigned Follower Traders ({countDistinctTraders(followers, [])} traders · {followers.length} links)
+                </span>
                 {followers.length > 0 ? (
                   <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                     {followers.map((f) => (
                       <div
                         key={f.id}
-                        className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-[11px]"
+                        className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-[11px]"
                       >
-                        <span className="text-slate-900 font-sans font-medium">{f.traderName}</span>
-                        <div className="flex items-center gap-2">
+                        <div className="min-w-0">
+                          <span className="text-slate-900 font-sans font-medium block truncate">{f.traderName}</span>
+                          {(f.suspensionReason || f.pauseReason) && (
+                            <span className="text-[10px] text-slate-500 font-sans block truncate">
+                              {f.suspensionReason || f.pauseReason}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
                           <span className="text-slate-500">Mode: {f.lotSettings.mode === 'parent_lot' ? '1:1' : f.lotSettings.customType}</span>
                           <AdminStatusText status={f.status} />
+                          {f.balancePauseActive && <AdminStatusText status="balance_paused" />}
                         </div>
                       </div>
                     ))}
@@ -752,13 +757,15 @@ export const MentorsManagement: React.FC<MentorsManagementProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-700 font-semibold mb-1">Max Followers Quota</label>
+                <label className="block text-slate-700 font-semibold mb-1">
+                  Display Follower Cap (Plan limits enforced: Trial 2, Silver 50, Gold 100)
+                </label>
                 <input
                   type="number"
                   min="1"
                   max="100"
                   value={editMaxFollowers}
-                  onChange={(e) => setEditMaxFollowers(parseInt(e.target.value, 10) || 10)}
+                  onChange={(e) => setEditMaxFollowers(parseInt(e.target.value, 10) || 2)}
                   className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono focus:border-sky-500 focus:outline-none"
                 />
               </div>

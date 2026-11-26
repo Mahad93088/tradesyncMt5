@@ -226,7 +226,15 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                         {link ? (
                           <div className="space-y-1">
                             <span className="font-semibold text-sky-700 block">{link.mentorName}</span>
-                            <AdminStatusText status={link.status} />
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <AdminStatusText status={link.status} />
+                              {link.balancePauseActive && <AdminStatusText status="balance_paused" />}
+                            </div>
+                            {(link.suspensionReason || link.pauseReason) && (
+                              <span className="text-[10px] text-slate-500 block max-w-[180px] truncate" title={link.suspensionReason || link.pauseReason || ''}>
+                                {link.suspensionReason || link.pauseReason}
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <span className="text-slate-400 italic text-[11px]">Unlinked</span>
@@ -259,7 +267,7 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                               <AdminStatusText status={childAccount.isStale ? 'stale' : childAccount.connectionStatus} />
                             </div>
                             <p className="text-[11px] text-slate-500 font-sans tabular-nums">
-                              {childAccount.broker} · Eq: ${childAccount.equity.toLocaleString()}
+                              {childAccount.broker} · Eq: ${(childAccount.verifiedEquity ?? childAccount.equity).toLocaleString()}
                             </p>
                           </div>
                         ) : (
@@ -419,8 +427,8 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                   <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-600">
                     <div>Account: <strong className="text-slate-900">#{childAccount.accountNumber}</strong></div>
                     <div>Broker: <strong className="text-slate-900">{childAccount.broker}</strong></div>
-                    <div>Balance: <strong className="text-slate-900 tabular-nums">${childAccount.balance.toLocaleString()}</strong></div>
-                    <div>Equity: <strong className="text-emerald-700 tabular-nums">${childAccount.equity.toLocaleString()}</strong></div>
+                    <div>Balance: <strong className="text-slate-900 tabular-nums">${(childAccount.verifiedBalance ?? childAccount.balance).toLocaleString()}</strong></div>
+                    <div>Equity: <strong className="text-emerald-700 tabular-nums">${(childAccount.verifiedEquity ?? childAccount.equity).toLocaleString()}</strong></div>
                     <div>Connection: <AdminStatusText status={childAccount.isStale ? 'stale' : childAccount.connectionStatus} /></div>
                     <div>Heartbeat: <strong className="text-slate-900">{formatHeartbeatAge(childAccount.lastHeartbeat)}</strong></div>
                   </div>
@@ -435,21 +443,41 @@ export const TradersManagement: React.FC<TradersManagementProps> = ({
                   Assigned Mentor &amp; Copy Telemetry
                 </span>
                 {link ? (
-                  <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-600">
-                    <div>Mentor: <strong className="text-sky-700 font-sans">{link.mentorName}</strong></div>
-                    <div>Link Status: <AdminStatusText status={link.status} /></div>
-                    <div>Copy Rule: <strong className="text-slate-900">{formatLotRuleLabel(link.lotSettings)}</strong></div>
-                    <div>Trades Copied: <strong className="text-slate-900 tabular-nums">{link.totalTradesCopied}</strong></div>
-                    <div>
-                      Copied P&amp;L:{' '}
-                      {isCloudMode && link.totalProfitAvailable === false ? (
-                        <span className="text-slate-500 italic font-sans">Awaiting EA sync</span>
-                      ) : (
-                        <strong className={link.totalProfitUSD >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
-                          ${link.totalProfitUSD.toLocaleString()}
-                        </strong>
-                      )}
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-600">
+                      <div>Mentor: <strong className="text-sky-700 font-sans">{link.mentorName}</strong></div>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <span>Link Status:</span>
+                        <AdminStatusText status={link.status} />
+                        {link.balancePauseActive && <AdminStatusText status="balance_paused" />}
+                      </div>
+                      <div>Copy Rule: <strong className="text-slate-900">{formatLotRuleLabel(link.lotSettings)}</strong></div>
+                      <div>Trades Copied: <strong className="text-slate-900 tabular-nums">{link.totalTradesCopied}</strong></div>
+                      <div>
+                        Copied P&amp;L:{' '}
+                        {isCloudMode && link.totalProfitAvailable === false ? (
+                          <span className="text-slate-500 italic font-sans">Awaiting EA sync</span>
+                        ) : (
+                          <strong className={link.totalProfitUSD >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+                            ${link.totalProfitUSD.toLocaleString()}
+                          </strong>
+                        )}
+                      </div>
                     </div>
+                    {(link.suspensionReason || link.pauseReason) && (
+                      <div className="rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700">
+                        {link.suspensionReason && (
+                          <div>
+                            <strong className="text-rose-700">Suspension Reason:</strong> {link.suspensionReason}
+                          </div>
+                        )}
+                        {link.pauseReason && (
+                          <div>
+                            <strong className="text-amber-700">Balance Pause Reason:</strong> {link.pauseReason}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <p className="text-slate-500 italic">Not linked to any mentor.</p>

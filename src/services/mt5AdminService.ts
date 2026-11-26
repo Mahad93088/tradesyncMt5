@@ -77,7 +77,7 @@ export interface LinkedChildItem {
   brokerServer: string;
   connectionStatus: 'connected' | 'disconnected' | 'connecting' | 'error';
   assignedAt: string;
-  assignmentStatus: 'active' | 'inactive';
+  assignmentStatus: 'active' | 'inactive' | 'suspended';
   lotCopyMode: string;
   lotMultiplier: number;
   fixedLot: number;
@@ -151,7 +151,7 @@ export interface ChildAccountItem {
   assignedParentAccountId?: string; // Parent MT5 account UUID
   assignedParentAccountNumber?: string;
   assignmentId?: string; // mentor_assignments.id UUID
-  assignmentStatus?: 'active' | 'inactive';
+  assignmentStatus?: 'active' | 'inactive' | 'suspended';
   assignedAt?: string;
   // Sizing & copy parameters
   copyMode: 'multiplier' | 'fixed' | 'parent_lot' | 'equity_ratio' | 'risk_percent' | 'unassigned';
@@ -616,7 +616,7 @@ export const mt5AdminService = {
           brokerServer: childAcc?.server || 'TradeSync-DemoBridge-01',
           connectionStatus: (childAcc?.connectionStatus as any) || 'connected',
           assignedAt: l.linkedAt,
-          assignmentStatus: l.status === 'active' ? 'active' : 'inactive',
+          assignmentStatus: l.status === 'active' ? 'active' : l.status === 'suspended' ? 'suspended' : 'inactive',
           lotCopyMode: l.lotSettings?.mode || 'parent_lot',
           lotMultiplier: l.lotSettings?.multiplier || 1.0,
           fixedLot: l.lotSettings?.fixedLot || 0.1,
@@ -765,7 +765,7 @@ export const mt5AdminService = {
             maxDrawdownProtectionPercent:
               assignment?.max_drawdown_percent !== undefined ? Number(assignment.max_drawdown_percent) : 20,
             copyPendingOrders:
-              assignment?.copy_pending_orders !== undefined ? Boolean(assignment.copy_pending_orders) : true,
+              assignment?.copy_pending_orders !== undefined ? Boolean(assignment.copy_pending_orders) : false,
             syncSlTp: assignment?.sync_sl_tp !== undefined ? Boolean(assignment.sync_sl_tp) : true,
             slippageMaxPips:
               assignment?.slippage_max_pips !== undefined ? Number(assignment.slippage_max_pips) : 30,
@@ -881,7 +881,7 @@ export const mt5AdminService = {
         assignedParentAccountId: link?.parentAccountId ? toValidUUID(link.parentAccountId) : undefined,
         assignedParentAccountNumber: parentAcc?.accountNumber,
         assignmentId: link?.id,
-        assignmentStatus: link?.status === 'active' ? 'active' : 'inactive',
+        assignmentStatus: link?.status === 'active' ? 'active' : link?.status === 'suspended' ? 'suspended' : 'inactive',
         assignedAt: link?.linkedAt,
         copyMode: isAssigned ? (link?.lotSettings?.mode === 'custom_lot' ? (link?.lotSettings?.customType as any) : 'multiplier') : 'unassigned',
         lotMultiplier: link?.lotSettings?.multiplier || 1.0,
@@ -890,7 +890,7 @@ export const mt5AdminService = {
         maxLotCap: link?.lotSettings?.maxLotCap ?? 50,
         minLotClamp: link?.lotSettings?.minLotClamp ?? 0.01,
         maxDrawdownProtectionPercent: link?.lotSettings?.maxDrawdownProtectionPercent ?? 20,
-        copyPendingOrders: link?.lotSettings?.copyPendingOrders ?? true,
+        copyPendingOrders: link?.lotSettings?.copyPendingOrders ?? false,
         syncSlTp: link?.lotSettings?.syncSlTp ?? true,
         slippageMaxPips: link?.lotSettings?.slippageMaxPips ?? 30,
         symbolPrefix: link?.lotSettings?.symbolPrefix || '',

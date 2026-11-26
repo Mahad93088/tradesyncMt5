@@ -13,6 +13,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatusBadge } from '../common/StatusBadge';
+import { countDistinctTraders, resolvePlanFollowerLimit } from '../common/dashboardHelpers';
 
 export const MentorSubscriptionCard: React.FC = () => {
   const { isCloudMode } = useAuth();
@@ -29,9 +30,10 @@ export const MentorSubscriptionCard: React.FC = () => {
     updateMentorStrategyProfile,
   } = useApp();
 
-  const activeFollowers = parentChildLinks.filter(
-    (l) => l.mentorId === currentUser.id && l.status === 'active'
-  ).length;
+  const activeFollowers = countDistinctTraders(
+    parentChildLinks.filter((l) => l.mentorId === currentUser.id),
+    ['active']
+  );
 
   const sub =
     subscriptions.find((s) => s.mentorId === currentUser.id || s.userId === currentUser.id) || null;
@@ -54,7 +56,6 @@ export const MentorSubscriptionCard: React.FC = () => {
   const [strategyName, setStrategyName] = useState(myProfile?.strategyName || 'Master Strategy');
   const [description, setDescription] = useState(myProfile?.description || '');
   const [monthlyFee, setMonthlyFee] = useState(String(myProfile?.monthlyFee ?? 0));
-  const [maxFollowers, setMaxFollowers] = useState(String(myProfile?.maxFollowers ?? 25));
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<{ message: string; isError: boolean } | null>(null);
 
@@ -63,11 +64,12 @@ export const MentorSubscriptionCard: React.FC = () => {
       setStrategyName(myProfile.strategyName || 'Master Strategy');
       setDescription(myProfile.description || '');
       setMonthlyFee(String(myProfile.monthlyFee ?? 0));
-      setMaxFollowers(String(myProfile.maxFollowers ?? 25));
     }
-  }, [myProfile?.id, myProfile?.strategyName, myProfile?.description, myProfile?.monthlyFee, myProfile?.maxFollowers]);
+  }, [myProfile?.id, myProfile?.strategyName, myProfile?.description, myProfile?.monthlyFee]);
 
-  const maxCapacity = sub?.maxFollowers ?? currentPlan?.maxFollowers ?? currentPlan?.maxChildAccounts ?? 10;
+  const maxCapacity = currentPlan
+    ? resolvePlanFollowerLimit(currentPlan)
+    : sub?.maxFollowers ?? 2;
   const capacityPercent = Math.min(100, Math.round((activeFollowers / Math.max(1, maxCapacity)) * 100));
 
   const daysLeft = sub?.expiresAt
@@ -101,7 +103,7 @@ export const MentorSubscriptionCard: React.FC = () => {
       strategyName: strategyName.trim() || 'Master Strategy',
       description: description.trim(),
       monthlyFee: Math.max(0, Number(monthlyFee) || 0),
-      maxFollowers: Math.max(1, Math.round(Number(maxFollowers) || 25)),
+      maxFollowers: maxCapacity,
     });
     setProfileSaving(false);
     setProfileFeedback({
@@ -323,7 +325,7 @@ export const MentorSubscriptionCard: React.FC = () => {
                   billingCycle === 'yearly'
                     ? plan.yearlyPrice ?? Math.round((plan.monthlyPrice ?? plan.price) * 10)
                     : plan.monthlyPrice ?? plan.price;
-                const followerLimit = plan.maxFollowers ?? plan.maxChildAccounts;
+                const followerLimit = resolvePlanFollowerLimit(plan);
                 const isCurrent = sub?.planId === plan.id && sub?.status === 'active';
 
                 return (
@@ -388,7 +390,7 @@ export const MentorSubscriptionCard: React.FC = () => {
           </div>
         ) : (
           <div className="rounded-xl border border-dashed border-slate-800 p-6 text-center text-xs text-slate-400">
-            No subscription plans found. Apply Migration 08 &amp; 09 in Supabase to load Starter 10, Pro 50, and Business 200.
+            No subscription plans found. Apply Migration 08, 09 &amp; 13 in Supabase to load Trial (2), Silver (50), and Gold (100).
           </div>
         )}
       </div>
@@ -471,16 +473,12 @@ export const MentorSubscriptionCard: React.FC = () => {
               </div>
               <div>
                 <label className="block text-[11px] font-semibold text-slate-400 mb-1">
-                  Advertised Follower Cap
+                  Authoritative Follower Limit
                 </label>
-                <input
-                  type="number"
-                  min={1}
-                  step="1"
-                  value={maxFollowers}
-                  onChange={(e) => setMaxFollowers(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:border-cyan-500 focus:outline-none"
-                />
+                <div className="w-full rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-mono text-cyan-300 flex items-center justify-between">
+                  <span>{maxCapacity} distinct traders</span>
+                  <span className="text-[10px] font-sans text-slate-500">Plan enforced</span>
+                </div>
               </div>
             </div>
           </div>

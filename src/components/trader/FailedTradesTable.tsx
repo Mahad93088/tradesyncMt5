@@ -48,9 +48,9 @@ export const FailedTradesTable: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
-                  <th className="px-5 py-3.5">Parent Ticket</th>
-                  <th className="px-4 py-3.5">Symbol & Type</th>
-                  <th className="px-4 py-3.5">Parent Lots</th>
+                  <th className="px-5 py-3.5">Order Ref</th>
+                  <th className="px-4 py-3.5">Symbol &amp; Type</th>
+                  <th className="px-4 py-3.5">Target Lots</th>
                   <th className="px-4 py-3.5">Error Reason</th>
                   <th className="px-4 py-3.5">Status</th>
                   <th className="px-4 py-3.5">Retry Count</th>
@@ -60,9 +60,9 @@ export const FailedTradesTable: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60 font-sans">
                 {failedMappings.map((map) => (
                   <tr key={map.id} className="hover:bg-slate-800/40 transition-colors">
-                    {/* Parent Ticket */}
-                    <td className="px-5 py-4 font-mono font-bold text-white text-xs">
-                      #{map.parentTradeTicket}
+                    {/* Child Order Ref */}
+                    <td className="px-5 py-4 font-mono font-bold text-slate-300 text-xs">
+                      {map.childTradeTicket ? `#${map.childTradeTicket}` : `#${map.id.slice(0, 8)}`}
                     </td>
 
                     {/* Symbol & Type */}
@@ -75,9 +75,9 @@ export const FailedTradesTable: React.FC = () => {
                       </div>
                     </td>
 
-                    {/* Parent Lots */}
+                    {/* Child Lots */}
                     <td className="px-4 py-4 font-mono text-slate-300">
-                      {map.parentLots.toFixed(2)} lots
+                      {map.childLots.toFixed(2)} lots
                     </td>
 
                     {/* Error Reason */}
@@ -128,21 +128,21 @@ export const FailedTradesTable: React.FC = () => {
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
           <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3 space-y-1">
-            <span className="font-bold text-rose-400 font-mono text-[11px]">TRADE_RETCODE_NOT_ENOUGH_MONEY</span>
+            <span className="font-bold text-rose-400 font-mono text-[11px]">SKIPPED_LOT_LIMIT</span>
             <p className="text-slate-400 text-[11px]">
-              Child account balance lacks free margin for the requested lot volume. Reduce multiplier or deposit capital.
+              Requested or scaled volume violated your broker&apos;s min, max, or volume step constraints. Trade was skipped safely without silently increasing lot size.
             </p>
           </div>
           <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3 space-y-1">
-            <span className="font-bold text-amber-400 font-mono text-[11px]">SLIPPAGE_EXCEEDED</span>
+            <span className="font-bold text-amber-400 font-mono text-[11px]">TRADE_RETCODE_NOT_ENOUGH_MONEY</span>
             <p className="text-slate-400 text-[11px]">
-              Market moved beyond your maximum allowed pip deviation during fast news spikes. The order was aborted safely.
+              Child account balance lacks free margin for the target lot volume. Lower your lot size or verify your balance is above $100.
             </p>
           </div>
           <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3 space-y-1">
             <span className="font-bold text-cyan-400 font-mono text-[11px]">TRADE_RETCODE_NO_CONNECTION</span>
             <p className="text-slate-400 text-[11px]">
-              Terminal lost socket ping with broker server. Re-check login credentials and server name.
+              Terminal lost connection with broker server. Re-check demo login credentials and EA attachment.
             </p>
           </div>
         </div>

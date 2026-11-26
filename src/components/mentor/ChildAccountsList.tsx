@@ -13,6 +13,8 @@ import {
   UserCheck,
   XCircle,
   DollarSign,
+  ShieldOff,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -23,6 +25,7 @@ import {
   formatLotRuleLabel,
   formatLinkProfitDisplay,
   formatHeartbeatAge,
+  countDistinctTraders,
 } from '../common/dashboardHelpers';
 
 export const ChildAccountsList: React.FC = () => {
@@ -43,9 +46,13 @@ export const ChildAccountsList: React.FC = () => {
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused' | 'error'>('all');
+  const [statusFilter, setStatusFilter] = useState<
+    'all' | 'active' | 'paused' | 'suspended' | 'balance_paused' | 'error'
+  >('all');
   const [groupFilter, setGroupFilter] = useState<'all' | 'ungrouped' | string>('all');
   const [pendingUnlink, setPendingUnlink] = useState<{ id: string; traderName: string } | null>(null);
+  const [pendingSuspend, setPendingSuspend] = useState<{ id: string; traderName: string } | null>(null);
+  const [suspendReason, setSuspendReason] = useState('');
   const [pendingDeleteGroup, setPendingDeleteGroup] = useState<{ id: string; name: string } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{ message: string; isError: boolean } | null>(null);
@@ -71,11 +78,18 @@ export const ChildAccountsList: React.FC = () => {
     followerAccounts.find((a) => a.id === childAccountId) ||
     mt5Accounts.find((a) => a.id === childAccountId);
 
+  const distinctTraderCount = countDistinctTraders(mentorLinks, []);
+
   const filteredLinks = mentorLinks.filter((link) => {
     const childAccount = resolveChildAccount(link.childAccountId);
     const text = `${link.traderName} ${childAccount?.accountNumber || ''} ${childAccount?.broker || ''}`.toLowerCase();
     const matchesSearch = text.includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || link.status === statusFilter;
+    const matchesStatus =
+      statusFilter === 'all'
+        ? true
+        : statusFilter === 'balance_paused'
+        ? Boolean(link.balancePauseActive)
+        : link.status === statusFilter;
     const matchesGroup =
       groupFilter === 'all'
         ? true
@@ -90,6 +104,44 @@ export const ChildAccountsList: React.FC = () => {
     const res = await toggleLinkStatus(linkId);
     if (!res.success) {
       setActionFeedback({ message: res.message || 'Failed to update copy link status.', isError: true });
+    }
+  };
+
+  const handleConfirmSuspend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingSuspend) return;
+    setIsProcessing(true);
+    setActionFeedback(null);
+    const res = await toggleLinkStatus(
+      pendingSuspend.id,
+      'suspended',
+      suspendReason.trim() || undefined
+    );
+    setIsProcessing(false);
+    if (!res.success) {
+      setActionFeedback({ message: res.message || 'Failed to suspend student.', isError: true });
+    } else {
+      setActionFeedback({
+        message: `Suspended student ${pendingSuspend.traderName}. Existing positions remain untouched.`,
+        isError: false,
+      });
+    }
+    setPendingSuspend(null);
+    setSuspendReason('');
+  };
+
+  const handleReactivate = async (linkId: string, traderName: string) => {
+    setIsProcessing(true);
+    setActionFeedback(null);
+    const res = await toggleLinkStatus(linkId, 'active');
+    setIsProcessing(false);
+    if (!res.success) {
+      setActionFeedback({ message: res.message || 'Failed to reactivate student.', isError: true });
+    } else {
+      setActionFeedback({
+        message: `Reactivated student ${traderName} for new trades from now onward.`,
+        isError: false,
+      });
     }
   };
 
@@ -253,10 +305,10 @@ export const ChildAccountsList: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+          <h2 className="text-xl font-bold text-white flex items-center gap-2 flex-wrap">
             Connected Students &amp; Child Terminals
             <span className="rounded bg-cyan-950 border border-cyan-800 px-2 py-0.5 text-xs text-cyan-400 font-mono">
-              {mentorLinks.length} Total Traders
+              {distinctTraderCount} Distinct Trader{distinctTraderCount === 1 ? '' : 's'} ({mentorLinks.length} Assignment{mentorLinks.length === 1 ? '' : 's'})
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-1">
@@ -485,6 +537,8 @@ export const ChildAccountsList: React.FC = () => {
             <option value="all">All Followers</option>
             <option value="active">Active Only</option>
             <option value="paused">Paused Only</option>
+            <option value="suspended">Suspended Only</option>
+            <option value="balance_paused">Balance Paused (&lt;$50 / &lt;$100)</option>
             <option value="error">Error Only</option>
           </select>
         </div>
@@ -502,30 +556,61 @@ export const ChildAccountsList: React.FC = () => {
                 key={link.id}
                 className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg backdrop-blur-sm space-y-4 hover:border-slate-700 transition-colors"
               >
-                <div className="flex items-start justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-bold text-white text-sm">{link.traderName}</h4>
                       <StatusBadge status={link.status} size="sm" />
+                      {link.balancePauseActive && (
+                        <StatusBadge status="balance_paused" size="sm" />
+                      )}
                     </div>
                     <span className="text-[11px] text-slate-400">
                       Linked since {new Date(link.linkedAt).toLocaleDateString()}
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleStatus(link.id)}
-                      className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-                      title={link.status === 'active' ? 'Pause trade copying' : 'Resume trade copying'}
-                    >
-                      {link.status === 'active' ? (
-                        <PauseCircle className="h-5 w-5 text-amber-400" />
-                      ) : (
-                        <PlayCircle className="h-5 w-5 text-emerald-400" />
-                      )}
-                    </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {link.status === 'suspended' ? (
+                      <button
+                        type="button"
+                        disabled={isProcessing}
+                        onClick={() => void handleReactivate(link.id, link.traderName)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-emerald-800 bg-emerald-950/60 hover:bg-emerald-900/60 disabled:opacity-50 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-300 transition-colors"
+                        title="Reactivate student copying from now forward"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        <span>Reactivate</span>
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStatus(link.id)}
+                          className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                          title={link.status === 'active' ? 'Pause trade copying' : 'Resume trade copying'}
+                        >
+                          {link.status === 'active' ? (
+                            <PauseCircle className="h-5 w-5 text-amber-400" />
+                          ) : (
+                            <PlayCircle className="h-5 w-5 text-emerald-400" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isProcessing}
+                          onClick={() => {
+                            setPendingSuspend({ id: link.id, traderName: link.traderName });
+                            setSuspendReason('');
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-rose-800/80 bg-rose-950/50 hover:bg-rose-900/50 disabled:opacity-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-300 transition-colors"
+                          title="Suspend student copying (preserves open positions)"
+                        >
+                          <ShieldOff className="h-3.5 w-3.5" />
+                          <span>Suspend</span>
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={() => setPendingUnlink({ id: link.id, traderName: link.traderName })}
@@ -536,6 +621,31 @@ export const ChildAccountsList: React.FC = () => {
                     </button>
                   </div>
                 </div>
+
+                {/* Separate Suspension & Balance-Pause Notices */}
+                {link.status === 'suspended' && (
+                  <div className="rounded-xl border border-rose-800/80 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-200 space-y-0.5">
+                    <div className="font-semibold text-rose-300 flex items-center gap-1.5">
+                      <ShieldOff className="h-3.5 w-3.5 shrink-0" />
+                      <span>Manual Suspension Active</span>
+                    </div>
+                    <p className="text-rose-200/90">
+                      {link.suspensionReason || 'Suspended by mentor or administrator. Only mentor or admin can reactivate.'}
+                    </p>
+                  </div>
+                )}
+
+                {link.balancePauseActive && (
+                  <div className="rounded-xl border border-amber-800/80 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-200 space-y-0.5">
+                    <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span>Balance Pause Active ($50 / $100 Rule)</span>
+                    </div>
+                    <p className="text-amber-200/90">
+                      {link.pauseReason || 'Verified balance dropped below $50. Copying resumes automatically once verified balance reaches $100 (unless manually suspended).'}
+                    </p>
+                  </div>
+                )}
 
                 {/* Child MT5 Terminal Specs */}
                 {childAccount ? (
@@ -562,9 +672,11 @@ export const ChildAccountsList: React.FC = () => {
                       </div>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 uppercase font-mono">Balance / Equity</span>
+                      <span className="text-[10px] text-slate-500 uppercase font-mono">
+                        {childAccount.verifiedBalance !== undefined ? 'Verified Bal / Eq' : 'Balance / Equity'}
+                      </span>
                       <p className="font-mono font-semibold text-emerald-400">
-                        ${childAccount.balance.toLocaleString()} / ${childAccount.equity.toLocaleString()} {childAccount.currency}
+                        ${(childAccount.verifiedBalance ?? childAccount.balance).toLocaleString()} / ${(childAccount.verifiedEquity ?? childAccount.equity).toLocaleString()} {childAccount.currency}
                       </p>
                     </div>
                     <div>
@@ -737,6 +849,56 @@ export const ChildAccountsList: React.FC = () => {
         description={`Delete group "${pendingDeleteGroup?.name || ''}"? Assigned followers remain active and will move to Ungrouped.`}
         confirmLabel="Delete Group"
       />
+
+      {pendingSuspend && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handleConfirmSuspend}
+            className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-4 text-xs"
+          >
+            <div className="flex items-center gap-2 text-rose-300">
+              <ShieldOff className="h-5 w-5 text-rose-400 shrink-0" />
+              <h3 className="text-base font-bold text-white">Suspend Student Copying</h3>
+            </div>
+            <p className="text-slate-300 leading-relaxed">
+              Suspend <strong>{pendingSuspend.traderName}</strong>? Future open trade instructions will be blocked while existing open positions remain untouched. Students cannot unsuspend themselves.
+            </p>
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">
+                Suspension Reason (Optional)
+              </label>
+              <input
+                type="text"
+                maxLength={200}
+                placeholder="e.g. Membership overdue or manual risk pause"
+                value={suspendReason}
+                onChange={(e) => setSuspendReason(e.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-rose-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isProcessing}
+                onClick={() => {
+                  setPendingSuspend(null);
+                  setSuspendReason('');
+                }}
+                className="rounded-lg px-4 py-2 font-medium text-slate-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isProcessing}
+                className="rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 px-4 py-2 font-semibold text-white transition-colors"
+              >
+                {isProcessing ? 'Suspending...' : 'Confirm Suspend'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

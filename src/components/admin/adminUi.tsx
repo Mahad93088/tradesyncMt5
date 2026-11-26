@@ -134,6 +134,8 @@ export const AdminStatusText: React.FC<AdminStatusTextProps> = ({ status }) => {
   } else if (
     s === 'disconnected' ||
     s === 'paused' ||
+    s === 'balance_paused' ||
+    s === 'balance paused' ||
     s === 'standby' ||
     s === 'degraded' ||
     s === 'pending' ||

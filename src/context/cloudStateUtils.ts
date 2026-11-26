@@ -102,7 +102,7 @@ export function buildCloudTrades(dbTradesRaw: any[], mappingsList: TradeMapping[
       profit: 0,
       openTime: m.openTime,
       status: m.status === 'CLOSED' ? 'CLOSED' : m.status === 'EXECUTED' ? 'OPEN' : 'PENDING',
-      comment: `Parent #${m.parentTradeTicket}`,
+      comment: 'Mirrored Demo Position',
       isMappingFallback: true,
     });
   }

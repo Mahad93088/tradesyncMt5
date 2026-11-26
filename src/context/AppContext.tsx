@@ -2097,8 +2097,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           success: true,
           message:
             unpersisted.length > 0
-              ? `Saved core lot settings; awaiting Migration 08 for columns: ${unpersisted.join(', ')}.`
-              : 'Saved full 12-control lot & risk configuration to Supabase.',
+              ? `Saved core lot settings; awaiting schema update for columns: ${unpersisted.join(', ')}.`
+              : 'Saved lot size preferences to Supabase.',
           persistedFields: json.persistedFields,
           unpersistedSchemaFields: json.unpersistedSchemaFields,
         };
@@ -2128,8 +2128,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nextStatus: 'active' | 'paused' | 'suspended' =
       actionOverride || (existing?.status === 'active' ? 'paused' : 'active');
 
+    if (existing?.status === 'suspended' && nextStatus !== 'suspended' && currentUser.role === 'trader') {
+      return {
+        success: false,
+        message: 'Forbidden: Students cannot unsuspend a mentor- or admin-suspended assignment.',
+      };
+    }
+
+    if (nextStatus === 'suspended' && currentUser.role === 'trader') {
+      return {
+        success: false,
+        message: 'Forbidden: Only your mentor or an administrator can suspend this assignment.',
+      };
+    }
+
+    const nowIso = new Date().toISOString();
     setParentChildLinks((prev) =>
-      prev.map((l) => (l.id === linkId ? { ...l, status: nextStatus } : l))
+      prev.map((l) => {
+        if (l.id !== linkId) return l;
+        if (nextStatus === 'suspended') {
+          return {
+            ...l,
+            status: 'suspended',
+            suspendedAt: nowIso,
+            suspendedBy: currentUser.id,
+            suspensionReason: reason?.trim() || null,
+          };
+        }
+        if (nextStatus === 'active') {
+          return {
+            ...l,
+            status: 'active',
+            suspendedAt: null,
+            suspendedBy: null,
+            suspensionReason: null,
+            resumedAt: nowIso,
+            activatedAt: nowIso,
+            activationEpoch: (Number(l.activationEpoch) || 1) + 1,
+          };
+        }
+        return {
+          ...l,
+          status: 'paused',
+          pausedAt: nowIso,
+        };
+      })
     );
 
     if (isCloudMode && isConfigured) {

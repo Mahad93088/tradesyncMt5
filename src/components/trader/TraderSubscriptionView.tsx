@@ -13,7 +13,6 @@ import { StatusBadge } from '../common/StatusBadge';
 import {
   formatLinkProfitDisplay,
   formatLotRuleLabel,
-  formatHeartbeatAge
 } from '../common/dashboardHelpers';
 
 export const TraderSubscriptionView: React.FC = () => {
@@ -49,6 +48,10 @@ export const TraderSubscriptionView: React.FC = () => {
       mt5Accounts.find((a) => a.id === link.parentAccountId)
     : null;
   const linkedMentorDir = link ? mentorDirectory.find((m) => m.id === link.mentorId) : null;
+  const isMentorBridgeOnline = Boolean(
+    (linkedParentAccount?.connectionStatus === 'connected' && !linkedParentAccount?.isStale) ||
+      (linkedMentorDir?.connectionStatus === 'connected' && !linkedMentorDir?.isStale)
+  );
   const linkProfit = link ? formatLinkProfitDisplay(link, isCloudMode) : null;
 
   const userSub =
@@ -206,19 +209,15 @@ export const TraderSubscriptionView: React.FC = () => {
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Parent Terminal:</span>
-                <span className="font-mono text-slate-200">
-                  {linkedParentAccount
-                    ? `#${linkedParentAccount.accountNumber} (${linkedParentAccount.connectionStatus})`
-                    : linkedMentorDir?.parentAccountNumber
-                    ? `#${linkedMentorDir.parentAccountNumber} (${linkedMentorDir.connectionStatus})`
-                    : 'Pending telemetry'}
+                <span className="text-slate-400">Mentor Bridge:</span>
+                <span className={`font-mono font-semibold ${isMentorBridgeOnline ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {isMentorBridgeOnline ? 'Online' : 'Offline / Awaiting Heartbeat'}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Last Parent Heartbeat:</span>
+                <span className="text-slate-400">Balance Protection:</span>
                 <span className="font-mono text-slate-300">
-                  {formatHeartbeatAge(linkedParentAccount?.lastHeartbeat || linkedMentorDir?.lastSync)}
+                  {link.balancePauseActive ? 'Paused (<$50 / <$100)' : '$50 Pause / $100 Resume'}
                 </span>
               </div>
               <div className="flex justify-between">

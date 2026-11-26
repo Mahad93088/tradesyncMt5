@@ -76,3 +76,36 @@ export function formatHeartbeatAge(lastHeartbeat?: string | null): string {
   if (diffHr < 24) return `${diffHr}h ago`;
   return new Date(ms).toLocaleDateString();
 }
+
+export function countDistinctTraders(
+  links: Array<{ traderId?: string | null; status?: string | null }>,
+  statuses: string[] = ['active']
+): number {
+  const allowed = new Set(statuses.map((s) => s.toLowerCase()));
+  const distinct = new Set<string>();
+  for (const link of links || []) {
+    if (!link?.traderId) continue;
+    if (allowed.size > 0 && !allowed.has(String(link.status || '').toLowerCase())) continue;
+    distinct.add(String(link.traderId));
+  }
+  return distinct.size;
+}
+
+export function resolvePlanFollowerLimit(
+  plan?: {
+    code?: string | null;
+    name?: string | null;
+    maxChildAccounts?: number | null;
+    maxFollowers?: number | null;
+  } | null
+): number {
+  const code = String(plan?.code || '').trim().toLowerCase();
+  const name = String(plan?.name || '').trim().toLowerCase();
+  if (code === 'trial' || name === 'trial' || code === 'free_demo') return 2;
+  if (code === 'silver' || name === 'silver') return 50;
+  if (code === 'gold' || name === 'gold') return 100;
+  const raw = plan?.maxChildAccounts ?? plan?.maxFollowers;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+  return 2;
+}
+

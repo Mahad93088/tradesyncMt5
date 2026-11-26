@@ -19,6 +19,7 @@ import {
   AdminFeedbackBanner,
   AdminEmptyState,
 } from './adminUi';
+import { resolvePlanFollowerLimit } from '../common/dashboardHelpers';
 
 export const SubscriptionPlansView: React.FC = () => {
   const { isCloudMode } = useAuth();
@@ -54,14 +55,14 @@ export const SubscriptionPlansView: React.FC = () => {
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [monthlyPrice, setMonthlyPrice] = useState<number>(49);
   const [annualPrice, setAnnualPrice] = useState<number>(490);
-  const [maxFollowers, setMaxFollowers] = useState<number>(10);
+  const [maxFollowers, setMaxFollowers] = useState<number>(50);
   const [maxLotSize, setMaxLotSize] = useState<number>(50);
   const [trialDays, setTrialDays] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(true);
   const [priorityExecution, setPriorityExecution] = useState(true);
   const [slTpSync, setSlTpSync] = useState(true);
   const [featureList, setFeatureList] = useState<string>(
-    'Up to 10 Follower accounts, Real-time SL/TP Sync, Demo-Only Safeguards'
+    'Up to 50 distinct follower traders, Real-time SL/TP Sync, Demo-Only Safeguards'
   );
 
   const mentors = users.filter((u) => u.role === 'mentor');
@@ -77,13 +78,13 @@ export const SubscriptionPlansView: React.FC = () => {
     setBillingCycle('monthly');
     setMonthlyPrice(49);
     setAnnualPrice(490);
-    setMaxFollowers(10);
+    setMaxFollowers(50);
     setMaxLotSize(50);
     setTrialDays(0);
     setIsActive(true);
     setPriorityExecution(true);
     setSlTpSync(true);
-    setFeatureList('Up to 10 Follower accounts, Real-time SL/TP Sync, Demo-Only Safeguards');
+    setFeatureList('Up to 50 distinct follower traders, Real-time SL/TP Sync, Demo-Only Safeguards');
     setIsModalOpen(true);
   };
 
@@ -101,7 +102,7 @@ export const SubscriptionPlansView: React.FC = () => {
       plan.yearlyPrice ?? (plan.billingCycle === 'yearly' ? plan.price : Math.round(resolvedMonthly * 10));
     setMonthlyPrice(resolvedMonthly);
     setAnnualPrice(resolvedYearly);
-    setMaxFollowers(plan.maxFollowers ?? plan.maxChildAccounts ?? 10);
+    setMaxFollowers(resolvePlanFollowerLimit(plan));
     setMaxLotSize(plan.maxLotSize || 50);
     setTrialDays(plan.trialDays || 0);
     setIsActive(plan.isActive !== false);
@@ -313,7 +314,7 @@ export const SubscriptionPlansView: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {visiblePlans.map((plan) => {
             const planActive = plan.isActive !== false && !plan.isArchived;
-            const followerCap = plan.maxFollowers ?? plan.maxChildAccounts ?? 10;
+            const followerCap = resolvePlanFollowerLimit(plan);
             const subscriberCount = subscriptions.filter(
               (s) => s.planId === plan.id && (s.status === 'active' || s.status === 'trial')
             ).length;
@@ -464,7 +465,7 @@ export const SubscriptionPlansView: React.FC = () => {
                   <input
                     type="text"
                     required
-                    placeholder="e.g. Pro 50"
+                    placeholder="e.g. Silver"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 focus:border-sky-500 focus:outline-none"
@@ -475,7 +476,7 @@ export const SubscriptionPlansView: React.FC = () => {
                   <input
                     type="text"
                     disabled={Boolean(editingPlan)}
-                    placeholder="e.g. pro_50"
+                    placeholder="e.g. silver"
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
                     className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900 font-mono disabled:bg-slate-100 focus:border-sky-500 focus:outline-none"

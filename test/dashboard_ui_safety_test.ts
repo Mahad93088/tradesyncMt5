@@ -20,7 +20,7 @@ function makeLotSettings(overrides: Partial<LotSettings> = {}): LotSettings {
     maxLotCap: 2.0,
     minLotClamp: 0.01,
     maxDrawdownProtectionPercent: 10,
-    copyPendingOrders: true,
+    copyPendingOrders: false,
     syncSlTp: true,
     slippageMaxPips: 3,
     ...overrides,

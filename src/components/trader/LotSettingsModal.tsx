@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
-import { LotSettings, LotCopyMode, CustomLotType } from '../../types';
+import { LotSettings, LotCopyMode } from '../../types';
 
 interface LotSettingsModalProps {
   isOpen: boolean;
@@ -24,12 +24,19 @@ const DEFAULT_SETTINGS: LotSettings = {
   maxLotCap: 50,
   minLotClamp: 0.01,
   maxDrawdownProtectionPercent: 20.0,
-  copyPendingOrders: true,
+  copyPendingOrders: false,
   syncSlTp: true,
   slippageMaxPips: 30.0,
   symbolPrefix: '',
   symbolSuffix: '',
 };
+
+function isAlignedToStep(value: number, minLot: number, step: number): boolean {
+  if (!Number.isFinite(step) || step <= 0) return true;
+  const base = Number.isFinite(minLot) && minLot > 0 ? minLot : 0;
+  const steps = (value - base) / step;
+  return Math.abs(steps - Math.round(steps)) < 1e-4;
+}
 
 export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
   isOpen,
@@ -45,18 +52,11 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
   const initialSettings: LotSettings = link?.lotSettings || DEFAULT_SETTINGS;
 
   const [mode, setMode] = useState<LotCopyMode>(initialSettings.mode);
-  const [customType, setCustomType] = useState<CustomLotType>(initialSettings.customType);
+  const [customType, setCustomType] = useState<'multiplier' | 'fixed'>(
+    initialSettings.customType === 'fixed' ? 'fixed' : 'multiplier'
+  );
   const [fixedLot, setFixedLot] = useState<number>(initialSettings.fixedLot);
   const [multiplier, setMultiplier] = useState<number>(initialSettings.multiplier);
-  const [riskPercent, setRiskPercent] = useState<number>(initialSettings.riskPercent);
-  const [maxLotCap, setMaxLotCap] = useState<number>(initialSettings.maxLotCap);
-  const [minLotClamp, setMinLotClamp] = useState<number>(initialSettings.minLotClamp);
-  const [maxDrawdown, setMaxDrawdown] = useState<number>(initialSettings.maxDrawdownProtectionPercent);
-  const [syncSlTp, setSyncSlTp] = useState<boolean>(initialSettings.syncSlTp);
-  const [copyPending, setCopyPending] = useState<boolean>(initialSettings.copyPendingOrders);
-  const [slippagePips, setSlippagePips] = useState<number>(initialSettings.slippageMaxPips);
-  const [symbolPrefix, setSymbolPrefix] = useState<string>(initialSettings.symbolPrefix || '');
-  const [symbolSuffix, setSymbolSuffix] = useState<string>(initialSettings.symbolSuffix || '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -64,63 +64,99 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
     if (!isOpen || !link) return;
     const s = link.lotSettings || DEFAULT_SETTINGS;
     setMode(s.mode);
-    setCustomType(s.customType);
+    setCustomType(s.customType === 'fixed' ? 'fixed' : 'multiplier');
     setFixedLot(s.fixedLot);
     setMultiplier(s.multiplier);
-    setRiskPercent(s.riskPercent);
-    setMaxLotCap(s.maxLotCap);
-    setMinLotClamp(s.minLotClamp);
-    setMaxDrawdown(s.maxDrawdownProtectionPercent);
-    setSyncSlTp(s.syncSlTp);
-    setCopyPending(s.copyPendingOrders);
-    setSlippagePips(s.slippageMaxPips);
-    setSymbolPrefix(s.symbolPrefix || '');
-    setSymbolSuffix(s.symbolSuffix || '');
     setSaveError(null);
   }, [isOpen, linkId, link]);
 
   if (!isOpen || !link) return null;
 
-  // Margin calculation estimate
-  const currentEquity = childAccount?.equity || 10000;
+  const specEntries = childAccount?.verifiedSymbolSpecs
+    ? Object.entries(childAccount.verifiedSymbolSpecs)
+    : [];
+  const preferredSymbol = String(childAccount?.tradingSymbol || '').toUpperCase();
+  const matchedSpecEntry =
+    specEntries.find(([sym]) => sym.toUpperCase() === preferredSymbol) ||
+    specEntries.find(([sym]) => sym.toUpperCase().includes('XAU')) ||
+    specEntries[0] ||
+    null;
+  const activeSpecSymbol = matchedSpecEntry?.[0] || childAccount?.tradingSymbol || 'Symbol';
+  const brokerMinLot = matchedSpecEntry?.[1]?.minLot;
+  const brokerMaxLot = matchedSpecEntry?.[1]?.maxLot;
+  const brokerLotStep = matchedSpecEntry?.[1]?.lotStep;
+
+  const currentEquity = childAccount?.verifiedEquity ?? childAccount?.equity ?? 10000;
   const currentLeverage = childAccount?.leverage || 500;
   const sampleLot =
     mode === 'parent_lot'
       ? 1.0
       : customType === 'fixed'
       ? fixedLot
-      : customType === 'multiplier'
-      ? 1.0 * multiplier
-      : customType === 'equity_ratio'
-      ? 1.0 * Math.max(0.01, currentEquity / 10000)
-      : (currentEquity * (riskPercent / 100)) / 500;
+      : 1.0 * multiplier;
 
   const estimatedRequiredMargin = (sampleLot * 100000) / currentLeverage;
-  const isMarginRiskHigh = estimatedRequiredMargin > (childAccount?.freeMargin || 5000) * 0.4;
+  const isMarginRiskHigh =
+    estimatedRequiredMargin > (childAccount?.freeMargin || currentEquity * 0.5) * 0.4;
+
+  const validateBrokerLotConstraints = (): string | null => {
+    if (mode === 'custom_lot' && customType === 'multiplier') {
+      if (!Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 20) {
+        return 'Lot multiplier must be greater than 0 and at most 20.0.';
+      }
+      return null;
+    }
+    if (mode === 'custom_lot' && customType === 'fixed') {
+      if (!Number.isFinite(fixedLot) || fixedLot <= 0) {
+        return 'Fixed lot size must be greater than 0.';
+      }
+      if (typeof brokerMinLot === 'number' && fixedLot < brokerMinLot - 1e-9) {
+        return `Fixed lot ${fixedLot.toFixed(2)} is below broker minimum (${brokerMinLot.toFixed(2)}) for ${activeSpecSymbol}. Volume will not be silently increased.`;
+      }
+      if (typeof brokerMaxLot === 'number' && fixedLot > brokerMaxLot + 1e-9) {
+        return `Fixed lot ${fixedLot.toFixed(2)} exceeds broker maximum (${brokerMaxLot.toFixed(2)}) for ${activeSpecSymbol}.`;
+      }
+      if (
+        typeof brokerLotStep === 'number' &&
+        brokerLotStep > 0 &&
+        !isAlignedToStep(fixedLot, brokerMinLot ?? 0, brokerLotStep)
+      ) {
+        return `Fixed lot ${fixedLot.toFixed(2)} must align with broker volume step (${brokerLotStep}) for ${activeSpecSymbol}.`;
+      }
+    }
+    return null;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
+    const validationError = validateBrokerLotConstraints();
+    if (validationError) {
+      setSaveError(validationError);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
+    const base = link.lotSettings || DEFAULT_SETTINGS;
     const res = await updateLotSettings(linkId, {
       mode,
       customType,
       fixedLot,
       multiplier,
-      riskPercent,
-      maxLotCap,
-      minLotClamp,
-      maxDrawdownProtectionPercent: maxDrawdown,
-      copyPendingOrders: copyPending,
-      syncSlTp,
-      slippageMaxPips: slippagePips,
-      symbolPrefix: symbolPrefix.trim(),
-      symbolSuffix: symbolSuffix.trim(),
+      riskPercent: base.riskPercent ?? DEFAULT_SETTINGS.riskPercent,
+      maxLotCap: base.maxLotCap ?? DEFAULT_SETTINGS.maxLotCap,
+      minLotClamp: base.minLotClamp ?? DEFAULT_SETTINGS.minLotClamp,
+      maxDrawdownProtectionPercent:
+        base.maxDrawdownProtectionPercent ?? DEFAULT_SETTINGS.maxDrawdownProtectionPercent,
+      copyPendingOrders: false,
+      syncSlTp: true,
+      slippageMaxPips: base.slippageMaxPips ?? DEFAULT_SETTINGS.slippageMaxPips,
+      symbolPrefix: base.symbolPrefix || '',
+      symbolSuffix: base.symbolSuffix || '',
     });
     setSaving(false);
     if (res && !res.success) {
-      setSaveError(res.message || 'Failed to save lot sizing settings.');
+      setSaveError(res.message || 'Failed to save lot size settings.');
       return;
     }
     onClose();
@@ -128,7 +164,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+      <div className="w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
           <div className="flex items-center gap-2.5">
             <div className="rounded-lg bg-cyan-950 p-2 text-cyan-400 border border-cyan-800">
@@ -136,10 +172,10 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-white">
-                Lot Sizing & Risk Controls: {link.mentorName}
+                Lot Size Preferences: {link.mentorName}
               </h3>
               <p className="text-xs text-slate-400">
-                Configure child deal volumes, slippage guard, and margin safety
+                Select how copied trade volume is sized on your Child MT5 Demo account
               </p>
             </div>
           </div>
@@ -150,8 +186,8 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-5 text-xs">
           {saveError && (
-            <div className="rounded-lg border border-rose-900/60 bg-rose-950/50 p-3 text-rose-300 flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+            <div className="rounded-lg border border-rose-900/60 bg-rose-950/50 p-3 text-rose-300 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
               <span>{saveError}</span>
             </div>
           )}
@@ -160,7 +196,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
             <div className="rounded-lg border border-sky-900/50 bg-sky-950/30 p-3 text-[11px] text-sky-200 flex items-start gap-2">
               <Info className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
               <span>
-                <strong>Supabase Persistence:</strong> All 12 sizing, lot-clamp, drawdown protection, pending-order, SL/TP sync, slippage guard, and symbol prefix/suffix rules persist in <code>mentor_assignments</code> and are enforced server-side.
+                Your lot sizing rule persists in Supabase. Broker volume limits (min, max, step) are strictly enforced without silently increasing volume; unsupported trades are rejected with an honest error.
               </span>
             </div>
           )}
@@ -171,7 +207,6 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
               Select Trade Copying Lot Mode:
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Mode A */}
               <div
                 onClick={() => setMode('parent_lot')}
                 className={`cursor-pointer rounded-xl border p-4 transition-all ${
@@ -181,17 +216,16 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-white text-sm">Mode A: Copy Parent Lot Size</span>
+                  <span className="font-bold text-white text-sm">Copy 1:1 Ratio</span>
                   <span className="h-4 w-4 rounded-full border border-slate-700 flex items-center justify-center">
                     {mode === 'parent_lot' && <span className="h-2 w-2 rounded-full bg-cyan-400" />}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  The child account directly mirrors the identical volume of the parent trade (1.00 lot parent = 1.00 lot child).
+                  Automatically matches the mentor&apos;s proportional execution ratio on your terminal, subject to your broker&apos;s min/max/step limits.
                 </p>
               </div>
 
-              {/* Mode B */}
               <div
                 onClick={() => setMode('custom_lot')}
                 className={`cursor-pointer rounded-xl border p-4 transition-all ${
@@ -201,27 +235,26 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-white text-sm">Mode B: Custom Lot Size</span>
+                  <span className="font-bold text-white text-sm">Custom Lot Size</span>
                   <span className="h-4 w-4 rounded-full border border-slate-700 flex items-center justify-center">
                     {mode === 'custom_lot' && <span className="h-2 w-2 rounded-full bg-cyan-400" />}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  Configure custom volume algorithms: Multipliers (e.g. 0.5x), Fixed lots, Equity Ratio, or Risk %.
+                  Choose a fixed lot size per trade or apply a custom multiplier ratio.
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Custom Settings Config (Active when Mode B is selected) */}
+          {/* Custom Lot Settings Config */}
           {mode === 'custom_lot' && (
             <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-4">
               <span className="text-[10px] uppercase font-bold text-cyan-400 font-mono tracking-wider">
-                Mode B Sizing Algorithm
+                Lot Sizing Method
               </span>
 
-              {/* Sub-type picker */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setCustomType('multiplier')}
@@ -244,97 +277,43 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
                 >
                   Fixed Lot Size
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setCustomType('equity_ratio')}
-                  className={`rounded-lg border p-2 text-center transition-colors ${
-                    customType === 'equity_ratio'
-                      ? 'border-cyan-500 bg-cyan-950/80 text-cyan-300 font-bold'
-                      : 'border-slate-800 bg-slate-900 text-slate-400'
-                  }`}
-                >
-                  Equity Ratio
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCustomType('risk_percent')}
-                  className={`rounded-lg border p-2 text-center transition-colors ${
-                    customType === 'risk_percent'
-                      ? 'border-cyan-500 bg-cyan-950/80 text-cyan-300 font-bold'
-                      : 'border-slate-800 bg-slate-900 text-slate-400'
-                  }`}
-                >
-                  Risk % of Equity
-                </button>
               </div>
 
-              {/* Input for selected type */}
-              <div className="pt-2">
-                {customType === 'multiplier' && (
+              <div className="pt-1">
+                {customType === 'multiplier' ? (
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
-                      Lot Multiplier Factor (e.g. 0.20 = 20% of parent volume)
+                      Lot Multiplier Factor (e.g. 0.50 = 50% scaling)
                     </label>
                     <input
                       type="number"
                       step="0.05"
                       min="0.01"
-                      max="5.0"
+                      max="20"
                       value={multiplier}
                       onChange={(e) => setMultiplier(parseFloat(e.target.value) || 0.1)}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
                     />
                     <span className="text-[10px] text-slate-400 mt-1 block">
-                      Example: 1.00 lot on Mentor will execute as <strong>{(1.0 * multiplier).toFixed(2)} lots</strong> on your terminal.
+                      Example: 1.00 signal unit executes at <strong>{(1.0 * multiplier).toFixed(2)} lots</strong> on your account.
                     </span>
                   </div>
-                )}
-
-                {customType === 'fixed' && (
+                ) : (
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
                       Fixed Lot Size for Every Copied Trade
                     </label>
                     <input
                       type="number"
-                      step="0.01"
-                      min="0.01"
-                      max="10.0"
+                      step={brokerLotStep && brokerLotStep > 0 ? String(brokerLotStep) : '0.01'}
+                      min={brokerMinLot ?? 0.01}
+                      max={brokerMaxLot ?? 100}
                       value={fixedLot}
                       onChange={(e) => setFixedLot(parseFloat(e.target.value) || 0.01)}
                       className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
                     />
                     <span className="text-[10px] text-slate-400 mt-1 block">
-                      Every order opens at exactly {fixedLot.toFixed(2)} lots, regardless of parent size.
-                    </span>
-                  </div>
-                )}
-
-                {customType === 'equity_ratio' && (
-                  <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3 text-slate-300 space-y-1">
-                    <div className="font-semibold text-white">Proportional Equity Scaling Active</div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      Child trade volume scales automatically by <code>Parent Lots × (Child Equity / Parent Equity)</code> using real-time terminal balances.
-                    </p>
-                  </div>
-                )}
-
-                {customType === 'risk_percent' && (
-                  <div>
-                    <label className="block text-slate-300 font-semibold mb-1">
-                      Risk Percentage of Account Equity (%)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.1"
-                      max="10.0"
-                      value={riskPercent}
-                      onChange={(e) => setRiskPercent(parseFloat(e.target.value) || 1.0)}
-                      className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                    />
-                    <span className="text-[10px] text-slate-400 mt-1 block">
-                      Volume is dynamically derived from your stop-loss distance and equity (${currentEquity.toLocaleString()}).
+                      Every copied market order opens at exactly <strong>{fixedLot.toFixed(2)} lots</strong> if permitted by broker limits.
                     </span>
                   </div>
                 )}
@@ -342,145 +321,37 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
             </div>
           )}
 
-          {/* Protective Bounds & Safeguards */}
-          <div className="space-y-3">
-            <span className="text-[10px] uppercase font-bold text-slate-400 font-mono tracking-wider">
-              Safety Clamps & Execution Thresholds
-            </span>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Max Lot Cap</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0.01"
-                  max="1000"
-                  value={maxLotCap}
-                  onChange={(e) => setMaxLotCap(parseFloat(e.target.value) || 0.5)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-                <span className="text-[10px] text-slate-500">Hard limit ceiling</span>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Min Lot Clamp</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  max="100"
-                  value={minLotClamp}
-                  onChange={(e) => setMinLotClamp(parseFloat(e.target.value) || 0.01)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-                <span className="text-[10px] text-slate-500">Reject if below min</span>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Max Slippage (Pips)</label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0.5"
-                  max="500"
-                  value={slippagePips}
-                  onChange={(e) => setSlippagePips(parseFloat(e.target.value) || 30)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-                <span className="text-[10px] text-slate-500">Auto-reject threshold</span>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Max Drawdown (%)</label>
-                <input
-                  type="number"
-                  step="1"
-                  min="1"
-                  max="100"
-                  value={maxDrawdown}
-                  onChange={(e) => setMaxDrawdown(parseFloat(e.target.value) || 20)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-                <span className="text-[10px] text-slate-500">Halt new trades guard</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Symbol Prefix (Optional)</label>
-                <input
-                  type="text"
-                  maxLength={12}
-                  placeholder="e.g. FX."
-                  value={symbolPrefix}
-                  onChange={(e) => setSymbolPrefix(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">Symbol Suffix (Optional)</label>
-                <input
-                  type="text"
-                  maxLength={12}
-                  placeholder="e.g. .m or _raw"
-                  value={symbolSuffix}
-                  onChange={(e) => setSymbolSuffix(e.target.value)}
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white font-mono focus:border-cyan-500 focus:outline-none"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Broker Margin Validation Sandbox Box */}
+          {/* Broker Volume Limits & Margin Preview */}
           <div className="rounded-xl border border-slate-800 bg-slate-950 p-3.5 space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="font-semibold text-slate-300 flex items-center gap-1.5">
                 <Info className="h-4 w-4 text-cyan-400" />
-                Broker Limits & Margin Pre-Check
+                Verified Broker Volume Limits ({activeSpecSymbol})
               </span>
               <span className="font-mono text-emerald-400 font-semibold">
-                Available: ${childAccount?.freeMargin.toLocaleString() || '10,000'}
+                Free Margin: ${childAccount?.freeMargin.toLocaleString() || '0'}
               </span>
             </div>
-            <div className="text-[11px] text-slate-400 space-y-1">
+            <div className="text-[11px] text-slate-400 space-y-1 font-mono">
               <div className="flex justify-between">
-                <span>Estimated Target Lot Size:</span>
-                <span className="font-mono font-bold text-white">{sampleLot.toFixed(2)} Lots</span>
+                <span className="font-sans">Broker Min / Max / Step:</span>
+                <span className="text-slate-200">
+                  {brokerMinLot !== undefined
+                    ? `${brokerMinLot.toFixed(2)} / ${(brokerMaxLot ?? 100).toFixed(2)} / ${brokerLotStep ?? 0.01}`
+                    : 'Awaiting EA symbol specs'}
+                </span>
               </div>
               <div className="flex justify-between">
-                <span>Estimated Margin Requirement (1:{currentLeverage}):</span>
-                <span className="font-mono font-bold text-white">${estimatedRequiredMargin.toFixed(2)}</span>
+                <span className="font-sans">Estimated Margin (1:{currentLeverage}):</span>
+                <span className="font-bold text-white">${estimatedRequiredMargin.toFixed(2)}</span>
               </div>
               {isMarginRiskHigh && (
-                <div className="flex items-center gap-1.5 text-amber-400 font-medium pt-1">
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                  <span>Warning: High leverage margin consumption. Consider lowering your multiplier or lot size.</span>
+                <div className="flex items-center gap-1.5 text-amber-400 font-sans font-medium pt-1">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span>Warning: High margin usage for your current balance. Consider lowering your lot size.</span>
                 </div>
               )}
             </div>
-          </div>
-
-          {/* Checkbox Toggles */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6 pt-1">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={syncSlTp}
-                onChange={(e) => setSyncSlTp(e.target.checked)}
-                className="rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0"
-              />
-              <span className="text-slate-300">Synchronize Stop Loss & Take Profit modifications</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={copyPending}
-                onChange={(e) => setCopyPending(e.target.checked)}
-                className="rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0"
-              />
-              <span className="text-slate-300">Copy Pending Orders</span>
-            </label>
           </div>
 
           <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
@@ -496,7 +367,7 @@ export const LotSettingsModal: React.FC<LotSettingsModalProps> = ({
               disabled={saving}
               className="rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 px-4 py-2 font-semibold text-white transition-colors"
             >
-              {saving ? 'Saving...' : 'Save Lot Settings'}
+              {saving ? 'Saving...' : 'Save Lot Size'}
             </button>
           </div>
         </form>

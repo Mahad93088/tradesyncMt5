@@ -721,7 +721,7 @@ export const AssignParentModal: React.FC<AssignParentModalProps> = ({
             maxLotCap: 5.0,
             minLotClamp: 0.01,
             maxDrawdownProtectionPercent: 15.0,
-            copyPendingOrders: true,
+            copyPendingOrders: false,
             syncSlTp: true,
             slippageMaxPips: 3.0,
           },

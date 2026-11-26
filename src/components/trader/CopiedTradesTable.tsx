@@ -71,7 +71,6 @@ export const CopiedTradesTable: React.FC = () => {
     if (!withinTimeframe(m.closeTime || m.openTime)) return false;
     const matchesSearch =
       m.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      String(m.parentTradeTicket).includes(searchQuery) ||
       String(m.childTradeTicket).includes(searchQuery);
     const matchesType =
       filterType === 'all'
@@ -88,14 +87,12 @@ export const CopiedTradesTable: React.FC = () => {
     if (useCloudMappingsView) {
       downloadCsvFile(
         `tradesync_copied_mappings_${new Date().toISOString().slice(0, 10)}.csv`,
-        ['Child Ticket', 'Parent Ticket', 'Symbol', 'Direction', 'Child Lots', 'Parent Lots', 'Latency Ms', 'Status', 'Timestamp', 'Error'],
+        ['Child Ticket', 'Symbol', 'Direction', 'Lots', 'Latency Ms', 'Status', 'Timestamp', 'Error'],
         filteredMappings.map((m) => [
           m.childTradeTicket || '',
-          m.parentTradeTicket,
           m.symbol,
           m.orderType,
           m.childLots.toFixed(2),
-          m.parentLots.toFixed(2),
           m.latencyMs,
           m.status,
           m.openTime,
@@ -235,10 +232,9 @@ export const CopiedTradesTable: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
-                  <th className="px-5 py-3.5">Copied Order</th>
-                  <th className="px-4 py-3.5">Source Trade</th>
+                  <th className="px-5 py-3.5">Your Ticket</th>
                   <th className="px-4 py-3.5">Symbol &amp; Type</th>
-                  <th className="px-4 py-3.5">Req / Exec Vol</th>
+                  <th className="px-4 py-3.5">Lot Size</th>
                   <th className="px-4 py-3.5">Fill / Close</th>
                   <th className="px-4 py-3.5">Latency</th>
                   <th className="px-4 py-3.5">P&amp;L</th>
@@ -270,9 +266,6 @@ export const CopiedTradesTable: React.FC = () => {
                             ? `#${map.childTradeTicket}`
                             : <span className="text-slate-500 italic">Pending / None</span>}
                         </td>
-                        <td className="px-4 py-4 font-mono text-slate-300">
-                          #{map.parentTradeTicket}
-                        </td>
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-2">
                             <span className="font-mono font-bold text-white">{map.symbol}</span>
@@ -288,8 +281,6 @@ export const CopiedTradesTable: React.FC = () => {
                           </div>
                         </td>
                         <td className="px-4 py-4 font-mono text-white">
-                          <span>{map.parentLots.toFixed(2)}L</span>
-                          <span className="text-slate-500"> → </span>
                           <span className="text-cyan-300 font-bold">{map.childLots.toFixed(2)}L</span>
                         </td>
                         <td className="px-4 py-4 font-mono text-[11px] text-slate-300">
@@ -331,7 +322,7 @@ export const CopiedTradesTable: React.FC = () => {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={9} className="px-5 py-10 text-center text-xs text-slate-500">
+                    <td colSpan={8} className="px-5 py-10 text-center text-xs text-slate-500">
                       No copied trade mappings recorded for your account yet.
                     </td>
                   </tr>
@@ -342,9 +333,9 @@ export const CopiedTradesTable: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-slate-800 bg-slate-950/80 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 <tr>
-                  <th className="px-5 py-3.5">Copied Order / Source</th>
+                  <th className="px-5 py-3.5">Your Ticket</th>
                   <th className="px-4 py-3.5">Symbol &amp; Type</th>
-                  <th className="px-4 py-3.5">Req / Exec Vol</th>
+                  <th className="px-4 py-3.5">Lot Size</th>
                   <th className="px-4 py-3.5">Fill / Close</th>
                   <th className="px-4 py-3.5">SL / TP</th>
                   <th className="px-4 py-3.5">Comm / Swap / Pips</th>
@@ -360,7 +351,6 @@ export const CopiedTradesTable: React.FC = () => {
                       (m) => String(m.childTradeTicket) === String(trade.ticket)
                     );
                     const pnl = formatTradeProfitDisplay(trade, isCloudMode);
-                    const reqVol = trade.requestedVolume ?? mapping?.parentLots;
 
                     return (
                       <tr key={trade.id} className="hover:bg-slate-800/40 transition-colors">
@@ -369,10 +359,9 @@ export const CopiedTradesTable: React.FC = () => {
                             <span className="font-mono font-bold text-white text-xs">
                               #{trade.ticket}
                             </span>
-                            {(mapping || trade.parentTicket) && (
+                            {mapping && (
                               <div className="text-[10px] text-slate-400 font-mono">
-                                Source: #{mapping?.parentTradeTicket || trade.parentTicket}
-                                {mapping ? ` (${mapping.latencyMs}ms)` : ''}
+                                Mirrored ({mapping.latencyMs}ms)
                               </div>
                             )}
                           </div>
@@ -394,9 +383,6 @@ export const CopiedTradesTable: React.FC = () => {
                         </td>
 
                         <td className="px-4 py-4 font-mono text-white">
-                          {reqVol != null && (
-                            <span className="text-slate-400">{Number(reqVol).toFixed(2)}L → </span>
-                          )}
                           <span className="font-bold">{trade.lots.toFixed(2)}L</span>
                         </td>
 

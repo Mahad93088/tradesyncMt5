@@ -16,7 +16,15 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' })
   if (s === 'connected' || s === 'active' || s === 'executed' || s === 'running' || s === 'healthy') {
     colorClasses = 'bg-emerald-950/40 text-emerald-300 border-emerald-800/50';
     dotColor = 'bg-emerald-400';
-  } else if (s === 'disconnected' || s === 'paused' || s === 'standby' || s === 'degraded' || s === 'pending') {
+  } else if (
+    s === 'disconnected' ||
+    s === 'paused' ||
+    s === 'balance_paused' ||
+    s === 'balance paused' ||
+    s === 'standby' ||
+    s === 'degraded' ||
+    s === 'pending'
+  ) {
     colorClasses = 'bg-amber-950/40 text-amber-300 border-amber-800/50';
     dotColor = 'bg-amber-400';
   } else if (
@@ -27,6 +35,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' })
     s === 'rejected_margin' ||
     s === 'rejected_off_quotes' ||
     s === 'slippage_exceeded' ||
+    s === 'skipped_lot_limit' ||
     s === 'critical'
   ) {
     colorClasses = 'bg-rose-950/40 text-rose-300 border-rose-800/50';

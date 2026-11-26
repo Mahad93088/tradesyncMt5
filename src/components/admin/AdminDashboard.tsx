@@ -23,7 +23,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { RegisterMT5AccountModal } from './RegisterMT5AccountModal';
-import { formatHeartbeatAge } from '../common/dashboardHelpers';
+import { countDistinctTraders, formatHeartbeatAge } from '../common/dashboardHelpers';
 import { User } from '../../types';
 import {
   AdminPageHeader,
@@ -212,14 +212,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .map((mentor) => {
         const links = parentChildLinks.filter((l) => l.mentorId === mentor.id);
-        const activeLinks = links.filter((l) => l.status === 'active');
         const sub = subscriptions.find((s) => s.mentorId === mentor.id || s.userId === mentor.id);
         const profile = mentorProfiles.find((p) => p.userId === mentor.id);
         return {
           mentor,
           profile,
-          assignedCount: links.length,
-          activeCount: activeLinks.length,
+          assignedCount: countDistinctTraders(links, []),
+          activeCount: countDistinctTraders(links, ['active']),
           sub,
         };
       });
@@ -386,7 +385,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <AdminStatCard
           title="Total Traders (All Mentors)"
           value={traders.length}
-          subtitle={`${parentChildLinks.length} mentor assignment(s)`}
+          subtitle={`${countDistinctTraders(parentChildLinks, [])} assigned · ${parentChildLinks.length} link(s)`}
           icon={UserCheck}
           tone="blue"
           onClick={() => onNavigateTab('traders')}
@@ -822,10 +821,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between">
                   <h4 className="font-bold text-slate-900">
-                    Assigned Traders for {selectedMentor.fullName} ({mentorLinks.length})
+                    Assigned Traders for {selectedMentor.fullName} ({countDistinctTraders(mentorLinks, [])} traders · {mentorLinks.length} links)
                   </h4>
                   <span className="text-[11px] font-mono text-slate-500">
-                    {mentorLinks.filter((l) => l.status === 'active').length} active
+                    {countDistinctTraders(mentorLinks, ['active'])} active
                   </span>
                 </div>
 
@@ -857,8 +856,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <td className="px-3 py-2 font-mono text-[11px] text-slate-700">
                                 {childAcc ? `#${childAcc.accountNumber} (${childAcc.broker})` : 'No MT5 bound'}
                               </td>
-                              <td className="px-3 py-2">
-                                <AdminStatusText status={link.status} />
+                              <td className="px-3 py-2 space-y-1">
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  <AdminStatusText status={link.status} />
+                                  {link.balancePauseActive && <AdminStatusText status="balance_paused" />}
+                                </div>
+                                {(link.suspensionReason || link.pauseReason) && (
+                                  <p className="text-[10px] text-slate-500 max-w-[200px] truncate" title={link.suspensionReason || link.pauseReason || ''}>
+                                    {link.suspensionReason || link.pauseReason}
+                                  </p>
+                                )}
                               </td>
                               <td className="px-3 py-2 font-mono text-[11px] text-slate-600">
                                 {link.membershipStatus || 'active'}

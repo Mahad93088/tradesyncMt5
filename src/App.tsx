@@ -188,8 +188,8 @@ const AppContent: React.FC = () => {
         onTabChange={(tab) => setCurrentTab(tab)}
       />
 
-      {/* Interactive Simulation Harness Toolbar (Strictly Local Demo Mode) */}
-      {!isCloudMode && <SimulationToolbar />}
+      {/* Interactive Simulation Harness Toolbar (Strictly Local Demo Mode, Disabled for Mentors) */}
+      {!isCloudMode && role !== 'mentor' && <SimulationToolbar />}
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden">
@@ -309,13 +309,13 @@ const AppContent: React.FC = () => {
                 {currentTab === 'lot-settings' && (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <h2 className="text-xl font-bold text-slate-100">Lot Size &amp; Risk Controls</h2>
+                      <h2 className="text-xl font-bold text-slate-100">Lot Size Preferences</h2>
                       {traderLink && (
                         <button
                           onClick={() => setIsLotSettingsOpen(true)}
                           className="rounded-lg bg-sky-600 hover:bg-sky-500 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors"
                         >
-                          Modify Sizing Parameters
+                          Change Lot Size
                         </button>
                       )}
                     </div>

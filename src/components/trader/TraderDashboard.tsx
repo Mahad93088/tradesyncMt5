@@ -50,7 +50,6 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     mt5Accounts,
     followerAccounts,
     parentChildLinks,
-    mentorProfiles,
     mentorDirectory,
     subscriptions,
     trades,
@@ -86,15 +85,17 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     ? parentChildLinks.find((l) => l.childAccountId === childAccount.id) ||
       parentChildLinks.find((l) => l.traderId === currentUser.id)
     : parentChildLinks.find((l) => l.traderId === currentUser.id);
-  const linkedParentAccount = link
+  const linkedParentStatus = link
     ? followerAccounts.find((a) => a.id === link.parentAccountId) ||
       mt5Accounts.find((a) => a.id === link.parentAccountId)
     : null;
   const linkedMentorDirectory = link
     ? mentorDirectory.find((m) => m.id === link.mentorId)
     : null;
-  const mentorProfile =
-    !isCloudMode && link ? mentorProfiles.find((m) => m.userId === link.mentorId) : null;
+  const isMentorBridgeOnline = Boolean(
+    (linkedParentStatus?.connectionStatus === 'connected' && !linkedParentStatus?.isStale) ||
+      (linkedMentorDirectory?.connectionStatus === 'connected' && !linkedMentorDirectory?.isStale)
+  );
   const activeUserSub = subscriptions.find(
     (s) => s.userId === currentUser.id || s.mentorId === currentUser.id
   );
@@ -126,6 +127,16 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
     accounts: childAccount ? [childAccount] : childAccounts,
     isCloudMode,
   });
+
+  const latestBrokerVolumeError = scopedMappings.find(
+    (m) =>
+      m.status !== 'EXECUTED' &&
+      m.status !== 'CLOSED' &&
+      m.status !== 'PENDING' &&
+      Boolean(m.errorMessage)
+  );
+  const verifiedBalanceDisplay = childAccount?.verifiedBalance ?? childAccount?.balance ?? 0;
+  const verifiedEquityDisplay = childAccount?.verifiedEquity ?? childAccount?.equity ?? 0;
 
   const linkProfit = link
     ? formatLinkProfitDisplay(link, isCloudMode)
@@ -322,27 +333,37 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
           )}
 
           {link && (
-            <button
-              onClick={handleToggleCopyStream}
-              disabled={actionBusy}
-              className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
-                link.status === 'active'
-                  ? 'border border-amber-800 bg-amber-950/50 hover:bg-amber-900/50 text-amber-300'
-                  : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-              }`}
-            >
-              {link.status === 'active' ? (
-                <>
-                  <PauseCircle className="h-4 w-4" />
-                  <span>Pause Copying</span>
-                </>
-              ) : (
-                <>
-                  <PlayCircle className="h-4 w-4" />
-                  <span>Enable Copying</span>
-                </>
-              )}
-            </button>
+            link.status === 'suspended' ? (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-800/80 bg-rose-950/60 px-3 py-1.5 text-xs font-semibold text-rose-300"
+                title="Only your mentor or administrator can reactivate a suspended assignment"
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+                <span>Suspended (Mentor/Admin Only)</span>
+              </span>
+            ) : (
+              <button
+                onClick={handleToggleCopyStream}
+                disabled={actionBusy}
+                className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                  link.status === 'active'
+                    ? 'border border-amber-800 bg-amber-950/50 hover:bg-amber-900/50 text-amber-300'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                }`}
+              >
+                {link.status === 'active' ? (
+                  <>
+                    <PauseCircle className="h-4 w-4" />
+                    <span>Pause Copying</span>
+                  </>
+                ) : (
+                  <>
+                    <PlayCircle className="h-4 w-4" />
+                    <span>Enable Copying</span>
+                  </>
+                )}
+              </button>
+            )
           )}
 
           <button
@@ -375,6 +396,55 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
           {isCloudMode ? 'Supabase Cloud Bridge' : 'Local Demo Simulator'}
         </span>
       </div>
+
+      {link?.status === 'suspended' && (
+        <div className="rounded-xl border border-rose-800/80 bg-rose-950/40 p-3.5 text-xs text-rose-200 flex items-start gap-2.5">
+          <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <div className="font-bold text-rose-300">Copy Assignment Suspended</div>
+            <p className="text-rose-200/90">
+              {link.suspensionReason ||
+                'Your mentor or platform administrator has suspended new trade copying on this account. Existing open positions remain untouched, and students cannot unsuspend themselves.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {link?.balancePauseActive && (
+        <div className="rounded-xl border border-amber-800/80 bg-amber-950/40 p-3.5 text-xs text-amber-200 flex items-start gap-2.5">
+          <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <div className="font-bold text-amber-300">
+              Balance Protection Pause Active (Verified Balance: ${verifiedBalanceDisplay.toFixed(2)})
+            </div>
+            <p className="text-amber-200/90">
+              {link.pauseReason ||
+                'New trade copying automatically pauses when verified balance falls below $50 and automatically resumes once verified balance reaches $100 (unless manually suspended).'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {(childAccount?.errorMessage || latestBrokerVolumeError) && (
+        <div className="rounded-xl border border-rose-800/70 bg-rose-950/30 p-3.5 text-xs text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-rose-300">Broker / Volume Validation Notice</div>
+              <p className="text-rose-200/90">
+                {latestBrokerVolumeError?.errorMessage || childAccount?.errorMessage}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('failed-trades')}
+            className="rounded-lg border border-rose-700 bg-rose-950/70 hover:bg-rose-900/60 px-3 py-1.5 text-[11px] font-semibold text-rose-200 shrink-0"
+          >
+            View Error Log →
+          </button>
+        </div>
+      )}
 
       {feedback && (
         <div
@@ -440,8 +510,12 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatsCard
           title="Account Equity"
-          value={childAccount ? `$${childAccount.equity.toLocaleString()}` : '$0.00'}
-          subtitle={childAccount ? `Balance: $${childAccount.balance.toLocaleString()}` : 'Not connected'}
+          value={childAccount ? `$${verifiedEquityDisplay.toLocaleString()}` : '$0.00'}
+          subtitle={
+            childAccount
+              ? `${childAccount.verifiedBalance !== undefined ? 'Verified Bal' : 'Balance'}: $${verifiedBalanceDisplay.toLocaleString()}`
+              : 'Not connected'
+          }
           icon={Activity}
           accentColor="emerald"
         />
@@ -472,11 +546,27 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
         />
         <StatsCard
           title="Copying Stream"
-          value={link?.status === 'active' ? 'ENABLED' : link ? 'PAUSED' : 'UNLINKED'}
+          value={
+            !link
+              ? 'UNLINKED'
+              : link.status === 'suspended'
+              ? 'SUSPENDED'
+              : link.balancePauseActive
+              ? 'BALANCE PAUSED'
+              : link.status === 'active'
+              ? 'ENABLED'
+              : 'PAUSED'
+          }
           subtitle={copyingStreamSubtitle}
           icon={Zap}
           accentColor={
-            childAccount?.isStale ? 'amber' : link?.status === 'active' ? 'emerald' : 'amber'
+            link?.status === 'suspended'
+              ? 'rose'
+              : childAccount?.isStale || link?.balancePauseActive
+              ? 'amber'
+              : link?.status === 'active'
+              ? 'emerald'
+              : 'amber'
           }
         />
       </div>
@@ -555,9 +645,11 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                   </span>
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-500 uppercase font-sans">Balance ($)</span>
+                  <span className="text-[10px] text-slate-500 uppercase font-sans">
+                    {childAccount.verifiedBalance !== undefined ? 'Verified Balance ($)' : 'Balance ($)'}
+                  </span>
                   <p className="font-bold text-white text-sm">
-                    ${childAccount.balance.toLocaleString()}
+                    ${verifiedBalanceDisplay.toLocaleString()}
                   </p>
                   <span className="text-[10px] text-slate-400 font-sans">
                     Margin: ${childAccount.margin.toLocaleString()}
@@ -655,7 +747,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                           <div>
                             <span className="font-mono font-bold text-white text-xs">{m.symbol}</span>
                             <span className="text-slate-400 text-[11px] ml-2 font-mono">
-                              {m.childLots.toFixed(2)} lots (Parent #{m.parentTradeTicket})
+                              {m.childLots.toFixed(2)} lots • Mirrored
                             </span>
                           </div>
                         </div>
@@ -701,7 +793,10 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                 <UserCheck className="h-4 w-4 text-cyan-400" />
                 <h3 className="text-sm font-bold text-white uppercase tracking-wider">Linked Mentor</h3>
               </div>
-              {link && <StatusBadge status={link.status} size="sm" />}
+              <div className="flex items-center gap-1.5">
+                {link && <StatusBadge status={link.status} size="sm" />}
+                {link?.balancePauseActive && <StatusBadge status="balance_paused" size="sm" />}
+              </div>
             </div>
 
             {link ? (
@@ -709,77 +804,42 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
                 <div>
                   <h4 className="font-bold text-white text-base">{link.mentorName}</h4>
                   <p className="text-cyan-400 text-[11px] font-medium">
-                    {isCloudMode
-                      ? linkedParentAccount
-                        ? `Master MT5 #${linkedParentAccount.accountNumber} (${linkedParentAccount.broker})`
-                        : linkedMentorDirectory?.parentAccountNumber
-                        ? `Master MT5 #${linkedMentorDirectory.parentAccountNumber} (${linkedMentorDirectory.brokerName})`
-                        : 'Verified Cloud Bridge Mentor'
-                      : mentorProfile?.strategyName || 'Mentor Strategy'}
+                    Verified Demo Mirroring Stream
                   </p>
                 </div>
 
-                {isCloudMode ? (
-                  <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1.5 font-mono text-[11px]">
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Parent Terminal:</span>
-                      <span className="text-slate-200 font-semibold">
-                        {linkedParentAccount?.connectionStatus ||
-                          linkedMentorDirectory?.connectionStatus ||
-                          'unknown'}
-                        {(linkedParentAccount?.isStale || linkedMentorDirectory?.isStale) &&
-                          ' (stale)'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Last Parent Sync:</span>
-                      <span className="text-slate-200">
-                        {formatHeartbeatAge(
-                          linkedParentAccount?.lastHeartbeat || linkedMentorDirectory?.lastSync
-                        )}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Realized P&amp;L:</span>
-                      <span
-                        className={
-                          !linkProfit.available
-                            ? 'text-slate-400'
-                            : linkProfit.isPositive
-                            ? 'text-emerald-400 font-bold'
-                            : 'text-rose-400 font-bold'
-                        }
-                      >
-                        {linkProfit.text}
-                      </span>
-                    </div>
-                    <div className="flex justify-between pt-1 border-t border-slate-800/80">
-                      <span className="text-slate-400">SaaS License:</span>
-                      <button
-                        type="button"
-                        onClick={() => onNavigateTab('subscription')}
-                        className="text-cyan-400 hover:underline font-sans font-semibold"
-                      >
-                        {activeUserSub ? `${activeUserSub.planName} (${activeUserSub.status})` : 'Manage Billing →'}
-                      </button>
-                    </div>
+                <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1.5 font-mono text-[11px]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Mentor Bridge:</span>
+                    <span className={`font-semibold ${isMentorBridgeOnline ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {isMentorBridgeOnline ? 'Online' : 'Offline / Awaiting Heartbeat'}
+                    </span>
                   </div>
-                ) : (
-                  <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1.5 font-mono text-[11px]">
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Strategy Win Rate:</span>
-                      <span className="text-emerald-400 font-bold">{mentorProfile?.winRate ?? '--'}%</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Profit Factor:</span>
-                      <span className="text-white font-bold">{mentorProfile?.profitFactor ?? '--'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Subscription Fee:</span>
-                      <span className="text-slate-200">${mentorProfile?.monthlyFee ?? 0}/mo</span>
-                    </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Your Copied P&amp;L:</span>
+                    <span
+                      className={
+                        !linkProfit.available
+                          ? 'text-slate-400'
+                          : linkProfit.isPositive
+                          ? 'text-emerald-400 font-bold'
+                          : 'text-rose-400 font-bold'
+                      }
+                    >
+                      {linkProfit.text}
+                    </span>
                   </div>
-                )}
+                  <div className="flex justify-between pt-1 border-t border-slate-800/80">
+                    <span className="text-slate-400">Platform License:</span>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('subscription')}
+                      className="text-cyan-400 hover:underline font-sans font-semibold"
+                    >
+                      {activeUserSub ? `${activeUserSub.planName} (${activeUserSub.status})` : 'Manage Billing →'}
+                    </button>
+                  </div>
+                </div>
 
                 <div className="flex items-center gap-2 pt-1">
                   <button
@@ -793,7 +853,7 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
               </div>
             ) : (
               <div className="text-xs text-slate-400 space-y-2">
-                <p>You are not currently linked to any mentor strategy.</p>
+                <p>You are not currently linked to any mentor.</p>
                 <button
                   onClick={() => onNavigateTab('mentor-link')}
                   className="w-full rounded-lg bg-cyan-600 hover:bg-cyan-500 py-1.5 text-xs text-white font-semibold transition-colors"
@@ -804,45 +864,39 @@ export const TraderDashboard: React.FC<TraderDashboardProps> = ({
             )}
           </div>
 
-          {/* Lot Size Rules Mini Box */}
+          {/* Lot Size Preferences Mini Box */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-400 uppercase">Lot Size Rules</span>
+              <span className="text-xs font-semibold text-slate-400 uppercase">Lot Size Preferences</span>
               <button
                 onClick={onOpenLotModal}
                 className="text-xs text-cyan-400 hover:text-cyan-300 font-semibold flex items-center gap-1"
               >
-                <SlidersHorizontal className="h-3.5 w-3.5" /> Configure
+                <SlidersHorizontal className="h-3.5 w-3.5" /> Change Lot Size
               </button>
             </div>
 
             {link ? (
               <div className="space-y-2 text-xs">
-                <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1 font-mono text-[11px]">
+                <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 space-y-1.5 font-mono text-[11px]">
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Sizing Rule:</span>
+                    <span className="text-slate-400">Selected Lot Size:</span>
                     <span className="text-cyan-400 font-bold">
                       {formatLotRuleLabel(link.lotSettings)}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Max Lot Cap:</span>
-                    <span className="text-slate-200">{link.lotSettings.maxLotCap} lots</span>
+                    <span className="text-slate-400">Balance Protection:</span>
+                    <span className="text-slate-200">$50 Pause / $100 Resume</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Slippage Tolerance:</span>
-                    <span className="text-slate-200">{link.lotSettings.slippageMaxPips} pips</span>
-                  </div>
-                  {isCloudMode && (
-                    <p className="pt-1 border-t border-slate-800/80 text-[10px] font-sans text-slate-500">
-                      All 12 sizing &amp; risk controls persist in Supabase and enforce server-side.
-                    </p>
-                  )}
+                  <p className="pt-1 border-t border-slate-800/80 text-[10px] font-sans text-slate-500">
+                    Broker min/max/step limits are strictly enforced without silent volume increases.
+                  </p>
                 </div>
               </div>
             ) : (
               <span className="text-slate-500 text-xs italic">
-                Link to a mentor to configure lot sizing.
+                Link to a mentor to select your lot size.
               </span>
             )}
           </div>

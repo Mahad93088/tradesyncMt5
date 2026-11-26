@@ -23,13 +23,14 @@ import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { StatsCard } from '../common/StatsCard';
 import { StatusBadge } from '../common/StatusBadge';
-import { ConfirmationModal } from '../common/ConfirmationModal';
 import { RealEquityCurveChart } from '../common/RealEquityCurveChart';
 import { downloadCsvFile, printCurrentReport } from '../common/exportHelpers';
 import {
   getDeterministicInviteCode,
   formatHeartbeatAge,
   formatTradeProfitDisplay,
+  countDistinctTraders,
+  resolvePlanFollowerLimit,
 } from '../common/dashboardHelpers';
 import { computeReportingSummary } from '../../context/cloudStateUtils';
 
@@ -57,14 +58,11 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     trades,
     tradeMappings,
     toggleAutoTrading,
-    emergencyCloseParentTicket,
     updateMentorStrategyProfile,
   } = useApp();
 
   const [copiedCode, setCopiedCode] = useState(false);
   const [dealsTab, setDealsTab] = useState<'open' | 'history'>('open');
-  const [pendingEmergencyTicket, setPendingEmergencyTicket] = useState<string | number | null>(null);
-  const [isClosingTicket, setIsClosingTicket] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{ message: string; isError: boolean } | null>(null);
 
   // Find this mentor's parent MT5 account
@@ -96,8 +94,10 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
 
   // Follower links
   const mentorLinks = parentChildLinks.filter((l) => l.mentorId === currentUser.id);
-  const activeFollowers = mentorLinks.filter((l) => l.status === 'active').length;
-  const maxQuota = sub?.maxFollowers ?? activePlan?.maxFollowers ?? activePlan?.maxChildAccounts ?? profile?.maxFollowers ?? 25;
+  const activeFollowers = countDistinctTraders(mentorLinks, ['active']);
+  const maxQuota = activePlan
+    ? resolvePlanFollowerLimit(activePlan)
+    : sub?.maxFollowers ?? profile?.maxFollowers ?? 2;
 
   // Parent trades (open & closed history)
   const parentTrades = trades.filter(
@@ -128,16 +128,6 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
     navigator.clipboard.writeText(inviteCode);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
-  };
-
-  const handleConfirmEmergencyClose = async () => {
-    if (pendingEmergencyTicket == null) return;
-    setIsClosingTicket(true);
-    setActionFeedback(null);
-    const res = await emergencyCloseParentTicket(pendingEmergencyTicket);
-    setIsClosingTicket(false);
-    setActionFeedback({ message: res.message, isError: !res.success });
-    setPendingEmergencyTicket(null);
   };
 
   const handleSaveStudentPricing = async (e: React.FormEvent) => {
@@ -567,14 +557,6 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
                                 </div>
                                 <span className="text-[10px] text-slate-500">Ticket #{t.ticket}</span>
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => setPendingEmergencyTicket(t.ticket)}
-                                className="rounded border border-rose-800/80 bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 px-2.5 py-1 text-[10px] font-semibold transition-colors shadow-sm"
-                                title="Queue emergency CLOSE instruction for all linked followers"
-                              >
-                                Emergency Close
-                              </button>
                             </div>
                           </div>
                         );
@@ -607,13 +589,6 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
 
                           <div className="flex items-center gap-2">
                             <StatusBadge status={m.status} size="sm" />
-                            <button
-                              type="button"
-                              onClick={() => setPendingEmergencyTicket(m.parentTradeTicket)}
-                              className="rounded border border-rose-800/80 bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 px-2.5 py-1 text-[10px] font-semibold transition-colors"
-                            >
-                              Emergency Close
-                            </button>
                           </div>
                         </div>
                       ))}
@@ -739,7 +714,7 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
               <StatusBadge status={sub?.status || 'pending'} size="sm" />
             </div>
             <h4 className="font-bold text-white text-sm">
-              {sub?.planName || activePlan?.name || (isCloudMode ? 'Starter Free / No Paid Plan' : 'Demo Sandbox Tier')}
+              {sub?.planName || activePlan?.name || (isCloudMode ? 'Trial (2) / No Paid Plan' : 'Demo Sandbox Tier')}
             </h4>
             <div className="text-xs text-slate-400 space-y-1 font-mono">
               <div className="flex justify-between">
@@ -846,17 +821,6 @@ export const MentorDashboard: React.FC<MentorDashboardProps> = ({
           </div>
         </div>
       </div>
-
-      <ConfirmationModal
-        isOpen={pendingEmergencyTicket !== null}
-        onClose={() => setPendingEmergencyTicket(null)}
-        onConfirm={handleConfirmEmergencyClose}
-        isLoading={isClosingTicket}
-        variant="danger"
-        title="Confirm Emergency Close Dispatch"
-        description={`Queue CLOSE instructions across all active follower child terminals for Parent Ticket #${pendingEmergencyTicket}?`}
-        confirmLabel="Dispatch Close Instructions"
-      />
     </div>
   );
 };

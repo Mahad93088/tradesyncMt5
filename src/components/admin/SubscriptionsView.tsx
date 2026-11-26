@@ -11,6 +11,7 @@ import {
   AdminFeedbackBanner,
   AdminEmptyState,
 } from './adminUi';
+import { countDistinctTraders, resolvePlanFollowerLimit } from '../common/dashboardHelpers';
 
 export const SubscriptionsView: React.FC = () => {
   const { isCloudMode } = useAuth();
@@ -220,12 +221,10 @@ export const SubscriptionsView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {filteredSubs.map((sub) => {
                   const plan = subscriptionPlans.find((p) => p.id === sub.planId);
+                  const mentorLinks = parentChildLinks.filter((l) => l.mentorId === sub.mentorId);
                   const usedFollowers =
-                    sub.usedChildAccounts ??
-                    parentChildLinks.filter(
-                      (l) => l.mentorId === sub.mentorId && l.status === 'active'
-                    ).length;
-                  const maxFollowers = sub.maxFollowers ?? plan?.maxFollowers ?? plan?.maxChildAccounts ?? 10;
+                    sub.usedChildAccounts ?? countDistinctTraders(mentorLinks, ['active']);
+                  const maxFollowers = plan ? resolvePlanFollowerLimit(plan) : (sub.maxFollowers ?? 2);
 
                   return (
                     <tr key={sub.id} className="hover:bg-slate-50/80 transition-colors">
@@ -333,7 +332,7 @@ export const SubscriptionsView: React.FC = () => {
                 >
                   {subscriptionPlans.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} — ${p.monthlyPrice ?? p.price}/mo ({p.maxFollowers ?? p.maxChildAccounts} followers)
+                      {p.name} — ${p.monthlyPrice ?? p.price}/mo ({resolvePlanFollowerLimit(p)} followers)
                     </option>
                   ))}
                 </select>

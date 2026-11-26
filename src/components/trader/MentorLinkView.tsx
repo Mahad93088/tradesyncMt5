@@ -14,7 +14,6 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import {
   formatLotRuleLabel,
   formatLinkProfitDisplay,
-  formatHeartbeatAge
 } from '../common/dashboardHelpers';
 
 export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ onOpenLotSettings }) => {
@@ -76,12 +75,12 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
       fixedLot: 0.1,
       multiplier: 0.5,
       riskPercent: 1.5,
-      maxLotCap: 0.5,
+      maxLotCap: 50,
       minLotClamp: 0.01,
-      maxDrawdownProtectionPercent: 10.0,
-      copyPendingOrders: true,
+      maxDrawdownProtectionPercent: 20.0,
+      copyPendingOrders: false,
       syncSlTp: true,
-      slippageMaxPips: 3.0
+      slippageMaxPips: 30.0
     };
 
     setSubmitting(true);
@@ -321,6 +320,9 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             </div>
             <div className="flex items-center gap-2">
               <StatusBadge status={activeLink.status} size="md" />
+              {activeLink.balancePauseActive && (
+                <StatusBadge status="balance_paused" size="md" />
+              )}
               <button
                 onClick={() => setUnlinkConfirmOpen(true)}
                 disabled={submitting}
@@ -331,9 +333,23 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             </div>
           </div>
 
+          {activeLink.status === 'suspended' && (
+            <div className="rounded-xl border border-rose-800/80 bg-rose-950/40 p-3 text-xs text-rose-200">
+              <strong className="text-rose-300">Suspended:</strong>{' '}
+              {activeLink.suspensionReason || 'Suspended by mentor or administrator. Only mentor or admin can reactivate.'}
+            </div>
+          )}
+
+          {activeLink.balancePauseActive && (
+            <div className="rounded-xl border border-amber-800/80 bg-amber-950/40 p-3 text-xs text-amber-200">
+              <strong className="text-amber-300">Balance Pause ($50 / $100 Protection):</strong>{' '}
+              {activeLink.pauseReason || 'Copying paused because verified balance dropped below $50. Resumes automatically at $100 verified balance.'}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
             <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
-              <span className="text-slate-400 text-[10px] uppercase font-mono">Lot Mode</span>
+              <span className="text-slate-400 text-[10px] uppercase font-mono">Lot Size Preference</span>
               <p className="font-bold text-slate-100 mt-1">
                 {formatLotRuleLabel(activeLink.lotSettings)}
               </p>
@@ -341,7 +357,7 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
                 onClick={onOpenLotSettings}
                 className="text-[11px] text-sky-400 hover:text-sky-300 font-medium mt-1 inline-block"
               >
-                Adjust Settings →
+                Change Lot Size →
               </button>
             </div>
 
@@ -364,12 +380,12 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             </div>
 
             <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
-              <span className="text-slate-400 text-[10px] uppercase font-mono">Slippage Guard</span>
+              <span className="text-slate-400 text-[10px] uppercase font-mono">Your Verified Balance</span>
               <p className="font-mono text-sm font-bold text-slate-100 mt-1">
-                {activeLink.lotSettings.slippageMaxPips} Pips Max
+                ${(childAccount?.verifiedBalance ?? childAccount?.balance ?? 0).toLocaleString()}
               </p>
               <span className="text-[10px] text-slate-400 font-mono">
-                {activeLink.lotSettings.syncSlTp ? 'SL/TP Sync Enabled' : 'SL/TP Sync Disabled'}
+                Pause &lt; $50 • Resume &ge; $100
               </span>
             </div>
           </div>
@@ -465,38 +481,29 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
                     <div>
                       <h4 className="font-semibold text-slate-100 text-sm">{m.fullName}</h4>
                       <p className="text-sky-400 text-xs font-mono">
-                        {m.parentAccountNumber
-                          ? `Master #${m.parentAccountNumber} (${m.brokerName})`
-                          : 'Master MT5 Pending'}
+                        Verified Demo Mentor
                       </p>
-                      {m.brokerServer && (
-                        <p className="text-[11px] text-slate-500 font-mono">{m.brokerServer}</p>
-                      )}
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <StatusBadge status={m.connectionStatus} size="sm" />
                       {m.isStale && (
-                        <span className="text-[10px] font-mono text-amber-400">Stale Heartbeat</span>
+                        <span className="text-[10px] font-mono text-amber-400">Bridge Offline</span>
                       )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
+                  <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
                     <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-sans">Mode</span>
+                      <span className="text-[10px] text-slate-400 uppercase font-sans">Environment</span>
                       <p className="font-semibold text-emerald-400 mt-0.5 uppercase">
-                        {m.accountType || 'DEMO'}
+                        DEMO ONLY
                       </p>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-sans">Last Sync</span>
+                      <span className="text-[10px] text-slate-400 uppercase font-sans">Bridge Status</span>
                       <p className="font-semibold text-slate-200 mt-0.5">
-                        {formatHeartbeatAge(m.lastSync)}
+                        {m.connectionStatus === 'connected' && !m.isStale ? 'Online' : 'Offline'}
                       </p>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-sans">Followers</span>
-                      <p className="font-semibold text-slate-200 mt-0.5">{m.activeFollowersCount}</p>
                     </div>
                   </div>
 
@@ -519,7 +526,7 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
             <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900/40 p-8 text-center space-y-2">
               <Server className="h-7 w-7 text-slate-600 mx-auto" />
               <p className="text-xs text-slate-400">
-                No verified active mentors with registered Parent MT5 Demo terminals are currently listed.
+                No verified active mentors are currently listed.
               </p>
             </div>
           )
@@ -533,30 +540,11 @@ export const MentorLinkView: React.FC<{ onOpenLotSettings: () => void }> = ({ on
                 <div className="flex items-start justify-between">
                   <div>
                     <h4 className="font-semibold text-slate-100 text-sm">{m.displayName}</h4>
-                    <p className="text-sky-400 text-xs font-medium">{m.strategyName}</p>
+                    <p className="text-sky-400 text-xs font-mono">Verified Demo Mentor</p>
                   </div>
-                  <span className="font-mono text-xs font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded">
-                    ${m.monthlyFee}/mo
+                  <span className="font-mono text-[10px] font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded uppercase">
+                    DEMO ONLY
                   </span>
-                </div>
-
-                <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
-                  {m.description}
-                </p>
-
-                <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-950/70 border border-slate-800/80 p-2.5 text-center text-xs font-mono">
-                  <div>
-                    <span className="text-[10px] text-slate-400 uppercase font-sans">Win Rate</span>
-                    <p className="font-semibold text-emerald-400 mt-0.5">{m.winRate}%</p>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-400 uppercase font-sans">Profit Factor</span>
-                    <p className="font-semibold text-slate-200 mt-0.5">{m.profitFactor}</p>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-400 uppercase font-sans">Followers</span>
-                    <p className="font-semibold text-slate-200 mt-0.5">{m.totalFollowers}/{m.maxFollowers}</p>
-                  </div>
                 </div>
 
                 <div className="flex items-center justify-between pt-1">
