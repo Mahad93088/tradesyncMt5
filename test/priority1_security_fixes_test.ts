@@ -645,10 +645,14 @@ async function runTests() {
     });
     assert.strictEqual(myAccsRes.status, 200);
     const myAccsJson = await myAccsRes.json();
+    const traderAcc = myAccsJson.accounts.find((a: any) => a.id === childAccId);
+    assert.ok(traderAcc, 'Student should still see their own child MT5 account');
     assert.strictEqual(
-      myAccsJson.accounts.find((a: any) => a.id === childAccId)?.assigned_parent_id,
-      parentAccId
+      traderAcc.assigned_parent_id,
+      undefined,
+      'Student /bridge/my-accounts must not expose assigned_parent_id'
     );
+    assert.strictEqual(myAccsJson.linkedAccounts.length, 0, 'Student must not receive parent linkedAccounts');
 
     const dupAssign = await fetch(`${baseUrl}/api/v1/admin/assignments`, {
       method: 'POST',

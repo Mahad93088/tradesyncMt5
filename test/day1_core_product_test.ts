@@ -527,7 +527,23 @@ async function runTests() {
     const assign1Id = assign1Json.assignment.id;
     assert.strictEqual(assign1Json.persistedFields.length, 12);
 
-    // Same trader links second child demo account to second mentor via invite join
+    // Student attempt to enable copyPendingOrders / unsupported risk fields via join must be rejected (400)
+    const blockedJoin2Res = await fetch(`${baseUrl}/api/v1/bridge/assignments/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
+      body: JSON.stringify({
+        inviteCodeOrMentorId: mentor2Id,
+        childAccountId: child2AccId,
+        lotSettings: {
+          mode: 'parent_lot',
+          copyPendingOrders: true,
+          riskPercent: 1.0,
+        },
+      }),
+    });
+    assert.strictEqual(blockedJoin2Res.status, 400);
+
+    // Same trader links second child demo account to second mentor via invite join with permitted student settings
     const join2Res = await fetch(`${baseUrl}/api/v1/bridge/assignments/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
@@ -536,28 +552,34 @@ async function runTests() {
         childAccountId: child2AccId,
         lotSettings: {
           mode: 'parent_lot',
-          customType: 'multiplier',
           multiplier: 1.0,
           fixedLot: 0.1,
-          riskPercent: 1.0,
-          maxLotCap: 10,
-          minLotClamp: 0.01,
-          maxDrawdownProtectionPercent: 25,
-          copyPendingOrders: true,
+          copyPendingOrders: false,
           syncSlTp: true,
-          slippageMaxPips: 25,
-          symbolPrefix: '',
-          symbolSuffix: '',
         },
       }),
     });
     assert.strictEqual(join2Res.status, 200);
     assert.strictEqual(state.mentor_assignments.filter((a) => a.status === 'active').length, 2);
 
-    // Update 12 controls on assign1
-    const updLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assign1Id}/lot-settings`, {
+    // Student attempt to disable syncSlTp or set symbolSuffix/riskPercent must be rejected (400)
+    const blockedTraderUpdRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assign1Id}/lot-settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
+      body: JSON.stringify({
+        mode: 'custom_lot',
+        customType: 'multiplier',
+        multiplier: 0.5,
+        syncSlTp: false,
+        symbolSuffix: '.pro',
+      }),
+    });
+    assert.strictEqual(blockedTraderUpdRes.status, 400);
+
+    // Admin updates all 12 controls on assign1
+    const updLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assign1Id}/lot-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-admin' },
       body: JSON.stringify({
         mode: 'custom_lot',
         customType: 'multiplier',

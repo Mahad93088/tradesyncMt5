@@ -521,9 +521,25 @@ async function runTests() {
     });
     assert.strictEqual(crossLotRes.status, 403, 'Other trader cannot mutate another trader assignment lot settings');
 
-    const validLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/lot-settings`, {
+    const restrictedTraderLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/lot-settings`, {
       method: 'POST',
       headers: { Authorization: 'Bearer jwt-trader', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ copyMode: 'equity_ratio', multiplier: 2.0, fixedLot: 0.25 }),
+    });
+    assert.strictEqual(restrictedTraderLotRes.status, 400, 'Student must not be able to select equity_ratio');
+
+    const validTraderLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/lot-settings`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer jwt-trader', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ copyMode: 'multiplier', multiplier: 1.5, fixedLot: 0.25 }),
+    });
+    assert.strictEqual(validTraderLotRes.status, 200);
+    const validTraderLotJson: any = await validTraderLotRes.json();
+    assert.strictEqual(validTraderLotJson.assignment.lot_mode, 'multiplier');
+
+    const validLotRes = await fetch(`${baseUrl}/api/v1/bridge/assignments/${assignId1}/lot-settings`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer jwt-admin', 'Content-Type': 'application/json' },
       body: JSON.stringify({ copyMode: 'equity_ratio', multiplier: 2.0, fixedLot: 0.25 }),
     });
     assert.strictEqual(validLotRes.status, 200);

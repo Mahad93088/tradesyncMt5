@@ -35,7 +35,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   onSuccess,
 }) => {
   const { isCloudMode } = useAuth();
-  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, followerAccounts, users, brokers, refreshCloudData } = useApp();
+  const { addAuditLog, currentUser, setMt5Accounts, mt5Accounts, users, brokers, refreshCloudData } = useApp();
 
   const isAdminCaller = currentUser.role === 'admin';
   const lockedRole: 'parent' | 'child' =
@@ -63,7 +63,7 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   const [verifiedTraders, setVerifiedTraders] = useState<Array<{ id: string; fullName: string; email: string }>>([]);
   const [selectedOwnerId, setSelectedOwnerId] = useState<string>(isAdminCaller ? '' : currentUser.id);
 
-  // Child linkage settings
+  // Child linkage settings (Parent Mentor Account & Lot Copy Mode are Admin-only)
   const [parentAccountId, setParentAccountId] = useState<string>('');
   const [copyMode, setCopyMode] = useState<'multiplier' | 'fixed' | 'parent_lot'>('multiplier');
   const [multiplier, setMultiplier] = useState<number>(1.0);
@@ -82,10 +82,10 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
   const [copiedToken, setCopiedToken] = useState<boolean>(false);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
 
-  // Filter available parent accounts for child link dropdown
-  const parentAccounts = (isAdminCaller ? mt5Accounts : followerAccounts).filter(
-    (a) => a.accountRole === 'parent'
-  );
+  // Filter available parent accounts for Admin child assignment dropdown only
+  const parentAccounts = isAdminCaller
+    ? mt5Accounts.filter((a) => a.accountRole === 'parent')
+    : [];
 
   const filteredBrokers = activeBrokers.filter((b) =>
     !brokerSearch.trim() ||
@@ -141,7 +141,8 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
 
     if (!isAdminCaller) {
       setSelectedOwnerId(currentUser.id);
-      setParentAccountId(parentAccounts[0]?.id || '');
+      setParentAccountId('');
+      setCopyMode('fixed');
       return;
     }
 
@@ -202,6 +203,14 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
       return;
     }
 
+    if (accountRole === 'child' && !isAdminCaller) {
+      const parsedFixed = Number(fixedLot);
+      if (!Number.isFinite(parsedFixed) || parsedFixed < 0.01 || parsedFixed > 100) {
+        setErrorMessage('Default lot size must be between 0.01 and 100 lots.');
+        return;
+      }
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -220,14 +229,21 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
         currency,
         leverage: Number(leverage) || 100,
         userId: effectiveOwnerId,
-        parentAccountId: accountRole === 'child' && parentAccountId ? parentAccountId : undefined,
+        parentAccountId: isAdminCaller && accountRole === 'child' && parentAccountId ? parentAccountId : undefined,
         lotSettings:
           accountRole === 'child'
-            ? {
-                copyMode,
-                multiplier: Number(multiplier) || 1.0,
-                fixedLot: Number(fixedLot) || 0.1,
-              }
+            ? isAdminCaller
+              ? {
+                  copyMode,
+                  multiplier: Number(multiplier) || 1.0,
+                  fixedLot: Number(fixedLot) || 0.1,
+                }
+              : {
+                  copyMode: 'fixed',
+                  fixedLot: Number(fixedLot) || 0.1,
+                  syncSlTp: true,
+                  copyPendingOrders: false,
+                }
             : undefined,
         isCloudMode,
         useSelfServiceEndpoint: isCloudMode && !isAdminCaller,
@@ -727,8 +743,8 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
               </div>
             </div>
 
-            {/* If Child Account: Parent Linkage Options (shown when Admin or parent accounts are already linked) */}
-            {accountRole === 'child' && (isAdminCaller || parentAccounts.length > 0) && (
+            {/* If Child Account: Admin sees Parent Mentor Account + Lot Copy Mode; Students see Lot Size only */}
+            {accountRole === 'child' && isAdminCaller && (
               <div className="rounded-xl border border-cyan-800/60 bg-cyan-950/20 p-3.5 space-y-3">
                 <div className="flex items-center gap-2 text-cyan-300 text-xs font-semibold">
                   <Link2 className="h-4 w-4 text-cyan-400" />
@@ -795,6 +811,26 @@ export const RegisterMT5AccountModal: React.FC<RegisterMT5AccountModalProps> = (
                     />
                   </div>
                 )}
+              </div>
+            )}
+
+            {accountRole === 'child' && !isAdminCaller && (
+              <div className="rounded-xl border border-cyan-800/50 bg-cyan-950/20 p-3.5 space-y-2">
+                <label className="text-xs font-semibold text-cyan-300 block">
+                  Default Copied Lot Size
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="100"
+                  value={fixedLot}
+                  onChange={(e) => setFixedLot(Number(e.target.value))}
+                  className="w-full rounded-lg border border-slate-750 bg-slate-900 px-2.5 py-1.5 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
+                />
+                <p className="text-[11px] text-slate-400">
+                  Use your mentor&apos;s invite code in the Mentor Link tab after connecting. Broker min/max/step volume limits are strictly enforced without silently increasing lot size.
+                </p>
               </div>
             )}
 

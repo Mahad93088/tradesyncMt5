@@ -86,7 +86,9 @@ export function buildCloudTrades(dbTradesRaw: any[], mappingsList: TradeMapping[
     const ticketVal =
       m.childTradeTicket && m.childTradeTicket !== '0' && m.childTradeTicket !== 0
         ? String(m.childTradeTicket)
-        : String(m.parentTradeTicket);
+        : m.parentTradeTicket != null
+        ? String(m.parentTradeTicket)
+        : `map-${String(m.id || '').slice(0, 8)}`;
     const key = `${m.childAccountId}:${ticketVal}`;
     if (existingKeys.has(key)) continue;
 
@@ -132,6 +134,7 @@ export function mapAssignmentsToLinks(
     const copiedCount = (mappingsList || []).filter((m) => {
       const accMatch =
         (parentAccId && childAccId && m.parentAccountId === parentAccId && m.childAccountId === childAccId) ||
+        (!parentAccId && childAccId && m.childAccountId === childAccId && (!m.mentorId || m.mentorId === a.mentor_id)) ||
         (m.mentorId === a.mentor_id && m.traderId === a.trader_id);
       return accMatch && (m.status === 'EXECUTED' || m.status === 'CLOSED');
     }).length;

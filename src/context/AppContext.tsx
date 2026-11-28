@@ -2063,26 +2063,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? 'risk_percent'
             : 'multiplier';
 
+        const studentPayload = {
+          copyMode:
+            copyMode === 'fixed' || copyMode === 'multiplier' || copyMode === 'parent_lot'
+              ? copyMode
+              : 'parent_lot',
+          multiplier: settings.multiplier,
+          fixedLot: settings.fixedLot,
+          syncSlTp: true,
+          copyPendingOrders: false,
+        };
+        const adminPayload = {
+          copyMode,
+          multiplier: settings.multiplier,
+          fixedLot: settings.fixedLot,
+          riskPercent: settings.riskPercent,
+          maxLotCap: settings.maxLotCap,
+          minLotClamp: settings.minLotClamp,
+          slippageMaxPips: settings.slippageMaxPips,
+          maxDrawdownProtectionPercent: settings.maxDrawdownProtectionPercent,
+          syncSlTp: settings.syncSlTp,
+          copyPendingOrders: settings.copyPendingOrders,
+          symbolPrefix: settings.symbolPrefix || '',
+          symbolSuffix: settings.symbolSuffix || '',
+        };
+
         const res = await fetch(`/api/v1/bridge/assignments/${encodeURIComponent(linkId)}/lot-settings`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({
-            copyMode,
-            multiplier: settings.multiplier,
-            fixedLot: settings.fixedLot,
-            riskPercent: settings.riskPercent,
-            maxLotCap: settings.maxLotCap,
-            minLotClamp: settings.minLotClamp,
-            slippageMaxPips: settings.slippageMaxPips,
-            maxDrawdownProtectionPercent: settings.maxDrawdownProtectionPercent,
-            syncSlTp: settings.syncSlTp,
-            copyPendingOrders: settings.copyPendingOrders,
-            symbolPrefix: settings.symbolPrefix || '',
-            symbolSuffix: settings.symbolSuffix || '',
-          }),
+          body: JSON.stringify(currentUser.role === 'admin' ? adminPayload : studentPayload),
         });
         const json = await res.json().catch(() => null);
         if (!res.ok || !json?.success) {
@@ -2274,6 +2286,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? 'risk_percent'
             : 'multiplier';
 
+        const joinLotPayload =
+          currentUser.role === 'admin'
+            ? {
+                copyMode,
+                multiplier: lotSettings.multiplier,
+                fixedLot: lotSettings.fixedLot,
+                riskPercent: lotSettings.riskPercent,
+                maxLotCap: lotSettings.maxLotCap,
+                minLotClamp: lotSettings.minLotClamp,
+                slippageMaxPips: lotSettings.slippageMaxPips,
+                maxDrawdownProtectionPercent: lotSettings.maxDrawdownProtectionPercent,
+                syncSlTp: lotSettings.syncSlTp,
+                copyPendingOrders: lotSettings.copyPendingOrders,
+                symbolPrefix: lotSettings.symbolPrefix || '',
+                symbolSuffix: lotSettings.symbolSuffix || '',
+              }
+            : {
+                copyMode:
+                  copyMode === 'fixed' || copyMode === 'multiplier' || copyMode === 'parent_lot'
+                    ? copyMode
+                    : 'parent_lot',
+                multiplier: lotSettings.multiplier,
+                fixedLot: lotSettings.fixedLot,
+                syncSlTp: true,
+                copyPendingOrders: false,
+              };
+
         const res = await fetch('/api/v1/bridge/assignments/join', {
           method: 'POST',
           headers: {
@@ -2283,20 +2322,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           body: JSON.stringify({
             inviteCodeOrMentorId: inviteCode.trim(),
             childAccountId: childAccountId || undefined,
-            lotSettings: {
-              copyMode,
-              multiplier: lotSettings.multiplier,
-              fixedLot: lotSettings.fixedLot,
-              riskPercent: lotSettings.riskPercent,
-              maxLotCap: lotSettings.maxLotCap,
-              minLotClamp: lotSettings.minLotClamp,
-              slippageMaxPips: lotSettings.slippageMaxPips,
-              maxDrawdownProtectionPercent: lotSettings.maxDrawdownProtectionPercent,
-              syncSlTp: lotSettings.syncSlTp,
-              copyPendingOrders: lotSettings.copyPendingOrders,
-              symbolPrefix: lotSettings.symbolPrefix || '',
-              symbolSuffix: lotSettings.symbolSuffix || '',
-            },
+            lotSettings: joinLotPayload,
           }),
         });
         const json = await res.json().catch(() => null);

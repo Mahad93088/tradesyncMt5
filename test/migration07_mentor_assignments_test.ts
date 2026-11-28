@@ -845,7 +845,7 @@ async function runTests() {
     });
     assert.strictEqual(dupRes.status, 409);
 
-    // Lot settings API: mentor rejected (403), trader accepted (200) for equity_ratio / risk_percent
+    // Lot settings API: mentor rejected (403), trader rejected for risk_percent (400) & accepted for fixed (200), admin accepted for risk_percent (200)
     const mentorLotAttempt = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/lot-settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-mentor' },
@@ -853,12 +853,27 @@ async function runTests() {
     });
     assert.strictEqual(mentorLotAttempt.status, 403);
 
-    const traderLotOk = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/lot-settings`, {
+    const traderRestrictedLot = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/lot-settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
       body: JSON.stringify({ copyMode: 'risk_percent', multiplier: 2.5, fixedLot: 0.2 }),
     });
+    assert.strictEqual(traderRestrictedLot.status, 400);
+
+    const traderLotOk = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/lot-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-trader' },
+      body: JSON.stringify({ copyMode: 'fixed', fixedLot: 0.2 }),
+    });
     assert.strictEqual(traderLotOk.status, 200);
+    assert.strictEqual(activeAssign.lot_mode, 'fixed');
+
+    const adminLotOk = await fetch(`${baseUrl}/api/v1/bridge/assignments/${activeAssign.id}/lot-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-admin' },
+      body: JSON.stringify({ copyMode: 'risk_percent', multiplier: 2.5, fixedLot: 0.2 }),
+    });
+    assert.strictEqual(adminLotOk.status, 200);
     assert.strictEqual(activeAssign.lot_mode, 'risk_percent');
 
     // Suspending trader via admin status API deactivates active assignment cleanly without trigger rejection

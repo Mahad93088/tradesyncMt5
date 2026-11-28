@@ -1532,10 +1532,73 @@ export function createApiApp(deps?: ApiAppDependencies) {
   // ==============================================================================
   const bridgeStore = BridgeStore.getInstance();
 
+  const isStudentCaller = (caller: { isVerifiedAdmin: boolean; profile?: { role?: string | null } | null }): boolean =>
+    !caller.isVerifiedAdmin && caller.profile?.role !== 'mentor';
+
+  const validateLotAgainstBrokerSpecs = (
+    lotValue: number,
+    verifiedSymbolSpecs?: Record<string, any> | null,
+    tradingSymbol?: string | null
+  ): { valid: boolean; code?: string; error?: string } => {
+    if (!verifiedSymbolSpecs || typeof verifiedSymbolSpecs !== 'object') {
+      return { valid: true };
+    }
+    const entries = Object.entries(verifiedSymbolSpecs);
+    if (entries.length === 0) return { valid: true };
+    const preferred = String(tradingSymbol || '').trim().toUpperCase();
+    const matched =
+      (preferred ? entries.find(([sym]) => sym.trim().toUpperCase() === preferred) : undefined) ||
+      entries.find(([sym]) => {
+        const up = sym.trim().toUpperCase();
+        return up.includes('XAU') || up.includes('GOLD');
+      }) ||
+      entries[0];
+
+    if (!matched) return { valid: true };
+    const [specSym, specRaw] = matched;
+    if (!specRaw || typeof specRaw !== 'object') return { valid: true };
+
+    const minLot = Number(specRaw.minLot ?? specRaw.volumeMin ?? specRaw.min_lot);
+    const maxLot = Number(specRaw.maxLot ?? specRaw.volumeMax ?? specRaw.max_lot);
+    const lotStep = Number(specRaw.lotStep ?? specRaw.volumeStep ?? specRaw.lot_step);
+
+    if (Number.isFinite(minLot) && minLot > 0 && lotValue < minLot - 1e-9) {
+      return {
+        valid: false,
+        code: 'BROKER_VOLUME_BELOW_MIN',
+        error: `Fixed lot ${lotValue} is below broker minimum (${minLot}) for ${specSym}. Volume will not be silently increased.`,
+      };
+    }
+    if (Number.isFinite(maxLot) && maxLot > 0 && lotValue > maxLot + 1e-9) {
+      return {
+        valid: false,
+        code: 'BROKER_VOLUME_ABOVE_MAX',
+        error: `Fixed lot ${lotValue} exceeds broker maximum (${maxLot}) for ${specSym}.`,
+      };
+    }
+    if (Number.isFinite(lotStep) && lotStep > 0) {
+      const base = Number.isFinite(minLot) && minLot > 0 ? minLot : 0;
+      const steps = (lotValue - base) / lotStep;
+      if (Math.abs(steps - Math.round(steps)) > 1e-4) {
+        return {
+          valid: false,
+          code: 'BROKER_VOLUME_STEP_MISMATCH',
+          error: `Fixed lot ${lotValue} does not align with broker volume step (${lotStep}) for ${specSym}.`,
+        };
+      }
+    }
+    return { valid: true };
+  };
+
   const parseAndValidateAssignmentLotFields = (
     rawLotSettings: any,
     existingRow?: Record<string, any> | null,
-    defaultCopyMode: string = 'parent_lot'
+    defaultCopyMode: string = 'parent_lot',
+    options?: {
+      enforceStudentRestrictions?: boolean;
+      verifiedSymbolSpecs?: Record<string, any> | null;
+      tradingSymbol?: string | null;
+    }
   ): {
     error?: string;
     code?: string;
@@ -1543,6 +1606,96 @@ export function createApiApp(deps?: ApiAppDependencies) {
     dbFields: Record<string, any>;
     lotSettings: ReturnType<typeof RiskEngine.normalizeLotSettingsFromRow>;
   } => {
+    const enforceStudent = Boolean(options?.enforceStudentRestrictions);
+    const fallbackSettings = RiskEngine.normalizeLotSettingsFromRow(existingRow);
+
+    if (enforceStudent && rawLotSettings !== undefined && rawLotSettings !== null) {
+      if (typeof rawLotSettings !== 'object' || Array.isArray(rawLotSettings)) {
+        return {
+          error: 'Invalid lotSettings payload: expected an object.',
+          code: 'INVALID_LOT_SETTINGS',
+          normalizedLotMode: 'parent_lot',
+          dbFields: {},
+          lotSettings: fallbackSettings,
+        };
+      }
+
+      if (rawLotSettings.copyPendingOrders !== undefined && rawLotSettings.copyPendingOrders !== false) {
+        return {
+          error: 'Students cannot enable pending-order copying (copyPendingOrders must be false).',
+          code: 'STUDENT_PENDING_ORDERS_FORBIDDEN',
+          normalizedLotMode: 'parent_lot',
+          dbFields: {},
+          lotSettings: fallbackSettings,
+        };
+      }
+
+      if (rawLotSettings.syncSlTp !== undefined && rawLotSettings.syncSlTp !== true) {
+        return {
+          error: 'SL/TP synchronization is mandatory for student accounts (syncSlTp cannot be false).',
+          code: 'STUDENT_SL_TP_SYNC_REQUIRED',
+          normalizedLotMode: 'parent_lot',
+          dbFields: {},
+          lotSettings: fallbackSettings,
+        };
+      }
+
+      if (
+        (rawLotSettings.symbolPrefix !== undefined &&
+          rawLotSettings.symbolPrefix !== null &&
+          String(rawLotSettings.symbolPrefix).trim() !== '') ||
+        (rawLotSettings.symbolSuffix !== undefined &&
+          rawLotSettings.symbolSuffix !== null &&
+          String(rawLotSettings.symbolSuffix).trim() !== '')
+      ) {
+        return {
+          error: 'Students cannot configure symbolPrefix or symbolSuffix overrides.',
+          code: 'STUDENT_SYMBOL_AFFIX_FORBIDDEN',
+          normalizedLotMode: 'parent_lot',
+          dbFields: {},
+          lotSettings: fallbackSettings,
+        };
+      }
+
+      const allowedStudentKeys = new Set([
+        'copyMode',
+        'lotMode',
+        'mode',
+        'customType',
+        'multiplier',
+        'fixedLot',
+        'copyPendingOrders',
+        'syncSlTp',
+        'symbolPrefix',
+        'symbolSuffix',
+      ]);
+      const rejectedKeys = Object.keys(rawLotSettings).filter(
+        (k) => rawLotSettings[k] !== undefined && !allowedStudentKeys.has(k)
+      );
+      if (rejectedKeys.length > 0) {
+        return {
+          error: `Students may only select lot size (parent_lot, multiplier, or fixed). Unsupported field(s) rejected: ${rejectedKeys.join(', ')}.`,
+          code: 'UNSUPPORTED_STUDENT_LOT_FIELD',
+          normalizedLotMode: 'parent_lot',
+          dbFields: {},
+          lotSettings: fallbackSettings,
+        };
+      }
+
+      if (rawLotSettings.customType !== undefined && rawLotSettings.customType !== null) {
+        const cleanCustom = String(rawLotSettings.customType).trim().toLowerCase();
+        if (!['fixed', 'fixed_lot', 'multiplier'].includes(cleanCustom)) {
+          return {
+            error: `Students may only select parent_lot, multiplier, or fixed lot sizing. Unsupported customType "${cleanCustom}".`,
+            code: 'STUDENT_LOT_MODE_RESTRICTED',
+            normalizedLotMode: 'parent_lot',
+            dbFields: {},
+            lotSettings: fallbackSettings,
+          };
+        }
+      }
+    }
+
     const rawCopyMode = String(
       rawLotSettings?.copyMode ??
         rawLotSettings?.lotMode ??
@@ -1583,41 +1736,75 @@ export function createApiApp(deps?: ApiAppDependencies) {
         code: 'INVALID_LOT_MODE',
         normalizedLotMode: 'parent_lot',
         dbFields: {},
-        lotSettings: RiskEngine.normalizeLotSettingsFromRow(existingRow),
+        lotSettings: fallbackSettings,
+      };
+    }
+
+    if (enforceStudent && !['parent_lot', 'fixed', 'multiplier'].includes(normalizedLotMode)) {
+      return {
+        error: `Students may only select parent_lot, multiplier, or fixed lot sizing modes (requested "${normalizedLotMode}").`,
+        code: 'STUDENT_LOT_MODE_RESTRICTED',
+        normalizedLotMode: 'parent_lot',
+        dbFields: {},
+        lotSettings: fallbackSettings,
       };
     }
 
     const numVal = (v: unknown, fallback: number) => (v !== undefined && v !== null && v !== '' ? Number(v) : fallback);
     const mult = numVal(rawLotSettings?.multiplier, existingRow?.lot_multiplier != null ? Number(existingRow.lot_multiplier) : 1.0);
     const fixed = numVal(rawLotSettings?.fixedLot, existingRow?.fixed_lot != null ? Number(existingRow.fixed_lot) : 0.1);
-    const riskPct = numVal(rawLotSettings?.riskPercent, existingRow?.risk_percent != null ? Number(existingRow.risk_percent) : 1.0);
-    const maxCap = numVal(rawLotSettings?.maxLotCap, existingRow?.max_lot_cap != null ? Number(existingRow.max_lot_cap) : 50.0);
-    const minClamp = numVal(rawLotSettings?.minLotClamp, existingRow?.min_lot_clamp != null ? Number(existingRow.min_lot_clamp) : 0.01);
-    const slippage = numVal(rawLotSettings?.slippageMaxPips, existingRow?.slippage_max_pips != null ? Number(existingRow.slippage_max_pips) : 3.0);
-    const maxDd = numVal(
-      rawLotSettings?.maxDrawdownProtectionPercent ?? rawLotSettings?.maxDrawdownPercent,
-      existingRow?.max_drawdown_percent != null ? Number(existingRow.max_drawdown_percent) : 20.0
-    );
-    const syncSlTp =
-      typeof rawLotSettings?.syncSlTp === 'boolean'
-        ? rawLotSettings.syncSlTp
-        : typeof existingRow?.sync_sl_tp === 'boolean'
-        ? existingRow.sync_sl_tp
-        : true;
-    const copyPendingOrders =
-      typeof rawLotSettings?.copyPendingOrders === 'boolean'
-        ? rawLotSettings.copyPendingOrders
-        : typeof existingRow?.copy_pending_orders === 'boolean'
-        ? existingRow.copy_pending_orders
-        : false;
-    const symbolPrefix =
-      rawLotSettings?.symbolPrefix !== undefined
-        ? String(rawLotSettings.symbolPrefix ?? '').trim()
-        : String(existingRow?.symbol_prefix ?? '');
-    const symbolSuffix =
-      rawLotSettings?.symbolSuffix !== undefined
-        ? String(rawLotSettings.symbolSuffix ?? '').trim()
-        : String(existingRow?.symbol_suffix ?? '');
+    const riskPct = enforceStudent
+      ? existingRow?.risk_percent != null
+        ? Number(existingRow.risk_percent)
+        : 1.0
+      : numVal(rawLotSettings?.riskPercent, existingRow?.risk_percent != null ? Number(existingRow.risk_percent) : 1.0);
+    const maxCap = enforceStudent
+      ? existingRow?.max_lot_cap != null
+        ? Number(existingRow.max_lot_cap)
+        : 50.0
+      : numVal(rawLotSettings?.maxLotCap, existingRow?.max_lot_cap != null ? Number(existingRow.max_lot_cap) : 50.0);
+    const minClamp = enforceStudent
+      ? existingRow?.min_lot_clamp != null
+        ? Number(existingRow.min_lot_clamp)
+        : 0.01
+      : numVal(rawLotSettings?.minLotClamp, existingRow?.min_lot_clamp != null ? Number(existingRow.min_lot_clamp) : 0.01);
+    const slippage = enforceStudent
+      ? existingRow?.slippage_max_pips != null
+        ? Number(existingRow.slippage_max_pips)
+        : 3.0
+      : numVal(rawLotSettings?.slippageMaxPips, existingRow?.slippage_max_pips != null ? Number(existingRow.slippage_max_pips) : 3.0);
+    const maxDd = enforceStudent
+      ? existingRow?.max_drawdown_percent != null
+        ? Number(existingRow.max_drawdown_percent)
+        : 20.0
+      : numVal(
+          rawLotSettings?.maxDrawdownProtectionPercent ?? rawLotSettings?.maxDrawdownPercent,
+          existingRow?.max_drawdown_percent != null ? Number(existingRow.max_drawdown_percent) : 20.0
+        );
+    const syncSlTp = enforceStudent
+      ? true
+      : typeof rawLotSettings?.syncSlTp === 'boolean'
+      ? rawLotSettings.syncSlTp
+      : typeof existingRow?.sync_sl_tp === 'boolean'
+      ? existingRow.sync_sl_tp
+      : true;
+    const copyPendingOrders = enforceStudent
+      ? false
+      : typeof rawLotSettings?.copyPendingOrders === 'boolean'
+      ? rawLotSettings.copyPendingOrders
+      : typeof existingRow?.copy_pending_orders === 'boolean'
+      ? existingRow.copy_pending_orders
+      : false;
+    const symbolPrefix = enforceStudent
+      ? ''
+      : rawLotSettings?.symbolPrefix !== undefined
+      ? String(rawLotSettings.symbolPrefix ?? '').trim()
+      : String(existingRow?.symbol_prefix ?? '');
+    const symbolSuffix = enforceStudent
+      ? ''
+      : rawLotSettings?.symbolSuffix !== undefined
+      ? String(rawLotSettings.symbolSuffix ?? '').trim()
+      : String(existingRow?.symbol_suffix ?? '');
 
     const candidateLotSettings = {
       mode: uiMode,
@@ -1663,6 +1850,23 @@ export function createApiApp(deps?: ApiAppDependencies) {
         dbFields: {},
         lotSettings: candidateLotSettings,
       };
+    }
+
+    if (normalizedLotMode === 'fixed') {
+      const brokerSpecCheck = validateLotAgainstBrokerSpecs(
+        fixed,
+        options?.verifiedSymbolSpecs,
+        options?.tradingSymbol
+      );
+      if (!brokerSpecCheck.valid) {
+        return {
+          error: brokerSpecCheck.error || 'Fixed lot violates broker volume limits.',
+          code: brokerSpecCheck.code || 'BROKER_VOLUME_INVALID',
+          normalizedLotMode,
+          dbFields: {},
+          lotSettings: candidateLotSettings,
+        };
+      }
     }
 
     const dbFields = {
@@ -3014,7 +3218,15 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const cleanBrokerServer = String(brokerServer).trim();
       const cleanBrokerName = String(brokerName || 'XM').trim();
 
-      const parsedLotConfig = parseAndValidateAssignmentLotFields(role === 'child' ? lotSettings : undefined, null, 'parent_lot');
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(
+        role === 'child' ? lotSettings : undefined,
+        null,
+        'parent_lot',
+        {
+          enforceStudentRestrictions: isStudentCaller(caller),
+          tradingSymbol: tradingSymbol ? String(tradingSymbol).trim() : undefined,
+        }
+      );
       if (role === 'child' && parsedLotConfig.error) {
         return res.status(400).json({
           success: false,
@@ -3410,9 +3622,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const dbClient = requireServiceRoleClient(res);
       if (!dbClient) return;
 
+      const studentCaller = isStudentCaller(caller);
       const coreAccountColumns =
         'id, user_id, account_number, broker_server, broker_name, account_role, account_type, balance, equity, margin, free_margin, currency, leverage, connection_status, ping_ms, is_investor_password, auto_trading_enabled, last_sync, error_message, created_at, terminal_token_prefix, terminal_token_created_at';
-      const extendedAccountColumns = `${coreAccountColumns}, broker_id, trading_symbol, symbol_verified`;
+      const extendedAccountColumns = `${coreAccountColumns}, broker_id, trading_symbol, symbol_verified, verified_balance, verified_equity, balance_verified_at, verified_symbol_specs`;
 
       let [accRes, asMentorRes, asTraderRes]: [any, any, any] = await Promise.all([
         dbClient
@@ -3420,11 +3633,13 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .select(extendedAccountColumns)
           .eq('user_id', caller.user.id)
           .order('created_at', { ascending: false }),
-        dbClient
-          .from('mentor_assignments')
-          .select('*')
-          .eq('mentor_id', caller.user.id)
-          .in('status', ['active', 'paused', 'suspended', 'inactive']),
+        studentCaller
+          ? Promise.resolve({ data: [], error: null } as any)
+          : dbClient
+              .from('mentor_assignments')
+              .select('*')
+              .eq('mentor_id', caller.user.id)
+              .in('status', ['active', 'paused', 'suspended', 'inactive']),
         dbClient
           .from('mentor_assignments')
           .select('*')
@@ -3432,7 +3647,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .in('status', ['active', 'paused', 'suspended', 'inactive']),
       ]);
 
-      if (accRes.error && isMissingRelationError(accRes.error)) {
+      if (accRes.error && (isMissingRelationError(accRes.error) || isMissingRiskColumnError(accRes.error))) {
         accRes = await dbClient
           .from('mt5_accounts')
           .select(coreAccountColumns)
@@ -3448,7 +3663,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       for (const row of [...(asMentorRes.data || []), ...(asTraderRes.data || [])]) {
         assignmentsMap.set(row.id, row);
       }
-      const assignments = Array.from(assignmentsMap.values());
+      const rawAssignments = Array.from(assignmentsMap.values());
 
       // Load peer profile names strictly for users linked in the caller's own assignments
       const peerIds = new Set<string>([caller.user.id]);
@@ -3456,18 +3671,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const linkedParentIds = new Set<string>();
       const parentByChildMap = new Map<string, string>();
 
-      for (const a of assignments) {
+      for (const a of rawAssignments) {
         if (a.mentor_id) peerIds.add(a.mentor_id);
         if (a.trader_id) peerIds.add(a.trader_id);
-        if (a.child_account_id && a.parent_account_id) {
+        if (!studentCaller && a.child_account_id && a.parent_account_id) {
           if (a.status === 'active' || !parentByChildMap.has(a.child_account_id)) {
             parentByChildMap.set(a.child_account_id, a.parent_account_id);
           }
         }
-        if (a.mentor_id === caller.user.id && a.child_account_id) {
+        if (!studentCaller && a.mentor_id === caller.user.id && a.child_account_id) {
           linkedChildIds.add(a.child_account_id);
         }
-        if (a.trader_id === caller.user.id && a.parent_account_id) {
+        if (!studentCaller && a.trader_id === caller.user.id && a.parent_account_id) {
           linkedParentIds.add(a.parent_account_id);
         }
       }
@@ -3508,7 +3723,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
           } = rest;
           return {
             ...peerSafe,
-            ...(acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
+            ...(!studentCaller && acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
             connection_status: eff.effectiveStatus,
             is_stale: eff.isStale,
             error_message: eff.errorMessage || null,
@@ -3516,7 +3731,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         }
         return {
           ...rest,
-          ...(acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
+          ...(!studentCaller && acc.account_role === 'child' ? { assigned_parent_id: derivedParentId } : {}),
           connection_status: eff.effectiveStatus,
           is_stale: eff.isStale,
           error_message: eff.errorMessage || null,
@@ -3524,16 +3739,30 @@ export function createApiApp(deps?: ApiAppDependencies) {
       };
 
       const enrichedAccounts = (accRes.data || []).map((a: any) => enrichAccount(a, false));
-      const linkedAccounts = [
-        ...((childAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
-        ...((parentAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
-      ];
+      const linkedAccounts = studentCaller
+        ? []
+        : [
+            ...((childAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
+            ...((parentAccRes?.data || []).map((a: any) => enrichAccount(a, true))),
+          ];
+
+      const assignments = studentCaller
+        ? rawAssignments.map(({ parent_account_id: _dropParentAcc, suspended_by: _dropSuspendedBy, ...safeAssign }: any) => safeAssign)
+        : rawAssignments;
+
+      const profiles = studentCaller
+        ? (peerProfilesRes?.data || []).map((p: any) => {
+            if (p.id === caller.user.id) return p;
+            const { email: _dropEmail, ...safePeer } = p;
+            return safePeer;
+          })
+        : peerProfilesRes?.data || [];
 
       // Load owned + mentor-scoped trades safely without leaking unrelated accounts
       const ownedAndChildIds = Array.from(
         new Set<string>([
           ...enrichedAccounts.map((a: any) => a.id),
-          ...((childAccRes?.data || []).map((c: any) => c.id)),
+          ...(studentCaller ? [] : (childAccRes?.data || []).map((c: any) => c.id)),
         ])
       );
 
@@ -3545,7 +3774,9 @@ export function createApiApp(deps?: ApiAppDependencies) {
           .in('account_id', ownedAndChildIds)
           .order('open_time', { ascending: false })
           .limit(200);
-        scopedTrades = tradesData || [];
+        scopedTrades = studentCaller
+          ? (tradesData || []).map(({ parent_ticket: _dropPt, parentTicket: _dropPt2, ...safeTrade }: any) => safeTrade)
+          : tradesData || [];
       }
 
       return res.status(200).json({
@@ -3554,7 +3785,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
         accounts: enrichedAccounts,
         linkedAccounts,
         assignments,
-        profiles: peerProfilesRes?.data || [],
+        profiles,
         trades: scopedTrades,
       });
     } catch (err: any) {
@@ -5011,6 +5242,29 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       const ownedIds = new Set((ownedAccounts || []).map((a: any) => a.id));
+      const studentCaller = isStudentCaller(caller);
+
+      if (studentCaller) {
+        const studentMappings = mappings
+          .filter((m) => Boolean(m.childAccountId && ownedIds.has(m.childAccountId)))
+          .map(
+            ({
+              parentTradeTicket: _dropParentTicket,
+              parentLots: _dropParentLots,
+              parentProfitUSD: _dropParentProfit,
+              parentAccountId: _dropParentAccId,
+              ...rest
+            }: any) => {
+              delete rest.parent_ticket;
+              delete rest.parent_lots;
+              delete rest.parent_profit_usd;
+              delete rest.parent_account_id;
+              return rest;
+            }
+          );
+        return res.status(200).json({ success: true, mappings: studentMappings });
+      }
+
       const scopedMappings = mappings.filter(
         (m) => (m.parentAccountId && ownedIds.has(m.parentAccountId)) || (m.childAccountId && ownedIds.has(m.childAccountId))
       );
@@ -5142,9 +5396,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
         return res.status(200).json({ success: true, trades: data || [] });
       }
 
+      const studentCaller = isStudentCaller(caller);
       const [ownedRes, mentorAssignRes] = await Promise.all([
         dbClient.from('mt5_accounts').select('id').eq('user_id', caller.user.id),
-        caller.profile?.role === 'mentor'
+        !studentCaller && caller.profile?.role === 'mentor'
           ? dbClient
               .from('mentor_assignments')
               .select('child_account_id')
@@ -5156,7 +5411,7 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const scopedAccountIds = Array.from(
         new Set<string>([
           ...((ownedRes.data || []).map((a: any) => a.id)),
-          ...((mentorAssignRes.data || []).map((a: any) => a.child_account_id).filter(Boolean)),
+          ...(studentCaller ? [] : (mentorAssignRes.data || []).map((a: any) => a.child_account_id).filter(Boolean)),
         ])
       );
 
@@ -5172,7 +5427,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
         .limit(200);
 
       if (error) return res.status(500).json({ success: false, error: error.message });
-      return res.status(200).json({ success: true, trades: data || [] });
+      const tradesOut = studentCaller
+        ? (data || []).map(({ parent_ticket: _dropPt, parentTicket: _dropPt2, ...safeTrade }: any) => safeTrade)
+        : data || [];
+      return res.status(200).json({ success: true, trades: tradesOut });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || 'Failed to load trades' });
     }
@@ -5190,13 +5448,16 @@ export function createApiApp(deps?: ApiAppDependencies) {
     if (!dbClient) return;
 
     try {
+      const studentCaller = isStudentCaller(caller);
       const [mentorsRes, parentAccsRes, activeAssignRes] = await Promise.all([
         dbClient.from('profiles').select('id, full_name, role, status, avatar_url').eq('role', 'mentor').eq('status', 'active'),
         dbClient
           .from('mt5_accounts')
           .select('id, user_id, account_number, broker_name, broker_server, account_type, connection_status, last_sync, error_message, ping_ms')
           .eq('account_role', 'parent'),
-        dbClient.from('mentor_assignments').select('id, mentor_id').eq('status', 'active'),
+        studentCaller
+          ? Promise.resolve({ data: [], error: null } as any)
+          : dbClient.from('mentor_assignments').select('id, mentor_id').eq('status', 'active'),
       ]);
 
       if (mentorsRes.error) return res.status(500).json({ success: false, error: mentorsRes.error.message });
@@ -5208,8 +5469,10 @@ export function createApiApp(deps?: ApiAppDependencies) {
       }
 
       const followerCountByMentor = new Map<string, number>();
-      for (const a of activeAssignRes.data || []) {
-        followerCountByMentor.set(a.mentor_id, (followerCountByMentor.get(a.mentor_id) || 0) + 1);
+      if (!studentCaller) {
+        for (const a of activeAssignRes.data || []) {
+          followerCountByMentor.set(a.mentor_id, (followerCountByMentor.get(a.mentor_id) || 0) + 1);
+        }
       }
 
       const directory = (mentorsRes.data || []).map((m: any) => {
@@ -5217,6 +5480,18 @@ export function createApiApp(deps?: ApiAppDependencies) {
         const eff = parent
           ? computeEffectiveConnectionStatus(parent.connection_status, parent.last_sync, parent.error_message, nowMs)
           : null;
+        if (studentCaller) {
+          return {
+            id: m.id,
+            fullName: m.full_name || 'Verified Mentor',
+            avatarUrl: m.avatar_url || null,
+            inviteCode: `TS-${String(m.id).slice(0, 8).toUpperCase()}`,
+            accountType: parent?.account_type || null,
+            connectionStatus: eff ? eff.effectiveStatus : 'disconnected',
+            isStale: eff ? eff.isStale : false,
+            lastSync: parent?.last_sync || null,
+          };
+        }
         return {
           id: m.id,
           fullName: m.full_name || 'Verified Mentor',
@@ -5361,28 +5636,48 @@ export function createApiApp(deps?: ApiAppDependencies) {
       const parentAcc = parentAccs[0];
 
       let resolvedChildId: string | null = null;
+      let resolvedChildAcc: any = null;
       if (childAccountId && String(childAccountId).trim()) {
         if (!isValidUUID(childAccountId)) {
           return res.status(400).json({ success: false, error: 'Invalid childAccountId UUID.' });
         }
-        const { data: childAcc, error: cErr } = await dbClient
+        let { data: childAcc, error: cErr } = await dbClient
           .from('mt5_accounts')
-          .select('id, user_id, account_role')
+          .select('id, user_id, account_role, trading_symbol, verified_symbol_specs')
           .eq('id', String(childAccountId).trim())
           .maybeSingle();
+        if (cErr && (isMissingRelationError(cErr) || isMissingRiskColumnError(cErr))) {
+          const fallbackChild = await dbClient
+            .from('mt5_accounts')
+            .select('id, user_id, account_role')
+            .eq('id', String(childAccountId).trim())
+            .maybeSingle();
+          childAcc = fallbackChild.data as any;
+          cErr = fallbackChild.error;
+        }
         if (cErr) return res.status(500).json({ success: false, error: cErr.message });
         if (!childAcc || childAcc.user_id !== targetTraderId || childAcc.account_role !== 'child') {
           return res.status(403).json({ success: false, error: 'Child account not found or does not belong to target trader.' });
         }
         resolvedChildId = childAcc.id;
+        resolvedChildAcc = childAcc;
       } else {
-        const { data: ownChildren } = await dbClient
+        let ownChildrenRes: any = await dbClient
           .from('mt5_accounts')
-          .select('id')
+          .select('id, trading_symbol, verified_symbol_specs')
           .eq('user_id', targetTraderId)
           .eq('account_role', 'child')
           .limit(1);
-        resolvedChildId = ownChildren?.[0]?.id || null;
+        if (ownChildrenRes.error && (isMissingRelationError(ownChildrenRes.error) || isMissingRiskColumnError(ownChildrenRes.error))) {
+          ownChildrenRes = await dbClient
+            .from('mt5_accounts')
+            .select('id')
+            .eq('user_id', targetTraderId)
+            .eq('account_role', 'child')
+            .limit(1);
+        }
+        resolvedChildAcc = ownChildrenRes.data?.[0] || null;
+        resolvedChildId = resolvedChildAcc?.id || null;
       }
 
       if (!resolvedChildId) {
@@ -5393,7 +5688,11 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const parsedLotConfig = parseAndValidateAssignmentLotFields(lotSettings, null, 'parent_lot');
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(lotSettings, null, 'parent_lot', {
+        enforceStudentRestrictions: isStudentCaller(caller),
+        verifiedSymbolSpecs: resolvedChildAcc?.verified_symbol_specs,
+        tradingSymbol: resolvedChildAcc?.trading_symbol,
+      });
       if (parsedLotConfig.error) {
         return res.status(400).json({
           success: false,
@@ -5822,7 +6121,24 @@ export function createApiApp(deps?: ApiAppDependencies) {
         });
       }
 
-      const parsedLotConfig = parseAndValidateAssignmentLotFields(req.body, existing, 'parent_lot');
+      let childSpecAcc: any = null;
+      if (existing.child_account_id) {
+        let childSpecRes: any = await dbClient
+          .from('mt5_accounts')
+          .select('id, trading_symbol, verified_symbol_specs')
+          .eq('id', existing.child_account_id)
+          .maybeSingle();
+        if (childSpecRes.error && (isMissingRelationError(childSpecRes.error) || isMissingRiskColumnError(childSpecRes.error))) {
+          childSpecRes = { data: null, error: null };
+        }
+        childSpecAcc = childSpecRes.data || null;
+      }
+
+      const parsedLotConfig = parseAndValidateAssignmentLotFields(req.body, existing, 'parent_lot', {
+        enforceStudentRestrictions: isStudentCaller(caller),
+        verifiedSymbolSpecs: childSpecAcc?.verified_symbol_specs,
+        tradingSymbol: childSpecAcc?.trading_symbol,
+      });
       if (parsedLotConfig.error) {
         await writeAuditLog(dbClient, {
           actorId: caller.user.id,

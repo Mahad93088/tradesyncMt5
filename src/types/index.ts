@@ -259,15 +259,15 @@ export interface MentorDirectoryEntry {
   fullName: string;
   avatarUrl?: string | null;
   inviteCode: string;
-  parentAccountId: string | null;
-  parentAccountNumber: string | null;
-  brokerName: string | null;
-  brokerServer: string | null;
+  parentAccountId?: string | null;
+  parentAccountNumber?: string | null;
+  brokerName?: string | null;
+  brokerServer?: string | null;
   accountType: string | null;
   connectionStatus: ConnectionStatus;
   isStale: boolean;
   lastSync: string | null;
-  activeFollowersCount: number;
+  activeFollowersCount?: number;
 }
 
 export type OrderType = 'BUY' | 'SELL' | 'BUY_LIMIT' | 'SELL_LIMIT' | 'BUY_STOP' | 'SELL_STOP';
